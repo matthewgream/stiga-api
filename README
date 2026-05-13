@@ -7,12 +7,13 @@ succeeds, you can progress. If this does not succeed, send me any diagnostics an
 
 "tools/stiga-monitor.js" -- to see a curses based "monitor" of the mower, and for diagnostics this can 
 "capture" status information to a local database. You may need to collect data over a number of weeks, so use
-the background option to leave it running, and the connect option to connect to and that background instance.
+the background option to leave it running, and the connect option to connect to that background instance.
 There is also a systemd service file ("tools/stiga-monitor.service") if you'd prefer to have it automatically
 run in the background ("make service_install" / "make service_watch" / "make service_restart").
 
 "tools/stiga-analyser.js" -- to read the capture database and generate information on battery-charge, 
 battery-consumption, garden-completion and position-heatmaps (to show mobile and GPS signal strengths). 
+See the example results in the "assets" directory.
 
 "tools/stiga-position-viewer.js" -- to read the capture database and run a local webserver (port 3000 
 by default) to view the positions overlaid on Google Maps.
