@@ -20,7 +20,7 @@ export:
 		--tail 10000
 
 display:
-	echo tools/stiga-position-viewer.js \
+	tools/stiga-position-viewer.js \
 		data/capture.db \
 		--lat 59.661918668015225 --lon 12.996299751022182 \
 		--apikey `cat ./.apikey` --port 4000
