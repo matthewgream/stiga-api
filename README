@@ -1,5 +1,45 @@
 
-UPDATE: 8 JULY 2025
+*** USAGE (13 MAY 2026) *** 
+
+To use this repo, you should clone it locally, follow the instructions below to configure authentication, and
+then smoke test with "tools/stiga-command.js --both version" and "tools/stiga-command.js --both status". If this
+succeeds, you can progress. If this does not succeed, send me any diagnostics and we can work on resolving them.
+
+"tools/stiga-monitor.js" -- to see a curses based "monitor" of the mower, and for diagnostics this can 
+"capture" status information to a local database. You may need to collect data over a number of weeks, so use
+the background option to leave it running, and the connect option to connect to and that background instance.
+There is also a systemd service file ("tools/stiga-monitor.service") if you'd prefer to have it automatically
+run in the background ("make service_install" / "make service_watch" / "make service_restart").
+
+"tools/stiga-analyser.js" -- to read the capture database and generate information on battery-charge, 
+battery-consumption, garden-completion and position-heatmaps (to show mobile and GPS signal strengths). 
+
+"tools/stiga-position-viewer.js" -- to read the capture database and run a local webserver (port 3000 
+by default) to view the positions overlaid on Google Maps.
+
+"tools/stiga-exporter.js" -- to read the capture database and translate it into CSV or Google Sheets format
+for analysis and diagnostics.
+
+"tools/stiga-command.js" -- to directly interact with the reference station and mower. The command set here
+is currently limited and will be expanded.
+
+"tools/stiga-tools.bash" -- to load autocomplete information into bash for use with the tools.
+
+"api" is where the JS based API lives.
+
+The remaining directories are more for development: "assets" with various text and images (e.g. output of the
+analyser), "reverse" with reverse engineering tools (Android APK deconstruction and interception), and "tests"
+to exercise the API.
+
+The "Makefile" has simple targets for "export", "display" and "monitor"; plus the systemd service targets; and
+the development prettier and lint targets.
+
+Note on the reverse engineering: the tools deconstruct the Android APK for the Cloud/MQTT certificates, and
+modify the APK to proxy through the running monitor in "intercept" mode, so that all communication both ways
+between the Stiga Cloud/MQTT and the Stiga App can be intercepted, logged and analysed. 
+
+
+*** UPDATE (8 JULY 2025) ***
 
 This is an API for the Stiga A series Robot Mowers, as developed and tested with a Stiga A1500.
 The API is entirely reverse engineered and therefore not officially provided nor supported by Stiga.
@@ -10,7 +50,7 @@ The API operates on Linux based systems with NodeJS and some third-party (NPM in
 With minimal changes, it would likely work on any system supported by NodeJS and the third-party modules.
 
 
-ARCHITECTURE
+*** ARCHITECTURE *** 
 
 The Robot Mowers have a Cloud infrastructure with a HTTP interface accessed with an OAuth token generated 
 using your Stiga username/password.
@@ -31,7 +71,8 @@ Primarily, the direct MQTT access enables (1) requesting/receiving version, stat
 The Robot also communicates directly with the Cloud for synchronisation of the Garden perimeters and 
 details.
 
-CURRENT STATUS
+
+*** CURRENT STATUS *** 
 
 The functionality for direct access to the Robot and Base is pretty substantial. 
 
@@ -61,7 +102,7 @@ Thus far, all of this reverse engineering has occurred without physical access t
 our summer house), and substantially more development will occur by the latter part  of 2025.
 
 
-AUTHENTICATION
+*** AUTHENTICATION *** 
 
 Currently, you need to create a "stiga_user_and_pass.js" in the main directory with the following contents. 
 This is not an elegant solution and will be improved. In addition, some of the tools require credentials 
@@ -74,7 +115,7 @@ This is not an elegant solution and will be improved. In addition, some of the t
 >>}
 
 
-COMPONENTS
+*** COMPONENTS *** 
 
 The API is accessed through by requiring "api/StigAPI": there should be sufficient details in the tools 
 and tests to illustrate how this works.
@@ -89,7 +130,8 @@ and tests to illustrate how this works.
     StigaAPIUser.js, StigaAPINotifications.js, StigaAPIGarage.js, StigaAPIPerimeters.js
     StigaAPIComponent.js, StigaAPIFramework.js
 
-DIRECTORIES
+
+*** DIRECTORIES *** 
 
 The assets directory stores generated assets from the tools (images, text, etc).
 
