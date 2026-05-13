@@ -57,7 +57,7 @@ async function main() {
         dbPath = args[dbArgIndex].split('=')[1];
         args.splice(dbArgIndex, 1);
     }
-    if (args.length < 1) {
+    if (args.length === 0) {
         console.error('Error: No command specified');
         displayHelp();
         process.exit(1);

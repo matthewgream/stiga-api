@@ -9,7 +9,10 @@ prettier:
 	prettier --write $(API) $(TESTS) $(TOOLS)
 lint:
 	eslint --no-ignore $(API) $(TESTS) $(TOOLS)
-.PHONY: prettier lint
+
+checks: prettier lint
+
+.PHONY: prettier lint checks
 
 ##
 
