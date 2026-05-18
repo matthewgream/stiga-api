@@ -23,7 +23,8 @@ class MonitorProcessor {
     constructor(connectionManager, displayManager, options = {}) {
         this.connection = connectionManager;
         this.display = displayManager;
-        this.location = options.location || { latitude: 59.661923, longitude: 12.996271 };
+        this.location = options.location;
+        if (!this.location) throw new Error('MonitorProcessor: options.location is required (RTK reference origin)');
 
         this.timers = [];
         this.ackFlags = {};

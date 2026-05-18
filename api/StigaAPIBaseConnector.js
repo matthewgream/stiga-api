@@ -42,12 +42,7 @@ class StigaAPIBaseConnector extends StigaAPIComponent {
         this.lastStatusRequest = new Map();
         this.lastResponseTime = new Map();
         this.pendingRateLimits = new Map();
-        // Default position for RTK calculations (should come from base data)
-        // not 100% sure this is right/needed yet
-        this.position = {
-            latitude: 59.661923,
-            longitude: 12.996271,
-        };
+        if (options.referencePosition) this.base.setReferencePosition(options.referencePosition);
         this.base.installConnector('mqtt', this);
     }
 
@@ -167,7 +162,7 @@ class StigaAPIBaseConnector extends StigaAPIComponent {
         this._commandResponseResolve('version', version);
     }
     _handleStatus(decoded) {
-        const status = decodeBaseMessageStatus(decoded);
+        const status = decodeBaseMessageStatus(decoded, this.base.getReferencePosition());
         const operation = {
             type: status.type,
             flag: status.flag,

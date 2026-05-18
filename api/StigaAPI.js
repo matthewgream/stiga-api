@@ -2,6 +2,7 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const StigaAPIUtilities = { ...require('./StigaAPIUtilitiesProtobuf'), ...require('./StigaAPIUtilitiesFormat') };
+const StigaAPIConfig = require('./StigaAPIConfig');
 const StigaAPIElements = require('./StigaAPIElements');
 const StigaAPIMessages = require('./StigaAPIMessages');
 
@@ -29,6 +30,7 @@ const StigaAPIFramework = require('./StigaAPIFramework');
 
 module.exports = {
     StigaAPIUtilities,
+    StigaAPIConfig,
     StigaAPIElements,
     StigaAPIMessages,
     //

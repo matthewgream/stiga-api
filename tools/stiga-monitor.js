@@ -23,8 +23,6 @@ const DEFAULT_CONFIG = {
     directory: '/opt/stiga-api/data',
     mac_device: 'D0:EF:76:64:32:BA',
     mac_base: 'FC:E8:C0:72:EC:62',
-    location_lat: 59.661923,
-    location_lon: 12.996271,
     capture_db: 'capture.db',
     listen_file: 'listen.log',
     intercept_port: 8083,
@@ -62,16 +60,20 @@ class StigaMonitor {
     }
 
     async start() {
+        const { username, password, referencePosition } = require('../api/StigaAPIConfig').load();
+        const lat = this.config.location_lat ?? referencePosition?.latitude;
+        const lon = this.config.location_lon ?? referencePosition?.longitude;
+        if (lat === undefined || lon === undefined) throw new Error('stiga-monitor: RTK reference origin not set; provide --location_lat/--location_lon or referencePosition in stiga-config.js');
+
         const options = {
             robotMac: this.config.mac_device,
             baseMac: this.config.mac_base,
-            location: { latitude: this.config.location_lat, longitude: this.config.location_lon },
+            location: { latitude: lat, longitude: lon },
         };
 
         this.displayLocal = new DisplayLocal({ ...options, background: this.config.background });
         options.logger = (message) => this.displayLocal.log(message);
 
-        const { username, password } = require('../stiga_user_and_pass.js');
         this.connectionManager = new ConnectionManager(username, password, { ...options });
 
         if (this.config.monitor) {
@@ -152,8 +154,8 @@ Configuration:
   --directory=dir              Data directory (default: '/opt/stiga-api/data')
   --mac_device=MAC             Device MAC address (default: D0:EF:76:64:32:BA)
   --mac_base=MAC               Base MAC address (default: FC:E8:C0:72:EC:62)
-  --location_lat=LAT           Base latitude (default: 59.661923)
-  --location_lon=LON           Base longitude (default: 12.996271)
+  --location_lat=LAT           RTK reference latitude (override stiga-config.js)
+  --location_lon=LON           RTK reference longitude (override stiga-config.js)
 
 Monitor Timing Options:
   --timing-levels-docked       Timing when docked (format: status:30s,version:60m,settings:30m)

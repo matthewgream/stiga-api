@@ -172,12 +172,32 @@ class StigaAPIGarage extends StigaAPIComponent {
                 this._parseData();
                 this._updateBases();
                 this._updateDevices();
+                this._propagateReferencePosition();
                 return true;
             }
         } catch (e) {
             this.display.error('garage: failed to load:', e);
         }
         return false;
+    }
+
+    // Link each device to its paired base and seed the base's RTK reference
+    // origin from the device's cloud-reported lastPosition. The cloud has no
+    // base coordinates of its own, so the device's last fix (taken near the
+    // base) is the best proxy.
+    _propagateReferencePosition() {
+        for (const deviceData of this.devicesData) {
+            const baseUuid = deviceData.getBaseUuid();
+            if (!baseUuid) continue;
+            const baseData = this.basesData.get(baseUuid);
+            if (!baseData) continue;
+            const base = this.bases.get(baseData.getMacAddress());
+            const device = this.devices.get(deviceData.getMacAddress());
+            if (!base || !device) continue;
+            device.setPairedBase(base);
+            const lastPosition = deviceData.getLastPosition();
+            if (lastPosition && base.getReferencePosition() === undefined) base.setReferencePosition(lastPosition);
+        }
     }
 
     provides(key) {

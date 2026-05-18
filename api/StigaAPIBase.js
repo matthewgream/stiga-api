@@ -24,6 +24,9 @@ class StigaAPIBase extends StigaAPIComponent {
             serialNumber: { value: undefined, _updated: undefined },
             firmwareVersion: { value: undefined, _updated: undefined },
             createdAt: { value: undefined, _updated: undefined },
+            // RTK reference origin (zero point for offset reporting). Sourced from
+            // the paired device's lastPosition by Garage, or set explicitly.
+            referencePosition: { value: undefined, _updated: undefined },
             // MQTT/Device data
             version: { value: undefined, _updated: undefined, _stale: 24 * 60 * 60 * 1000 },
             statusOperation: { value: undefined, _updated: undefined, _batchedBy: 'statusAll', _stale: 1 * 60 * 1000 },
@@ -57,6 +60,13 @@ class StigaAPIBase extends StigaAPIComponent {
     }
     async getCreatedAt(options = {}) {
         return this._dataGet('createdAt', options);
+    }
+
+    getReferencePosition() {
+        return this.storage.referencePosition.value;
+    }
+    setReferencePosition(position) {
+        this._dataUpdate('referencePosition', position, 'explicit');
     }
 
     //
@@ -251,7 +261,8 @@ class StigaAPIBase extends StigaAPIComponent {
             case 'serialNumber':
             case 'firmwareVersion':
             case 'createdAt':
-                // These come from garage/cloud
+            case 'referencePosition':
+                // These come from garage/cloud (or are set explicitly)
                 break;
             default:
                 throw new Error(`Don't know how to request ${key} from connector`);

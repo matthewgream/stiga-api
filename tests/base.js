@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const { StigaAPIConnectionDevice, StigaAPIBaseConnector, StigaAPIFramework } = require('../api/StigaAPI');
-const { username, password } = require('../stiga_user_and_pass.js');
+const { StigaAPIConnectionDevice, StigaAPIBaseConnector, StigaAPIFramework, StigaAPIConfig } = require('../api/StigaAPI');
+const { username, password } = StigaAPIConfig.load();
 
 async function main() {
     try {

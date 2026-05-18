@@ -45,6 +45,20 @@ class StigaAPIDevice extends StigaAPIComponent {
             zoneOrder: { value: undefined, _updated: undefined, _stale: 30 * 60 * 1000 },
         };
         this.staleThresholdDefault = options.staleThresholdDefault || STALE_THRESHOLD_DEFAULT;
+        // Paired RTK reference station (set by Garage once relationships are known).
+        this.pairedBase = undefined;
+    }
+
+    setPairedBase(base) {
+        this.pairedBase = base;
+    }
+    getPairedBase() {
+        return this.pairedBase;
+    }
+    // RTK reference origin. Sourced from paired base if known, otherwise the
+    // device's own cloud lastPosition.
+    getReferencePosition() {
+        return this.pairedBase?.getReferencePosition() ?? this.storage.lastPosition.value;
     }
 
     //

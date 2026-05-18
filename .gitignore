@@ -1,6 +1,7 @@
 node_modules
 package-lock.json
 stiga_user_and_pass.js
+stiga-config.*.js
 .credentials
 .apikey
 tools/*.csv

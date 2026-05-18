@@ -2,8 +2,19 @@
 
 /* eslint-disable max-depth, sonarjs/cognitive-complexity */
 
-const { StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIUser, StigaAPINotifications, StigaAPIGarage, StigaAPIPerimeters, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector } = require('../api/StigaAPI');
-const { username, password } = require('../stiga_user_and_pass.js');
+const {
+    StigaAPIAuthentication,
+    StigaAPIConnectionServer,
+    StigaAPIUser,
+    StigaAPINotifications,
+    StigaAPIGarage,
+    StigaAPIPerimeters,
+    StigaAPIConnectionDevice,
+    StigaAPIDeviceConnector,
+    StigaAPIBaseConnector,
+    StigaAPIConfig,
+} = require('../api/StigaAPI');
+const { username, password } = StigaAPIConfig.load();
 
 async function main() {
     try {

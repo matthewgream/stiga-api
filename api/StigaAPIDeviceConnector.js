@@ -57,10 +57,18 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
         this.lastStatusRequest = new Map();
         this.lastResponseTime = new Map();
         this.pendingRateLimits = new Map();
-        // Base location for position calculations (should come from base data)
-        this.baseLocation = undefined;
+        // Explicit override for the RTK reference position; if unset, falls back
+        // to the device's lastPosition (from cloud) at decode time.
+        this.referencePosition = options.referencePosition;
         this.device.installConnector('mqtt', this);
         this.debug = Boolean(options.debug);
+    }
+
+    setReferencePosition(position) {
+        this.referencePosition = position;
+    }
+    _getReferencePosition() {
+        return this.referencePosition ?? this.device.getReferencePosition();
     }
 
     destroy() {
@@ -82,10 +90,6 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
 
     provides(key) {
         return ['version', 'statusOperation', 'statusBattery', 'statusMowing', 'statusLocation', 'statusNetwork', 'statusAll', 'position', 'settings', 'scheduleSettings', 'zoneSettings', 'zoneOrder'].includes(key);
-    }
-
-    setBaseLocation(location) {
-        this.baseLocation = location;
     }
 
     //
@@ -203,7 +207,7 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
             docking: decodeRobotStatusDocking(decoded[13]),
             battery: decodeRobotBatteryStatus(decoded[17]),
             mowing: decodeRobotMowingStatus(decoded[18]),
-            location: decodeLocationStatus(decoded[19], this.baseLocation),
+            location: decodeLocationStatus(decoded[19], this._getReferencePosition()),
             network: decodeNetworkStatus(decoded[20]),
         };
         const operation = {
@@ -237,7 +241,7 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
         this._commandResponseResolve('scheduleSettings', scheduleSettings);
     }
     _handlePosition(decoded) {
-        const position = decodeRobotPosition(decoded, this.baseLocation);
+        const position = decodeRobotPosition(decoded, this._getReferencePosition());
         this.emit('position', position);
         this._commandResponseResolve('position', position);
     }

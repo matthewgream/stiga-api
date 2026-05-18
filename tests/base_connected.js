@@ -7,8 +7,8 @@
 // - Base with both Garage and DeviceConnection
 // - Adding/removing connectors dynamically
 
-const { StigaAPIConnectionServer, StigaAPIGarage, StigaAPIBase, StigaAPIConnectionDevice, StigaAPIBaseConnector, StigaAPIFramework } = require('../api/StigaAPI');
-const { username, password } = require('../stiga_user_and_pass.js');
+const { StigaAPIConnectionServer, StigaAPIGarage, StigaAPIBase, StigaAPIConnectionDevice, StigaAPIBaseConnector, StigaAPIFramework, StigaAPIConfig } = require('../api/StigaAPI');
+const { username, password } = StigaAPIConfig.load();
 
 async function testScenario1(macAddress) {
     console.log('\n=== SCENARIO 1: Base with only MAC address ===');

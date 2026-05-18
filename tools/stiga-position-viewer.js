@@ -7,8 +7,14 @@ const express = require('express');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 
-const { StigaAPIUtilities } = require('../api/StigaAPI');
+const { StigaAPIUtilities, StigaAPIConfig } = require('../api/StigaAPI');
 const { protobufDecode } = StigaAPIUtilities;
+
+const REFERENCE_POSITION = (() => {
+    const ref = StigaAPIConfig.load().referencePosition;
+    if (!ref?.latitude || !ref?.longitude) throw new Error('stiga-position-viewer: referencePosition not set in stiga-config.js');
+    return ref;
+})();
 
 const TIME_TOLERANCE_MS = 2000;
 
@@ -42,7 +48,7 @@ Time format examples:
 
 Example:
   position-viewer.js capture.db --apikey YOUR_KEY
-  position-viewer.js capture.db --apikey YOUR_KEY --lat 59.661918 --lon 12.996299
+  position-viewer.js capture.db --apikey YOUR_KEY --lat 59.66 --lon 13.00
   position-viewer.js capture.db --apikey YOUR_KEY --x-offset 150 --y-offset -200
   position-viewer.js capture.db --apikey YOUR_KEY --time-from 2025-06-22T9 --time-to 2025-06-22T13
 `);
@@ -199,8 +205,8 @@ function loadFromDatabase(dbPath) {
                     const latOffset = hexToDouble(decoded[19][3]),
                         lonOffset = hexToDouble(decoded[19][4]);
                     if (latOffset !== undefined && lonOffset !== undefined) {
-                        location.latitudeOffsetCm = latOffset;
-                        location.longitudeOffsetCm = lonOffset;
+                        location.offsetLatitudeCm = latOffset;
+                        location.offsetLongitudeCm = lonOffset;
                         location.offsetDistanceCm = Math.hypot(latOffset, lonOffset);
                         location.offsetDegrees = (Math.atan2(lonOffset, latOffset) * 180) / Math.PI;
                         location.offsetCompass = (90 - location.offsetDegrees + 360) % 360;
@@ -249,10 +255,7 @@ function loadFromDatabase(dbPath) {
             robotPositions: robotPositions.length,
             robotStatuses: robotStatuses.length,
             timeTolerance: TIME_TOLERANCE_MS,
-            baseReferenceLocation: {
-                latitude: 59.661923,
-                longitude: 12.996271,
-            },
+            baseReferenceLocation: REFERENCE_POSITION,
         },
         matches,
     };
@@ -284,8 +287,8 @@ function hexToDouble(value) {
 }
 
 function calculateDataCenter(positionData) {
-    const baseRefLat = 59.661923,
-        baseRefLng = 12.996271;
+    const baseRefLat = REFERENCE_POSITION.latitude,
+        baseRefLng = REFERENCE_POSITION.longitude;
     const positions = positionData.matches
         .filter((match) => match.robotPosition)
         .map((match) => ({

@@ -9,7 +9,7 @@ const https = require('https');
 // eslint-disable-next-line no-redeclare
 const { createCanvas, Image } = require('canvas');
 
-const { StigaAPIUtilities } = require('../../../api/StigaAPI');
+const { StigaAPIUtilities, StigaAPIConfig } = require('../../../api/StigaAPI');
 const { protobufDecode } = StigaAPIUtilities;
 
 const AnalyserBase = require('./Analyser');
@@ -25,8 +25,8 @@ class PositionHeatmapAnalyser extends AnalyserBase {
             detailedDescription: 'Creates satellite and RSSI signal strength heatmaps overlaid on Google Maps satellite imagery.',
             options: {
                 '--apikey': 'Google Maps API key (REQUIRED)',
-                '--lat': 'Center latitude (default: 59.661923)',
-                '--lon': 'Center longitude (default: 12.996271)',
+                '--lat': 'Center latitude (override stiga-config.js referencePosition.latitude)',
+                '--lon': 'Center longitude (override stiga-config.js referencePosition.longitude)',
                 '--zoom': 'Map zoom level (default: 18)',
                 '--size': 'Map size in pixels (default: 640)',
                 '--grid': 'Grid resolution (default: 100)',
@@ -46,6 +46,7 @@ class PositionHeatmapAnalyser extends AnalyserBase {
 
     constructor(databasePath) {
         super(databasePath);
+        const ref = StigaAPIConfig.load().referencePosition;
         this.positionData = {
             metadata: {
                 generated: new Date().toISOString(),
@@ -53,10 +54,7 @@ class PositionHeatmapAnalyser extends AnalyserBase {
                 robotPositions: 0,
                 robotStatuses: 0,
                 timeTolerance: 2000,
-                baseReferenceLocation: {
-                    latitude: 59.661923,
-                    longitude: 12.996271,
-                },
+                baseReferenceLocation: ref,
             },
             matches: [],
         };
@@ -65,8 +63,11 @@ class PositionHeatmapAnalyser extends AnalyserBase {
     async analyze(options = {}) {
         this.apiKey = options['--apikey'];
         if (!this.apiKey) throw new Error('Error: Google Maps API key is required (--apikey)');
-        this.centerLat = Number.parseFloat(options['--lat'] || '59.661923');
-        this.centerLng = Number.parseFloat(options['--lon'] || '12.996271');
+        const ref = StigaAPIConfig.load().referencePosition;
+        if (options['--lat'] === undefined && ref?.latitude === undefined) throw new Error('Error: center latitude not set; provide --lat or referencePosition in stiga-config.js');
+        if (options['--lon'] === undefined && ref?.longitude === undefined) throw new Error('Error: center longitude not set; provide --lon or referencePosition in stiga-config.js');
+        this.centerLat = options['--lat'] === undefined ? ref.latitude : Number.parseFloat(options['--lat']);
+        this.centerLng = options['--lon'] === undefined ? ref.longitude : Number.parseFloat(options['--lon']);
         this.zoom = Number.parseInt(options['--zoom'] || '18');
         this.mapSize = Number.parseInt(options['--size'] || '640');
         this.gridSize = Number.parseInt(options['--grid'] || '100');

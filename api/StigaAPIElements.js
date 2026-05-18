@@ -76,18 +76,18 @@ function upgradeVersion(version) {
 
 // XXX not sure ...
 function _decodeLocationStatus(latitudeOffset, longitudeOffset, latitude, longitude) {
-    const latitudeOffsetCm = hexToDouble(latitudeOffset),
-        longitudeOffsetCm = hexToDouble(longitudeOffset);
+    const offsetLatitudeCm = hexToDouble(latitudeOffset),
+        offsetLongitudeCm = hexToDouble(longitudeOffset);
     const latitudeCmPerDeg = 111320 * 100,
         longitudeCmPerDeg = 111320 * 100 * (latitude === undefined ? 1 : Math.cos((latitude * Math.PI) / 180));
-    const offsetDegrees = (Math.atan2(longitudeOffsetCm, latitudeOffsetCm) * 180) / Math.PI,
+    const offsetDegrees = (Math.atan2(offsetLongitudeCm, offsetLatitudeCm) * 180) / Math.PI,
         offsetCompass = (90 - offsetDegrees + 360) % 360;
     return {
-        latitude: latitude === undefined ? undefined : latitude + latitudeOffsetCm / latitudeCmPerDeg,
-        longitude: longitude === undefined ? undefined : longitude + longitudeOffsetCm / longitudeCmPerDeg,
-        latitudeOffsetCm,
-        longitudeOffsetCm,
-        offsetDistance: Math.hypot(latitudeOffsetCm, longitudeOffsetCm),
+        latitude: latitude === undefined ? undefined : latitude + offsetLatitudeCm / latitudeCmPerDeg,
+        longitude: longitude === undefined ? undefined : longitude + offsetLongitudeCm / longitudeCmPerDeg,
+        offsetLatitudeCm,
+        offsetLongitudeCm,
+        offsetDistance: Math.hypot(offsetLatitudeCm, offsetLongitudeCm),
         offsetDegrees,
         offsetCompass,
     };
@@ -1101,12 +1101,12 @@ function decodeBaseaMessageVersion(decoded) {
     return decodeVersion(decoded);
 }
 
-function decodeBaseMessageStatus(decoded) {
+function decodeBaseMessageStatus(decoded, position) {
     const status = {
         type: decodeBaseStatusType(decoded[1]),
         flag: decodeBaseStatusFlag(decoded[4]),
         led: decodeBaseSettingLED(decoded[10]),
-        location: decodeLocationStatus(decoded[8], this.position),
+        location: decodeLocationStatus(decoded[8], position),
         network: decodeNetworkStatus(decoded[9]),
     };
     status.toString = () => formatStruct(status, 'status', { network: { recurse: true, squarebrackets: true }, location: { recurse: true, squarebrackets: true } });

@@ -3,7 +3,7 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const { StigaAPIFramework, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector } = require('../api/StigaAPI');
+const { StigaAPIFramework, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector, StigaAPIConfig } = require('../api/StigaAPI');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -118,7 +118,7 @@ function parseArgs() {
             if (!['text', 'json', 'none'].includes(v)) throw new Error(`Invalid --format value '${v}': must be text|json|none`);
             options.format = v;
             i++;
-        } else if (!options.command) {
+        } else if (options.command === undefined) {
             options.command = args[i];
             i++;
         } else {
@@ -553,14 +553,9 @@ function throwExit(message, exitCode) {
 function resolveCredentials(options) {
     if (options.username && options.password) return { username: options.username, password: options.password };
     if (options.username || options.password) throw new Error('--username and --password must be provided together');
-    try {
-        const stored = require('../stiga_user_and_pass.js');
-        if (!stored.username || !stored.password) throw new Error('stiga_user_and_pass.js missing username/password');
-        return { username: stored.username, password: stored.password };
-    } catch (e) {
-        if (e.code === 'MODULE_NOT_FOUND') throw new Error('No credentials: provide --username and --password, or create stiga_user_and_pass.js');
-        throw e;
-    }
+    const config = StigaAPIConfig.load();
+    if (!config.username || !config.password) throw new Error('config missing username/password');
+    return { username: config.username, password: config.password };
 }
 
 async function executeRobotCommand(name, fn, context) {
@@ -595,7 +590,7 @@ function sortedSettingEntries(value) {
 
 function displaySettings(header, value) {
     display.text(header);
-    if (!value) display.text('  (none)');
+    if (value == undefined) display.text('  (none)');
     else for (const [k, v] of sortedSettingEntries(value)) display.text(`  ${k}: ${formatSettingValue(v)}`);
 }
 
@@ -967,11 +962,15 @@ async function showGeneralHelp() {
     display.log('  --format <fmt>   Output format: none (suppress), text (default), json (one JSON object per line)');
     display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
     display.log('  --passive        Alias for --watch 0 (passive listen, no polling)');
-    display.log('  --username <u>   Override credentials from stiga_user_and_pass.js (requires --password)');
-    display.log('  --password <p>   Override credentials from stiga_user_and_pass.js (requires --username)');
+    display.log('  --username <u>   Override username credential from stiga-config.js');
+    display.log('  --password <p>   Override password credentials from stiga-config.js');
+    display.log('\nConfiguration (resolved in order, first match wins):');
+    display.log('  1. --username/--password command-line flags (credentials only)');
+    display.log('  2. $STIGA_CONFIG environment variable (path to a config file)');
+    display.log(`  3. stiga-config.<hostname>.js  (this host: stiga-config.${require('node:os').hostname()}.js)`);
+    display.log('  4. stiga-config.js');
     display.log('\nCommands (| separates aliases, any unique prefix also matches):');
-    for (const [name, cmd] of Object.entries(commands))
-        display.log(`  ${(cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name).padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
+    for (const [name, cmd] of Object.entries(commands)) display.log(`  ${(cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name).padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
     display.log('\nFor command-specific help:');
     display.log('  stiga-command <command> help');
     display.log('\nExamples:');
