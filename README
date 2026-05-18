@@ -2,8 +2,8 @@
 *** USAGE (13 MAY 2026) *** 
 
 To use this repo, you should clone it locally, follow the instructions below to configure authentication, and
-then smoke test with "tools/stiga-command.js --both version" and "tools/stiga-command.js --both status". If this
-succeeds, you can progress. If this does not succeed, send me any diagnostics and we can work on resolving them.
+then smoke test with "tools/stiga-command.js check". If this succeeds, you can progress. If this does not
+succeed, send me any diagnostics and we can work on resolving them.
 
 "tools/stiga-monitor.js" -- to see a curses based "monitor" of the mower, and for diagnostics this can 
 "capture" status information to a local database. You may need to collect data over a number of weeks, so use
@@ -21,9 +21,8 @@ by default) to view the positions overlaid on Google Maps.
 "tools/stiga-exporter.js" -- to read the capture database and translate it into CSV or Google Sheets format
 for analysis and diagnostics.
 
-"tools/stiga-command.js" -- to directly interact with the reference station and mower. Current commands are
-'version' (both), 'status' (both), 'schedule' (robot), 'start' (robot), 'stop' (robot), 'go-home' (robot),
-'calibrate-blades' (robot).
+"tools/stiga-command.js" -- to directly interact with the reference station and mower. It supports a number
+of information, configuration and operational commands which are fully explained by the help and examples.
 
 "tools/stiga-tools.bash" -- to load autocomplete information into bash for use with the tools.
 
