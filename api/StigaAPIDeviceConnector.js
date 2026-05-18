@@ -130,7 +130,7 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
         const result = decodeRobotCommandAckResult(decoded?.[2]);
         this.display.debug(`connectedDevice ${this.macAddress}: ACK for ${commandType}: ${result}`);
         for (const [requestId, pending] of this.pendingRequests.entries()) {
-            if (pending.commandType === commandTypeId) {
+            if (requestId === 'command' && pending.commandType === commandTypeId) {
                 const { resolve } = this.pendingRequests.get(requestId);
                 this.pendingRequests.delete(requestId);
                 resolve(result === 'OK');
