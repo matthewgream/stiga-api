@@ -42,7 +42,7 @@ _stiga_command_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local commands="version status schedule start stop go-home home calibrate-blades blades info describe check"
+    local commands="version status schedule settings start stop go-home home calibrate-blades blades info describe check"
     local global_opts="--robot --base --both --debug --level --format --watch --passive --username --password --help"
     local levels="quiet normal verbose"
     local formats="text json none"
@@ -73,7 +73,7 @@ _stiga_command_completion() {
             --robot|--base|--both)
                 has_target=true
                 ;;
-            version|status|schedule|start|stop|go-home|home|calibrate-blades|blades|info|describe|check)
+            version|status|schedule|settings|start|stop|go-home|home|calibrate-blades|blades|info|describe|check)
                 current_command="${COMP_WORDS[i]}"
                 break
                 ;;
@@ -115,7 +115,7 @@ _stiga_command_completion() {
                 return 0
             fi
             ;;
-        start|stop|go-home|home|calibrate-blades|blades|info|describe|check|version)
+        start|stop|go-home|home|calibrate-blades|blades|info|describe|check|version|settings)
             if [[ ${cur} != --* ]]; then
                 COMPREPLY=( $(compgen -W "help" -- ${cur}) )
                 return 0

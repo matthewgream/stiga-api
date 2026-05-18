@@ -579,6 +579,67 @@ async function executeRobotCommand(name, fn, context) {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+function formatSettingValue(value) {
+    if (typeof value === 'boolean') return value ? 'on' : 'off';
+    if (value === undefined || value === null) return '-';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+}
+
+function sortedSettingEntries(value) {
+    if (!value || typeof value !== 'object') return [];
+    return Object.entries(value)
+        .filter(([k, v]) => !k.startsWith('_') && typeof v !== 'function')
+        .sort(([a], [b]) => a.localeCompare(b));
+}
+
+function displaySettings(header, value) {
+    display.text(header);
+    if (!value) display.text('  (none)');
+    else for (const [k, v] of sortedSettingEntries(value)) display.text(`  ${k}: ${formatSettingValue(v)}`);
+}
+
+function plainSettings(value) {
+    if (!value || typeof value !== 'object') return value ?? null;
+    return Object.fromEntries(sortedSettingEntries(value));
+}
+
+registerCommand('settings', {
+    description: 'Display device settings',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command [--robot|--base] settings [help]',
+    summary: 'Display the current settings for the selected target(s).',
+    details: [
+        '',
+        'Robot settings include:',
+        '  rainSensorEnabled, rainSensorDelay, keyboardLock,',
+        '  zoneCuttingHeightEnabled, zoneCuttingHeight, zoneCuttingHeightUniform,',
+        '  antiTheft, smartCutHeight, longExit, longExitMode,',
+        '  pushNotifications, obstacleNotifications',
+        '',
+        'Base settings:',
+        '  led',
+    ],
+    examples: ['stiga-command --robot settings', 'stiga-command --base settings', 'stiga-command settings --format json | jq .'],
+    execute: async (options, context) => {
+        const { target, device, base, connectors } = context;
+        if (target === 'both' || target === 'robot') {
+            await connectToRobot(device, connectors);
+            const settings = await device.getSettings({ refresh: 'force' });
+            displaySettings('Robot Settings:', settings.value);
+            display.json({ source: 'robot', kind: 'settings', value: plainSettings(settings.value) });
+        }
+        if (target === 'both' || target === 'base') {
+            await connectToBase(base, connectors);
+            const led = await base.getLedSetting({ refresh: 'force' });
+            displaySettings('Base Settings:', { led: led.value });
+            display.json({ source: 'base', kind: 'settings', value: { led: led.value ?? null } });
+        }
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 registerCommand('start', {
     description: 'Start mowing',
     targets: ['robot'],
@@ -909,10 +970,8 @@ async function showGeneralHelp() {
     display.log('  --username <u>   Override credentials from stiga_user_and_pass.js (requires --password)');
     display.log('  --password <p>   Override credentials from stiga_user_and_pass.js (requires --username)');
     display.log('\nCommands (| separates aliases, any unique prefix also matches):');
-    for (const [name, cmd] of Object.entries(commands)) {
-        const label = cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name;
-        display.log(`  ${label.padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
-    }
+    for (const [name, cmd] of Object.entries(commands))
+        display.log(`  ${(cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name).padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
     display.log('\nFor command-specific help:');
     display.log('  stiga-command <command> help');
     display.log('\nExamples:');
