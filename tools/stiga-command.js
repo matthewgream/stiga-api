@@ -9,16 +9,22 @@ const { username, password } = require('../stiga_user_and_pass.js');
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+const LEVELS = { quiet: 0, normal: 1, verbose: 2 };
+
 let globalOptions = {
     debug: false,
-    verbose: false,
+    level: LEVELS.normal,
+    format: 'text',
 };
 
 const display = {
-    log: (...args) => console.log(...args),
+    log: (...args) => globalOptions.level >= LEVELS.normal && console.log(...args),
     error: (...args) => console.error(...args),
-    debug: (...args) => globalOptions.debug && console.log('[DEBUG]', ...args),
-    verbose: (...args) => (globalOptions.verbose || globalOptions.debug) && console.log('[VERBOSE]', ...args),
+    debug: (...args) => globalOptions.debug && console.error('[DEBUG]', ...args),
+    verbose: (...args) => (globalOptions.level >= LEVELS.verbose || globalOptions.debug) && console.error('[VERBOSE]', ...args),
+    out: (...args) => console.log(...args),
+    text: (...args) => globalOptions.format === 'text' && globalOptions.level >= LEVELS.normal && console.log(...args),
+    json: (obj) => globalOptions.format === 'json' && console.log(JSON.stringify(obj)),
 };
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -65,9 +71,9 @@ function parseArgs() {
         command: undefined,
         params: [],
         debug: false,
-        verbose: false,
+        level: 'normal',
         watch: undefined,
-        noFormat: false,
+        format: 'text',
     };
     let i = 0;
     while (i < args.length) {
@@ -84,15 +90,24 @@ function parseArgs() {
         } else if (args[i] === '--debug') {
             options.debug = true;
             i++;
-        } else if (args[i] === '--verbose') {
-            options.verbose = true;
+        } else if (args[i] === '--level') {
+            if (i + 1 >= args.length) throw new Error('--level requires a value (quiet|normal|verbose)');
+            const v = args[++i].toLowerCase();
+            if (LEVELS[v] === undefined) throw new Error(`Invalid --level value '${v}': must be quiet|normal|verbose`);
+            options.level = v;
             i++;
         } else if (args[i] === '--watch') {
             options.watch = 5;
             if (i + 1 < args.length && /^\d+$/.test(args[i + 1])) options.watch = Number.parseInt(args[++i]);
             i++;
+        } else if (args[i] === '--format') {
+            if (i + 1 >= args.length) throw new Error('--format requires a value (text|json|none)');
+            const v = args[++i].toLowerCase();
+            if (!['text', 'json', 'none'].includes(v)) throw new Error(`Invalid --format value '${v}': must be text|json|none`);
+            options.format = v;
+            i++;
         } else if (args[i] === '--no-format') {
-            options.noFormat = true;
+            options.format = 'none';
             i++;
             // eslint-disable-next-line unicorn/no-negated-condition
         } else if (!options.command) {
@@ -104,7 +119,7 @@ function parseArgs() {
         }
     }
     if (!options.target) options.target = 'both';
-    globalOptions = { debug: options.debug, verbose: options.verbose };
+    globalOptions = { debug: options.debug, level: LEVELS[options.level], format: options.format };
     return options;
 }
 
@@ -166,10 +181,11 @@ function parseScheduleSpecs(specs) {
 }
 
 function displaySchedule(schedule) {
-    display.log(`Schedule ${schedule.enabled ? 'enabled' : 'disabled'}, ${schedule.totalBlocks} blocks for ${Math.floor(schedule.totalMinutes / 60)}h${schedule.totalMinutes % 60}m`);
+    display.text(`Schedule ${schedule.enabled ? 'enabled' : 'disabled'}, ${schedule.totalBlocks} blocks for ${Math.floor(schedule.totalMinutes / 60)}h${schedule.totalMinutes % 60}m`);
     const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    if (schedule.totalBlocks === 0) display.log('  (No scheduled times)');
-    else for (let i = 0; i < 7; i++) if (schedule.days[i].timeBlocks.length > 0) display.log(`  ${days[i]}: ${schedule.days[i].timeBlocks.map((b) => b.displayTime).join(', ')}`);
+    if (schedule.totalBlocks === 0) display.text('  (No scheduled times)');
+    else for (let i = 0; i < 7; i++) if (schedule.days[i].timeBlocks.length > 0) display.text(`  ${days[i]}: ${schedule.days[i].timeBlocks.map((b) => b.displayTime).join(', ')}`);
+    display.json({ source: 'robot', kind: 'schedule', value: schedule });
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -214,10 +230,9 @@ function formatWatchTimestamp() {
 
 async function runWatch(options, context) {
     const { target, device, base, connectors } = context;
-    const intervalSeconds = options.watch;
+    const { watch: intervalSeconds } = options;
     const intervalMs = intervalSeconds * 1000;
     const pollEnabled = intervalSeconds > 0;
-    const formatted = !options.noFormat;
 
     const watchRobot = target === 'both' || target === 'robot';
     const watchBase = target === 'both' || target === 'base';
@@ -229,7 +244,8 @@ async function runWatch(options, context) {
     let stopping = false;
 
     const log = (source, kind, value) => {
-        if (formatted) display.log(`[${formatWatchTimestamp()}] ${source} ${kind}: ${formatWatchValue(value)}`);
+        display.text(`[${formatWatchTimestamp()}] ${source} ${kind}: ${formatWatchValue(value)}`);
+        display.json({ ts: new Date().toISOString(), source, kind, value });
     };
 
     const schedulePoll = () => {
@@ -271,17 +287,15 @@ async function runWatch(options, context) {
         cb.on('notification', onEvent('base', 'notification'));
     }
 
-    if (formatted) {
-        const pollDesc = pollEnabled ? `poll every ${intervalSeconds}s when idle` : 'passive (no polling)';
-        display.log(`[${formatWatchTimestamp()}] watch starting (${pollDesc}, Ctrl-C to stop)`);
-    }
+    const pollDesc = pollEnabled ? `poll every ${intervalSeconds}s when idle` : 'passive (no polling)';
+    display.log(`[${formatWatchTimestamp()}] watch starting (${pollDesc}, Ctrl-C to stop)`);
     schedulePoll();
 
     await new Promise((resolve) =>
         process.once('SIGINT', () => {
             stopping = true;
             if (pollTimer) clearTimeout(pollTimer);
-            if (formatted) display.log(`\n[${formatWatchTimestamp()}] watch stopping`);
+            display.log(`\n[${formatWatchTimestamp()}] watch stopping`);
             resolve();
         })
     );
@@ -301,14 +315,16 @@ registerCommand('version', {
         if (target === 'both' || target === 'robot') {
             await connectToRobot(device, connectors);
             const version = await device.getVersion({ refresh: 'force' });
-            display.log('Robot Version:');
-            display.log(version.value.toString({ compressed: false }));
+            display.text('Robot Version:');
+            display.text(version.value.toString({ compressed: false }));
+            display.json({ source: 'robot', kind: 'version', value: version.value });
         }
         if (target === 'both' || target === 'base') {
             await connectToBase(base, connectors);
             const version = await base.getVersion({ refresh: 'force' });
-            display.log('Base Version:');
-            display.log(version.value.toString({ compressed: false }));
+            display.text('Base Version:');
+            display.text(version.value.toString({ compressed: false }));
+            display.json({ source: 'base', kind: 'version', value: version.value });
         }
     },
 });
@@ -341,64 +357,82 @@ registerCommand('status', {
             await connectToRobot(device, connectors);
             if (params.length === 0) {
                 const status = await device.getStatusAll({ refresh: 'force' });
-                display.log('Robot Status:');
-                if (status.operation) display.log(`  Operation: ${status.operation.type}, valid=${status.operation.valid}, docking=${status.operation.docking}`);
-                if (status.battery) display.log(`  Battery: ${status.battery.toString()}`);
-                if (status.mowing) display.log(`  Mowing: ${status.mowing.toString()}`);
-                if (status.location) display.log(`  Location: ${status.location.toString()}`);
-                if (status.network) display.log(`  Network: ${status.network.toString()}`);
+                display.text('Robot Status:');
+                if (status.operation) display.text(`  Operation: ${status.operation.type}, valid=${status.operation.valid}, docking=${status.operation.docking}`);
+                if (status.battery) display.text(`  Battery: ${status.battery.toString()}`);
+                if (status.mowing) display.text(`  Mowing: ${status.mowing.toString()}`);
+                if (status.location) display.text(`  Location: ${status.location.toString()}`);
+                if (status.network) display.text(`  Network: ${status.network.toString()}`);
+                display.json({
+                    source: 'robot',
+                    kind: 'status',
+                    value: { operation: status.operation, battery: status.battery, mowing: status.mowing, location: status.location, network: status.network },
+                });
             } else
                 for (const type of params[0].split(','))
                     switch (type.trim().toLowerCase()) {
                         case 'operation':
                             const opStatus = await device.getStatusOperation({ refresh: 'force' });
-                            display.log(`Operation: ${opStatus.value?.type || 'unknown'}, valid=${opStatus.value?.valid}, docking=${opStatus.value?.docking}`);
+                            display.text(`Operation: ${opStatus.value?.type || 'unknown'}, valid=${opStatus.value?.valid}, docking=${opStatus.value?.docking}`);
+                            display.json({ source: 'robot', kind: 'operation', value: opStatus.value ?? null });
                             break;
                         case 'battery':
                             const batStatus = await device.getStatusBattery({ refresh: 'force' });
-                            display.log(`Battery: ${batStatus.value?.toString() || 'unknown'}`);
+                            display.text(`Battery: ${batStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'battery', value: batStatus.value ?? null });
                             break;
                         case 'mowing':
                             const mowStatus = await device.getStatusMowing({ refresh: 'force' });
-                            display.log(`Mowing: ${mowStatus.value?.toString() || 'unknown'}`);
+                            display.text(`Mowing: ${mowStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'mowing', value: mowStatus.value ?? null });
                             break;
                         case 'location':
                             const locStatus = await device.getStatusLocation({ refresh: 'force' });
-                            display.log(`Location: ${locStatus.value?.toString() || 'unknown'}`);
+                            display.text(`Location: ${locStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'location', value: locStatus.value ?? null });
                             break;
                         case 'network':
                             const netStatus = await device.getStatusNetwork({ refresh: 'force' });
-                            display.log(`Network: ${netStatus.value?.toString() || 'unknown'}`);
+                            display.text(`Network: ${netStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'network', value: netStatus.value ?? null });
                             break;
                         default:
-                            display.log(`Unknown status type: ${type}`);
+                            display.text(`Unknown status type: ${type}`);
                     }
         }
         if (target === 'both' || target === 'base') {
             await connectToBase(base, connectors);
             if (params.length === 0) {
                 const status = await base.getStatusAll({ refresh: 'force' });
-                display.log('Base Status:');
-                if (status.operation) display.log(`  Operation: type=${status.operation.type}, flag=${status.operation.flag}`);
-                if (status.location) display.log(`  Location: ${status.location.toString()}`);
-                if (status.network) display.log(`  Network: ${status.network.toString()}`);
+                display.text('Base Status:');
+                if (status.operation) display.text(`  Operation: type=${status.operation.type}, flag=${status.operation.flag}`);
+                if (status.location) display.text(`  Location: ${status.location.toString()}`);
+                if (status.network) display.text(`  Network: ${status.network.toString()}`);
+                display.json({
+                    source: 'base',
+                    kind: 'status',
+                    value: { operation: status.operation, location: status.location, network: status.network },
+                });
             } else
                 for (const type of params[0].split(','))
                     switch (type.trim().toLowerCase()) {
                         case 'operation':
                             const opStatus = await base.getStatusOperation({ refresh: 'force' });
-                            display.log(`Operation: type=${opStatus.value?.type}, flag=${opStatus.value?.flag}`);
+                            display.text(`Operation: type=${opStatus.value?.type}, flag=${opStatus.value?.flag}`);
+                            display.json({ source: 'base', kind: 'operation', value: opStatus.value ?? null });
                             break;
                         case 'location':
                             const locStatus = await base.getStatusLocation({ refresh: 'force' });
-                            display.log(`Location: ${locStatus.value?.toString() || 'unknown'}`);
+                            display.text(`Location: ${locStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'base', kind: 'location', value: locStatus.value ?? null });
                             break;
                         case 'network':
                             const netStatus = await base.getStatusNetwork({ refresh: 'force' });
-                            display.log(`Network: ${netStatus.value?.toString() || 'unknown'}`);
+                            display.text(`Network: ${netStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'base', kind: 'network', value: netStatus.value ?? null });
                             break;
                         default:
-                            display.log(`Unknown status type for base: ${type}`);
+                            display.text(`Unknown status type for base: ${type}`);
                     }
         }
     },
@@ -408,7 +442,7 @@ registerCommand('status', {
 
 async function scheduleUpdateAndDisplay(device, subCommand, value) {
     await device.setScheduleSettings(value);
-    display.log(`Schedule ${subCommand}d`);
+    display.text(`Schedule ${subCommand}d`);
     const updated = await device.getScheduleSettings({ refresh: 'force' });
     displaySchedule(updated.value);
 }
@@ -467,7 +501,7 @@ registerCommand('schedule', {
                 for (const spec of parseScheduleSpecs(params.slice(1))) {
                     try {
                         schedule.value.removeTimeBlock(spec.dayIndex, spec.startTime);
-                        display.log(`Removed ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')} from day ${spec.dayIndex}`);
+                        display.text(`Removed ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')} from day ${spec.dayIndex}`);
                     } catch (e) {
                         display.error(`Failed to remove time block, aborting without saving: ${e.message}`);
                         return;
@@ -484,7 +518,7 @@ registerCommand('schedule', {
                 for (const spec of parseScheduleSpecs(params.slice(1))) {
                     try {
                         schedule.value.insertTimeBlock(spec.dayIndex, spec.startTime, spec.endTime);
-                        display.log(`Inserted ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')}-${spec.endTime.hour}:${spec.endTime.minute.toString().padStart(2, '0')} to day ${spec.dayIndex}`);
+                        display.text(`Inserted ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')}-${spec.endTime.hour}:${spec.endTime.minute.toString().padStart(2, '0')} to day ${spec.dayIndex}`);
                     } catch (e) {
                         display.error(`Failed to insert time block, aborting without saving: ${e.message}`);
                         return;
@@ -512,7 +546,8 @@ registerCommand('start', {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
         await device.sendStart();
-        display.log('Start command sent');
+        display.text('Start command sent');
+        display.json({ source: 'robot', kind: 'command', command: 'start', ok: true });
     },
 });
 
@@ -528,7 +563,8 @@ registerCommand('stop', {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
         await device.sendStop();
-        display.log('Stop command sent');
+        display.text('Stop command sent');
+        display.json({ source: 'robot', kind: 'command', command: 'stop', ok: true });
     },
 });
 
@@ -544,7 +580,8 @@ registerCommand(['go-home', 'home'], {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
         await device.sendGoHome();
-        display.log('Go-home command sent');
+        display.text('Go-home command sent');
+        display.json({ source: 'robot', kind: 'command', command: 'go-home', ok: true });
     },
 });
 
@@ -560,7 +597,8 @@ registerCommand(['calibrate-blades', 'blades'], {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
         await device.sendCalibrateBlades();
-        display.log('Calibrate-blades command sent');
+        display.text('Calibrate-blades command sent');
+        display.json({ source: 'robot', kind: 'command', command: 'calibrate-blades', ok: true });
     },
 });
 
@@ -573,22 +611,34 @@ async function showGeneralHelp() {
     display.log('  --robot          Select/Add robot as target');
     display.log('  --base           Select/Add base station as target');
     display.log('  --both           Select both robot and base station as targets (default)');
-    display.log('  --debug          Enable debug output');
-    display.log('  --verbose        Enable verbose output');
+    display.log('  --debug          Enable debug output (to stderr)');
+    display.log('  --level <lvl>    Output level: quiet (errors only), normal (default), verbose (extra diagnostics on stderr)');
     display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
-    display.log('  --no-format      Suppress formatted watch output (useful with --debug to see raw message flow)');
+    display.log('  --format <fmt>   Output format: text (default), json (one JSON object per line), none (suppress output)');
+    display.log('  --no-format      Alias for --format none (useful with --debug to see raw message flow)');
     display.log('\nCommands (| separates aliases, any unique prefix also matches):');
-    for (const [name, cmd] of Object.entries(commands)) display.log(`  ${(cmd.aliases?.length > 0 ? `${name}|${cmd.aliases.join('|')}` : name).padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
+    for (const [name, cmd] of Object.entries(commands)) {
+        const label = cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name;
+        display.log(`  ${label.padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
+    }
     display.log('\nFor command-specific help:');
     display.log('  stiga-command <command> help');
     display.log('\nExamples:');
     for (const cmd of Object.values(commands).filter((cmd) => cmd.examples?.[0])) display.log(`  ${cmd.examples[0]}`);
     display.log('  stiga-command --robot --watch');
     display.log('  stiga-command --robot --watch 0 --debug');
+    display.log('  stiga-command --robot --watch 0 --format json --level quiet | jq .');
+    display.log('  stiga-command --robot status --format json --level quiet | jq .');
 }
 
 async function main() {
-    const options = parseArgs();
+    let options;
+    try {
+        options = parseArgs();
+    } catch (e) {
+        display.error(e.message);
+        process.exit(1);
+    }
 
     if (!options.command && options.watch === undefined) {
         await showGeneralHelp();
