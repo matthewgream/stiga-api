@@ -391,6 +391,77 @@ registerCommand('schedule', {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+registerCommand('start', {
+    description: 'Start mowing',
+    targets: ['robot'],
+    help: () => {
+        display.log('Usage: stiga-command --robot start [help]');
+        display.log('\nStart the robot mowing.');
+        display.log('\nExamples:');
+        display.log('  stiga-command --robot start');
+    },
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        await device.sendStart();
+        display.log('Start command sent');
+    },
+});
+
+registerCommand('stop', {
+    description: 'Stop the robot',
+    targets: ['robot'],
+    help: () => {
+        display.log('Usage: stiga-command --robot stop [help]');
+        display.log('\nStop the robot.');
+        display.log('\nExamples:');
+        display.log('  stiga-command --robot stop');
+    },
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        await device.sendStop();
+        display.log('Stop command sent');
+    },
+});
+
+registerCommand('go-home', {
+    description: 'Send the robot home to dock',
+    targets: ['robot'],
+    help: () => {
+        display.log('Usage: stiga-command --robot go-home [help]');
+        display.log('\nSend the robot back to its docking station.');
+        display.log('\nExamples:');
+        display.log('  stiga-command --robot go-home');
+    },
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        await device.sendGoHome();
+        display.log('Go-home command sent');
+    },
+});
+
+registerCommand('calibrate-blades', {
+    description: 'Calibrate the cutting blades',
+    targets: ['robot'],
+    help: () => {
+        display.log('Usage: stiga-command --robot calibrate-blades [help]');
+        display.log('\nTrigger blade calibration on the robot.');
+        display.log('\nExamples:');
+        display.log('  stiga-command --robot calibrate-blades');
+    },
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        await device.sendCalibrateBlades();
+        display.log('Calibrate-blades command sent');
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 async function showGeneralHelp() {
     display.log('Usage: stiga-command [options] <command> [params...]');
     display.log('\nOptions:');

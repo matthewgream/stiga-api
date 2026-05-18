@@ -172,7 +172,7 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendGoHome() {
         return this._cmdViaConnector('sendGoHome');
     }
-    async sendCalibrateBladess() {
+    async sendCalibrateBlades() {
         return this._cmdViaConnector('sendCalibrateBlades');
     }
 

@@ -125,11 +125,12 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
 
     _handleMessageCommandAck(topic, message) {
         const decoded = protobufDecode(message);
-        const commandType = decodeRobotCommandType(decoded?.[1]);
+        const commandTypeId = decoded?.[1] ?? 0;
+        const commandType = decodeRobotCommandType(commandTypeId);
         const result = decodeRobotCommandAckResult(decoded?.[2]);
         this.display.debug(`connectedDevice ${this.macAddress}: ACK for ${commandType}: ${result}`);
         for (const [requestId, pending] of this.pendingRequests.entries()) {
-            if (pending.commandType === commandType) {
+            if (pending.commandType === commandTypeId) {
                 const { resolve } = this.pendingRequests.get(requestId);
                 this.pendingRequests.delete(requestId);
                 resolve(result === 'OK');

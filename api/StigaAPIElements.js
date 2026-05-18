@@ -264,12 +264,13 @@ function formatRobotStatusFlag(statusFlag) {
 const ROBOT_STATUS_TYPES = {
     0: 'WAITING_FOR_COMMAND',
     1: 'MOWING',
+    2: 'GOING_HOME',
     3: 'CHARGING',
     4: 'DOCKED',
     5: 'UPDATING',
     6: 'BLOCKED',
     8: 'LID_OPEN',
-    13: 'GOING_HOME',
+    13: 'GOING_HOME', // ? duplicate
     18: 'CALIBRATION',
     20: 'BLADES_CALIBRATING',
     24: 'UNKNOWN_24',
