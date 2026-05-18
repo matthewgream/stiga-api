@@ -5,3 +5,4 @@ stiga_user_and_pass.js
 .apikey
 tools/*.csv
 tools/*.json
+data/
