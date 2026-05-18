@@ -208,12 +208,12 @@ async function runWatch(options, context) {
         if (pollTimer) clearTimeout(pollTimer);
         pollTimer = setTimeout(async () => {
             if (stopping) return;
-            display.verbose(`[${formatWatchTimestamp()}] polling (idle ${intervalSeconds}s)`);
+            display.verbose(`[${formatWatchTimestamp()}] watch poll (idle ${intervalSeconds}s)`);
             try {
                 if (watchRobot) await device.getStatusAll({ refresh: 'force' });
                 if (watchBase) await base.getStatusAll({ refresh: 'force' });
             } catch (e) {
-                display.error(`[${formatWatchTimestamp()}] poll failed: ${e.message}`);
+                display.error(`[${formatWatchTimestamp()}] watch poll failed: ${e.message}`);
             }
             schedulePoll();
         }, intervalMs);
@@ -242,17 +242,17 @@ async function runWatch(options, context) {
         cb.on('notification', onEvent('base', 'notification'));
     }
 
-    display.log(`[${formatWatchTimestamp()}] watching (poll every ${intervalSeconds}s when idle, Ctrl-C to stop)`);
+    display.log(`[${formatWatchTimestamp()}] watch starting (poll every ${intervalSeconds}s when idle, Ctrl-C to stop)`);
     schedulePoll();
 
-    await new Promise((resolve) => {
+    await new Promise((resolve) =>
         process.once('SIGINT', () => {
             stopping = true;
             if (pollTimer) clearTimeout(pollTimer);
-            display.log(`\n[${formatWatchTimestamp()}] stopping watch`);
+            display.log(`\n[${formatWatchTimestamp()}] watch stopping`);
             resolve();
-        });
-    });
+        })
+    );
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -560,7 +560,7 @@ async function showGeneralHelp() {
     display.log('  --both           Select both robot and base station as targets (default)');
     display.log('  --debug          Enable debug output');
     display.log('  --verbose        Enable verbose output');
-    display.log("  --watch [secs]   Watch and show events: request status every 'secs' (default 5) if idle");
+    display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle');
     display.log('\nCommands:');
 
     for (const [name, cmd] of Object.entries(commands)) display.log(`  ${name.padEnd(15)} ${cmd.description} (${cmd.targets.join(', ')})`);
@@ -576,29 +576,30 @@ async function showGeneralHelp() {
 async function main() {
     const options = parseArgs();
 
-    if (!options.command) {
+    if (!options.command && !options.watch) {
         await showGeneralHelp();
         process.exit(1);
     }
 
-    if (options.params.length > 0 && options.params[options.params.length - 1] === 'help') {
-        const cmd = commands[options.command.toLowerCase()];
-        if (cmd?.help) {
-            cmd.help();
-            process.exit(0);
+    let cmd;
+    if (options.command) {
+        if (options.params.length > 0 && options.params[options.params.length - 1] === 'help') {
+            const c = commands[options.command.toLowerCase()];
+            if (c?.help) {
+                c.help();
+                process.exit(0);
+            }
         }
-    }
-
-    const cmd = commands[options.command.toLowerCase()];
-    if (!cmd) {
-        display.error(`Unknown command: ${options.command}`);
-        await showGeneralHelp();
-        process.exit(1);
-    }
-
-    if (options.target !== 'both' && !cmd.targets.includes(options.target)) {
-        display.error(`Command '${options.command}' does not support target '${options.target}' (only ${cmd.targets.join(', ')})`);
-        process.exit(1);
+        cmd = commands[options.command.toLowerCase()];
+        if (!cmd) {
+            display.error(`Unknown command: ${options.command}`);
+            await showGeneralHelp();
+            process.exit(1);
+        }
+        if (options.target !== 'both' && !cmd.targets.includes(options.target)) {
+            display.error(`Command '${options.command}' does not support target '${options.target}' (only ${cmd.targets.join(', ')})`);
+            process.exit(1);
+        }
     }
 
     try {
@@ -629,8 +630,10 @@ async function main() {
             options,
         };
 
-        display.debug(`Executing command: ${options.command}`);
-        await cmd.execute(options, context);
+        if (cmd) {
+            display.debug(`Executing command: ${options.command}`);
+            await cmd.execute(options, context);
+        }
 
         if (options.watch) await runWatch(options, context);
 
