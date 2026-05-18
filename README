@@ -21,8 +21,9 @@ by default) to view the positions overlaid on Google Maps.
 "tools/stiga-exporter.js" -- to read the capture database and translate it into CSV or Google Sheets format
 for analysis and diagnostics.
 
-"tools/stiga-command.js" -- to directly interact with the reference station and mower. The command set here
-is currently limited and will be expanded.
+"tools/stiga-command.js" -- to directly interact with the reference station and mower. Current commands are
+'version' (both), 'status' (both), 'schedule' (robot), 'start' (robot), 'stop' (robot), 'go-home' (robot),
+'calibrate-blades' (robot).
 
 "tools/stiga-tools.bash" -- to load autocomplete information into bash for use with the tools.
 
