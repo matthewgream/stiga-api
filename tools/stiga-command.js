@@ -67,8 +67,7 @@ function parseArgs() {
             i++;
         } else if (args[i] === '--watch') {
             options.watch = 5;
-            if (i + 1 < args.length && /^\d+$/.test(args[i + 1]) && Number.parseInt(args[i + 1]) > 0)
-                options.watch = Number.parseInt(args[++i]);
+            if (i + 1 < args.length && /^\d+$/.test(args[i + 1]) && Number.parseInt(args[i + 1]) > 0) options.watch = Number.parseInt(args[++i]);
             i++;
             // eslint-disable-next-line unicorn/no-negated-condition
         } else if (!options.command) {
@@ -561,7 +560,7 @@ async function showGeneralHelp() {
     display.log('  --both           Select both robot and base station as targets (default)');
     display.log('  --debug          Enable debug output');
     display.log('  --verbose        Enable verbose output');
-    display.log('  --watch [secs]   Watch and show events: request status every \'secs\' (default 5) if idle');
+    display.log("  --watch [secs]   Watch and show events: request status every 'secs' (default 5) if idle");
     display.log('\nCommands:');
 
     for (const [name, cmd] of Object.entries(commands)) display.log(`  ${name.padEnd(15)} ${cmd.description} (${cmd.targets.join(', ')})`);
