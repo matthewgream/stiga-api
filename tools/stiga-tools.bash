@@ -42,11 +42,30 @@ _stiga_command_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local commands="version status schedule"
-    local global_opts="--robot --base --both --debug --verbose --help"
+    local commands="version status schedule start stop go-home home calibrate-blades blades info describe check"
+    local global_opts="--robot --base --both --debug --level --format --watch --passive --username --password --help"
+    local levels="quiet normal verbose"
+    local formats="text json none"
     local schedule_subcmds="enable disable insert add remove"
     local robot_status_types="operation battery mowing location network"
     local base_status_types="operation location network"
+    case "${prev}" in
+        --level)
+            COMPREPLY=( $(compgen -W "${levels}" -- "${cur}") )
+            return 0
+            ;;
+        --format)
+            COMPREPLY=( $(compgen -W "${formats}" -- "${cur}") )
+            return 0
+            ;;
+        --watch)
+            COMPREPLY=( $(compgen -W "0 5 10 30 60" -- "${cur}") )
+            return 0
+            ;;
+        --username|--password)
+            return 0
+            ;;
+    esac
     local current_command=""
     local has_target=false
     for ((i=1; i<COMP_CWORD; i++)); do
@@ -54,7 +73,7 @@ _stiga_command_completion() {
             --robot|--base|--both)
                 has_target=true
                 ;;
-            version|status|schedule)
+            version|status|schedule|start|stop|go-home|home|calibrate-blades|blades|info|describe|check)
                 current_command="${COMP_WORDS[i]}"
                 break
                 ;;
@@ -93,6 +112,12 @@ _stiga_command_completion() {
                     esac
                 done
                 COMPREPLY=( $(compgen -W "${status_types} help" -- ${cur}) )
+                return 0
+            fi
+            ;;
+        start|stop|go-home|home|calibrate-blades|blades|info|describe|check|version)
+            if [[ ${cur} != --* ]]; then
+                COMPREPLY=( $(compgen -W "help" -- ${cur}) )
                 return 0
             fi
             ;;

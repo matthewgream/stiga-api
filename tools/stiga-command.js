@@ -3,8 +3,7 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const { StigaAPIFramework, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector } = require('../api/StigaAPI');
-const { username, password } = require('../stiga_user_and_pass.js');
+const { StigaAPIFramework, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector } = require('../api/StigaAPI');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -74,6 +73,8 @@ function parseArgs() {
         level: 'normal',
         watch: undefined,
         format: 'text',
+        username: undefined,
+        password: undefined,
     };
     let i = 0;
     while (i < args.length) {
@@ -99,6 +100,17 @@ function parseArgs() {
         } else if (args[i] === '--watch') {
             options.watch = 5;
             if (i + 1 < args.length && /^\d+$/.test(args[i + 1])) options.watch = Number.parseInt(args[++i]);
+            i++;
+        } else if (args[i] === '--passive') {
+            options.watch = 0;
+            i++;
+        } else if (args[i] === '--username') {
+            if (i + 1 >= args.length) throw new Error('--username requires a value');
+            options.username = args[++i];
+            i++;
+        } else if (args[i] === '--password') {
+            if (i + 1 >= args.length) throw new Error('--password requires a value');
+            options.password = args[++i];
             i++;
         } else if (args[i] === '--format') {
             if (i + 1 >= args.length) throw new Error('--format requires a value (text|json|none)');
@@ -532,19 +544,48 @@ registerCommand('schedule', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+function throwExit(message, exitCode) {
+    const err = new Error(message);
+    err.exitCode = exitCode;
+    return err;
+}
+
+function resolveCredentials(options) {
+    if (options.username && options.password) return { username: options.username, password: options.password };
+    if (options.username || options.password) throw new Error('--username and --password must be provided together');
+    try {
+        const stored = require('../stiga_user_and_pass.js');
+        if (!stored.username || !stored.password) throw new Error('stiga_user_and_pass.js missing username/password');
+        return { username: stored.username, password: stored.password };
+    } catch (e) {
+        if (e.code === 'MODULE_NOT_FOUND') throw new Error('No credentials: provide --username and --password, or create stiga_user_and_pass.js');
+        throw e;
+    }
+}
+
+async function executeRobotCommand(name, fn, context) {
+    const { device, connectors } = context;
+    await connectToRobot(device, connectors);
+    const ok = await fn(device);
+    if (ok === true) {
+        display.text(`${name} command acknowledged`);
+        display.json({ source: 'robot', kind: 'command', command: name, ok: true });
+        return;
+    }
+    display.text(`${name} command rejected by robot`);
+    display.json({ source: 'robot', kind: 'command', command: name, ok: false });
+    throw throwExit(`Robot did not acknowledge '${name}' command`, 2);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 registerCommand('start', {
     description: 'Start mowing',
     targets: ['robot'],
     usage: 'stiga-command --robot start [help]',
     summary: 'Start the robot mowing.',
     examples: ['stiga-command --robot start'],
-    execute: async (options, context) => {
-        const { device, connectors } = context;
-        await connectToRobot(device, connectors);
-        await device.sendStart();
-        display.text('Start command sent');
-        display.json({ source: 'robot', kind: 'command', command: 'start', ok: true });
-    },
+    execute: async (options, context) => executeRobotCommand('start', (d) => d.sendStart(), context),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -555,13 +596,7 @@ registerCommand('stop', {
     usage: 'stiga-command --robot stop [help]',
     summary: 'Stop the robot.',
     examples: ['stiga-command --robot stop'],
-    execute: async (options, context) => {
-        const { device, connectors } = context;
-        await connectToRobot(device, connectors);
-        await device.sendStop();
-        display.text('Stop command sent');
-        display.json({ source: 'robot', kind: 'command', command: 'stop', ok: true });
-    },
+    execute: async (options, context) => executeRobotCommand('stop', (d) => d.sendStop(), context),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -572,13 +607,7 @@ registerCommand(['go-home', 'home'], {
     usage: 'stiga-command --robot go-home [help]',
     summary: 'Send the robot back to its docking station.',
     examples: ['stiga-command --robot go-home'],
-    execute: async (options, context) => {
-        const { device, connectors } = context;
-        await connectToRobot(device, connectors);
-        await device.sendGoHome();
-        display.text('Go-home command sent');
-        display.json({ source: 'robot', kind: 'command', command: 'go-home', ok: true });
-    },
+    execute: async (options, context) => executeRobotCommand('go-home', (d) => d.sendGoHome(), context),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -589,13 +618,278 @@ registerCommand(['calibrate-blades', 'blades'], {
     usage: 'stiga-command --robot calibrate-blades [help]',
     summary: 'Trigger blade calibration on the robot.',
     examples: ['stiga-command --robot calibrate-blades'],
+    execute: async (options, context) => executeRobotCommand('calibrate-blades', (d) => d.sendCalibrateBlades(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function safeAwait(label, fn) {
+    try {
+        return await fn();
+    } catch (e) {
+        display.verbose(`info: ${label} failed: ${e.message}`);
+        return undefined;
+    }
+}
+
+async function gatherRobotInfo(device) {
+    const cloudKeys = ['name', 'productCode', 'serialNumber', 'firmwareVersion', 'deviceType', 'brokerId', 'totalWorkTime', 'isEnabled', 'lastPosition'];
+    const getterMap = {
+        name: () => device.getName(),
+        productCode: () => device.getProductCode(),
+        serialNumber: () => device.getSerialNumber(),
+        firmwareVersion: () => device.getFirmwareVersion(),
+        deviceType: () => device.getDeviceType(),
+        brokerId: () => device.getBrokerId(),
+        totalWorkTime: () => device.getTotalWorkTime(),
+        isEnabled: () => device.getIsEnabled(),
+        lastPosition: () => device.getLastPosition(),
+    };
+    const info = { macAddress: device.getMacAddress() };
+    for (const key of cloudKeys) {
+        const v = await safeAwait(key, getterMap[key]);
+        info[key] = v?.value;
+    }
+    const version = await safeAwait('version', () => device.getVersion({ refresh: 'force' }));
+    info.version = version?.value;
+    const status = await safeAwait('statusAll', () => device.getStatusAll({ refresh: 'force' }));
+    if (status) info.status = { operation: status.operation, battery: status.battery, mowing: status.mowing, location: status.location, network: status.network };
+    const settings = await safeAwait('settings', () => device.getSettings({ refresh: 'force' }));
+    info.settings = settings?.value;
+    const schedule = await safeAwait('schedule', () => device.getScheduleSettings({ refresh: 'force' }));
+    info.schedule = schedule?.value;
+    return info;
+}
+
+async function gatherBaseInfo(base) {
+    const cloudKeys = ['productCode', 'serialNumber', 'firmwareVersion', 'createdAt'];
+    const getterMap = {
+        productCode: () => base.getProductCode(),
+        serialNumber: () => base.getSerialNumber(),
+        firmwareVersion: () => base.getFirmwareVersion(),
+        createdAt: () => base.getCreatedAt(),
+    };
+    const info = { macAddress: base.getMacAddress() };
+    for (const key of cloudKeys) {
+        const v = await safeAwait(key, getterMap[key]);
+        info[key] = v?.value;
+    }
+    const version = await safeAwait('version', () => base.getVersion({ refresh: 'force' }));
+    info.version = version?.value;
+    const status = await safeAwait('statusAll', () => base.getStatusAll({ refresh: 'force' }));
+    if (status) info.status = { operation: status.operation, location: status.location, network: status.network, led: status.led };
+    return info;
+}
+
+function displayRobotInfoText(info) {
+    display.text('Robot Info:');
+    display.text('  Identity:');
+    display.text(`    mac=${info.macAddress}`);
+    display.text(`    name='${info.name ?? '-'}'`);
+    display.text(`    serial=${info.serialNumber ?? '-'}`);
+    display.text(`    product=${info.productCode ?? '-'}`);
+    display.text(`    type=${info.deviceType ?? '-'}`);
+    display.text(`    firmwareCloud=${info.firmwareVersion ?? '-'}`);
+    display.text(`    enabled=${info.isEnabled}`);
+    display.text(`    totalWorkTime=${info.totalWorkTime ?? 0}h`);
+    display.text(`    brokerId=${info.brokerId ?? '-'}`);
+    const lastPos = info.lastPosition ? `${info.lastPosition.latitude},${info.lastPosition.longitude}` : '-';
+    display.text(`    lastPosition=${lastPos}`);
+    if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
+    if (info.status) {
+        display.text('  Status:');
+        if (info.status.operation) display.text(`    operation: ${info.status.operation.type}, valid=${info.status.operation.valid}, docking=${info.status.operation.docking}`);
+        if (info.status.battery) display.text(`    battery: ${info.status.battery.toString()}`);
+        if (info.status.mowing) display.text(`    mowing: ${info.status.mowing.toString()}`);
+        if (info.status.location) display.text(`    location: ${info.status.location.toString()}`);
+        if (info.status.network) display.text(`    network: ${info.status.network.toString()}`);
+    }
+    if (info.settings) display.text(`  Settings: ${info.settings.toString()}`);
+    if (info.schedule) display.text(`  Schedule: ${info.schedule.enabled ? 'enabled' : 'disabled'}, ${info.schedule.totalBlocks} blocks (${Math.floor(info.schedule.totalMinutes / 60)}h${info.schedule.totalMinutes % 60}m)`);
+}
+
+function displayBaseInfoText(info) {
+    display.text('Base Info:');
+    display.text('  Identity:');
+    display.text(`    mac=${info.macAddress}`);
+    display.text(`    serial=${info.serialNumber ?? '-'}`);
+    display.text(`    product=${info.productCode ?? '-'}`);
+    display.text(`    firmwareCloud=${info.firmwareVersion ?? '-'}`);
+    display.text(`    createdAt=${info.createdAt ? (info.createdAt.toISOString?.() ?? info.createdAt) : '-'}`);
+    if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
+    if (info.status) {
+        display.text('  Status:');
+        if (info.status.operation) display.text(`    operation: type=${info.status.operation.type}, flag=${info.status.operation.flag}`);
+        if (info.status.location) display.text(`    location: ${info.status.location.toString()}`);
+        if (info.status.network) display.text(`    network: ${info.status.network.toString()}`);
+        if (info.status.led !== undefined) display.text(`    led: ${info.status.led}`);
+    }
+}
+
+registerCommand(['info', 'describe'], {
+    description: 'Dump all known information for the selected target(s)',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command [--robot|--base] info [help]',
+    summary: 'Gather cloud metadata, firmware version, status, settings, and schedule into a single report.',
+    examples: ['stiga-command --robot info', 'stiga-command --robot info --format json | jq .', 'stiga-command --base info'],
     execute: async (options, context) => {
-        const { device, connectors } = context;
-        await connectToRobot(device, connectors);
-        await device.sendCalibrateBlades();
-        display.text('Calibrate-blades command sent');
-        display.json({ source: 'robot', kind: 'command', command: 'calibrate-blades', ok: true });
+        const { target, device, base, connectors } = context;
+        if (target === 'both' || target === 'robot') {
+            await connectToRobot(device, connectors);
+            const info = await gatherRobotInfo(device);
+            displayRobotInfoText(info);
+            display.json({ source: 'robot', kind: 'info', value: info });
+        }
+        if (target === 'both' || target === 'base') {
+            await connectToBase(base, connectors);
+            const info = await gatherBaseInfo(base);
+            displayBaseInfoText(info);
+            display.json({ source: 'base', kind: 'info', value: info });
+        }
     },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function runChecks(credentials, target) {
+    const counts = { ok: 0, fail: 0, skip: 0 };
+    const unmet = new Set();
+    const state = {};
+
+    const record = (name, status, detail) => {
+        const label = { ok: '[OK]  ', fail: '[FAIL]', skip: '[SKIP]' }[status];
+        display.text(`  ${label} ${name}${detail ? ': ' + detail : ''}`);
+        display.json({ source: 'check', kind: 'step', name, status, detail: detail ?? null });
+        counts[status]++;
+        if (status !== 'ok') unmet.add(name);
+    };
+
+    const step = async (name, requires, fn) => {
+        for (const req of requires)
+            if (unmet.has(req)) {
+                record(name, 'skip', `requires '${req}'`);
+                return;
+            }
+        try {
+            const detail = await fn();
+            record(name, 'ok', detail);
+        } catch (e) {
+            record(name, 'fail', e.message);
+        }
+    };
+
+    display.text('Installation check:');
+
+    await step('credentials', [], async () => {
+        if (!credentials.username) throw new Error('no username');
+        if (!credentials.password) throw new Error('no password');
+        return `username=${credentials.username}`;
+    });
+
+    await step('authentication', ['credentials'], async () => {
+        state.auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+        if (!(await state.auth.isValid())) throw new Error('firebase rejected credentials');
+        return 'token obtained';
+    });
+
+    await step('server reachable', ['authentication'], async () => {
+        state.server = new StigaAPIConnectionServer(state.auth);
+        if (!(await state.server.isConnected())) throw new Error('server /api/user returned non-OK');
+        return state.server.getBaseUrl();
+    });
+
+    await step('garage load', ['server reachable'], async () => {
+        state.garage = new StigaAPIGarage(state.server);
+        if (!(await state.garage.load())) throw new Error('garage load failed');
+        return state.garage.toString();
+    });
+
+    await step('device found', ['garage load'], async () => {
+        state.device = state.garage.getDevices()[0];
+        if (!state.device) throw new Error('no device in garage');
+        return `mac=${state.device.getMacAddress()}`;
+    });
+
+    await step('device metadata', ['device found'], async () => {
+        const [name, fw, brokerId] = await Promise.all([state.device.getName(), state.device.getFirmwareVersion(), state.device.getBrokerId()]);
+        if (!name?.value) throw new Error('no name in garage data');
+        if (!brokerId?.value) throw new Error('no broker ID in garage data');
+        return `name='${name.value}' fw=${fw.value ?? '-'} broker=${brokerId.value}`;
+    });
+
+    const wantBase = target === 'both' || target === 'base';
+    if (wantBase) {
+        await step('base found', ['device found'], async () => {
+            const bases = state.garage.getBasesForDevice(state.device);
+            state.base = bases?.[0];
+            if (!state.base) throw new Error('no base linked to this device');
+            return `mac=${state.base.getMacAddress()}`;
+        });
+    } else record('base found', 'skip', '--robot only');
+
+    await step('mqtt connect', ['device metadata'], async () => {
+        const brokerId = (await state.device.getBrokerId()).value;
+        state.deviceConnection = new StigaAPIConnectionDevice(state.auth, brokerId);
+        const uuid = (await state.device.getUuid()).value;
+        if (!(await state.deviceConnection.connect(uuid))) throw new Error('mqtt broker connect failed');
+        return 'TLS+auth OK';
+    });
+
+    const wantRobot = target === 'both' || target === 'robot';
+    if (wantRobot) {
+        await step('robot subscribe', ['mqtt connect'], async () => {
+            state.deviceConnector = new StigaAPIDeviceConnector(state.device, state.deviceConnection);
+            if (!(await state.deviceConnector.listen())) throw new Error('subscribe failed');
+            return `${state.deviceConnector.getSubscriptions().length} topics`;
+        });
+
+        await step('robot version', ['robot subscribe'], async () => {
+            const v = await state.device.getVersion({ refresh: 'force' });
+            if (!v?.value) throw new Error('no version response within timeout');
+            return v.value.toString({ compressed: true });
+        });
+
+        await step('robot status', ['robot subscribe'], async () => {
+            const s = await state.device.getStatusAll({ refresh: 'force' });
+            if (!s.operation) throw new Error('no status response within timeout');
+            return `op=${s.operation.type}`;
+        });
+    } else record('robot subscribe', 'skip', '--base only');
+
+    if (wantBase) {
+        await step('base subscribe', ['mqtt connect', 'base found'], async () => {
+            state.baseConnector = new StigaAPIBaseConnector(state.base, state.deviceConnection);
+            if (!(await state.baseConnector.listen())) throw new Error('subscribe failed');
+            return `${state.baseConnector.getSubscriptions().length} topics`;
+        });
+
+        await step('base status', ['base subscribe'], async () => {
+            const s = await state.base.getStatusAll({ refresh: 'force' });
+            if (!s.operation) throw new Error('no status response within timeout');
+            return `op=${s.operation.type}`;
+        });
+    }
+
+    state.deviceConnector?.destroy();
+    state.baseConnector?.destroy();
+    state.deviceConnection?.disconnect();
+
+    display.text('');
+    const skipTail = counts.skip ? `, ${counts.skip} skipped` : '';
+    display.text(`Result: ${counts.ok} ok, ${counts.fail} fail${skipTail}`);
+    display.json({ source: 'check', kind: 'summary', ok: counts.ok, fail: counts.fail, skip: counts.skip });
+
+    if (counts.fail > 0) throw throwExit(`check failed (${counts.fail} failure${counts.fail === 1 ? '' : 's'})`, 3);
+}
+
+registerCommand('check', {
+    description: 'Step-by-step installation/connectivity health check',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command [--robot|--base] check [help]',
+    summary: 'Step through credentials, auth, server, garage, broker, MQTT, and first responses, reporting each.',
+    examples: ['stiga-command check', 'stiga-command --robot check', 'stiga-command check --format json | jq .'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runChecks(context.credentials, context.target),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -611,6 +905,9 @@ async function showGeneralHelp() {
     display.log('  --level <lvl>    Output level: quiet (errors only), normal (default), verbose (extra diagnostics on stderr)');
     display.log('  --format <fmt>   Output format: none (suppress), text (default), json (one JSON object per line)');
     display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
+    display.log('  --passive        Alias for --watch 0 (passive listen, no polling)');
+    display.log('  --username <u>   Override credentials from stiga_user_and_pass.js (requires --password)');
+    display.log('  --password <p>   Override credentials from stiga_user_and_pass.js (requires --username)');
     display.log('\nCommands (| separates aliases, any unique prefix also matches):');
     for (const [name, cmd] of Object.entries(commands)) {
         const label = cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name;
@@ -666,10 +963,34 @@ async function main() {
         }
     }
 
+    let credentials;
+    try {
+        credentials = resolveCredentials(options);
+    } catch (e) {
+        display.error(e.message);
+        process.exit(1);
+    }
+
+    if (cmd?.skipDefaultSetup) {
+        try {
+            await cmd.execute(options, {
+                target: options.target,
+                params: options.params.filter((p) => p !== 'help'),
+                options,
+                credentials,
+            });
+            process.exit(0);
+        } catch (e) {
+            display.error('Error:', e.message);
+            if (options.debug) display.error(e.stack);
+            process.exit(e.exitCode ?? 1);
+        }
+    }
+
     try {
         display.debug('Initializing framework...');
         const framework = new StigaAPIFramework({ debug: options.debug });
-        if (!(await framework.load(username, password))) throw new Error('Failed to load framework');
+        if (!(await framework.load(credentials.username, credentials.password))) throw new Error('Failed to load framework');
         const { device, base } = framework.getDeviceAndBasePair();
         if (!device) throw new Error('No robot found');
         if (options.target !== 'robot' && !base) throw new Error('No base found for robot');
@@ -710,11 +1031,10 @@ async function main() {
     } catch (e) {
         display.error('Error:', e.message);
         if (options.debug) display.error(e.stack);
-        process.exit(1);
+        process.exit(e.exitCode ?? 1);
     }
 }
 
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 main();
