@@ -106,10 +106,6 @@ function parseArgs() {
             if (!['text', 'json', 'none'].includes(v)) throw new Error(`Invalid --format value '${v}': must be text|json|none`);
             options.format = v;
             i++;
-        } else if (args[i] === '--no-format') {
-            options.format = 'none';
-            i++;
-            // eslint-disable-next-line unicorn/no-negated-condition
         } else if (!options.command) {
             options.command = args[i];
             i++;
@@ -611,11 +607,10 @@ async function showGeneralHelp() {
     display.log('  --robot          Select/Add robot as target');
     display.log('  --base           Select/Add base station as target');
     display.log('  --both           Select both robot and base station as targets (default)');
-    display.log('  --debug          Enable debug output (to stderr)');
+    display.log('  --debug          Enable debug output (on stderr)');
     display.log('  --level <lvl>    Output level: quiet (errors only), normal (default), verbose (extra diagnostics on stderr)');
+    display.log('  --format <fmt>   Output format: none (suppress), text (default), json (one JSON object per line)');
     display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
-    display.log('  --format <fmt>   Output format: text (default), json (one JSON object per line), none (suppress output)');
-    display.log('  --no-format      Alias for --format none (useful with --debug to see raw message flow)');
     display.log('\nCommands (| separates aliases, any unique prefix also matches):');
     for (const [name, cmd] of Object.entries(commands)) {
         const label = cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name;
