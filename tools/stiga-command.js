@@ -750,7 +750,7 @@ function displayRobotInfoText(info) {
     display.text(`    serial=${info.serialNumber ?? '-'}`);
     display.text(`    product=${info.productCode ?? '-'}`);
     display.text(`    type=${info.deviceType ?? '-'}`);
-    display.text(`    firmwareCloud=${info.firmwareVersion ?? '-'}`);
+    display.text(`    firmware=${info.firmwareVersion ?? '-'}`);
     display.text(`    enabled=${info.isEnabled}`);
     display.text(`    totalWorkTime=${info.totalWorkTime ?? 0}h`);
     display.text(`    brokerId=${info.brokerId ?? '-'}`);
@@ -775,7 +775,7 @@ function displayBaseInfoText(info) {
     display.text(`    mac=${info.macAddress}`);
     display.text(`    serial=${info.serialNumber ?? '-'}`);
     display.text(`    product=${info.productCode ?? '-'}`);
-    display.text(`    firmwareCloud=${info.firmwareVersion ?? '-'}`);
+    display.text(`    firmware=${info.firmwareVersion ?? '-'}`);
     display.text(`    createdAt=${info.createdAt ? (info.createdAt.toISOString?.() ?? info.createdAt) : '-'}`);
     if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
     if (info.status) {
