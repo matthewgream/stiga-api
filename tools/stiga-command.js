@@ -17,21 +17,42 @@ let globalOptions = {
 const display = {
     log: (...args) => console.log(...args),
     error: (...args) => console.error(...args),
-    debug: (...args) => {
-        if (globalOptions.debug) console.log('[DEBUG]', ...args);
-    },
-    verbose: (...args) => {
-        if (globalOptions.verbose || globalOptions.debug) console.log('[VERBOSE]', ...args);
-    },
+    debug: (...args) => globalOptions.debug && console.log('[DEBUG]', ...args),
+    verbose: (...args) => (globalOptions.verbose || globalOptions.debug) && console.log('[VERBOSE]', ...args),
 };
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const commands = {};
+const aliases = {};
 
-function registerCommand(name, config) {
-    commands[name] = config;
+function registerCommand(names, config) {
+    const [primary, ...rest] = Array.isArray(names) ? names : [names];
+    commands[primary] = { ...config, name: primary, aliases: rest };
+    for (const alias of rest) aliases[alias] = primary;
+}
+
+function resolveCommand(name) {
+    const key = name.toLowerCase();
+    if (commands[key]) return commands[key];
+    if (aliases[key]) return commands[aliases[key]];
+    const matches = new Set();
+    for (const n of Object.keys(commands)) if (n.startsWith(key)) matches.add(n);
+    for (const [a, p] of Object.entries(aliases)) if (a.startsWith(key)) matches.add(p);
+    if (matches.size === 0) return undefined;
+    if (matches.size === 1) return commands[[...matches][0]];
+    throw new Error(`Ambiguous command '${name}': matches ${[...matches].join(', ')}`);
+}
+
+function showCommandHelp(cmd) {
+    display.log(`Usage: ${cmd.usage}`);
+    if (cmd.summary) display.log(`\n${cmd.summary}`);
+    if (cmd.details) for (const line of cmd.details) display.log(line);
+    if (cmd.examples?.length > 0) {
+        display.log('\nExamples:');
+        for (const ex of cmd.examples) display.log(`  ${ex}`);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -120,8 +141,8 @@ function parseDays(dayStr) {
 function parseTime(timeStr) {
     const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
     if (!match) throw new Error(`Invalid time format: ${timeStr}. Use HH:MM format.`);
-    const hour = Number.parseInt(match[1]),
-        minute = Number.parseInt(match[2]);
+    const hour = Number.parseInt(match[1]);
+    const minute = Number.parseInt(match[2]);
     if (hour < 0 || hour >= 24) throw new Error(`Invalid hour: ${hour}. Must be 0-23.`);
     if (minute !== 0 && minute !== 30) throw new Error(`Invalid minute: ${minute}. Must be 0 or 30.`);
     return { hour, minute };
@@ -130,8 +151,8 @@ function parseTime(timeStr) {
 function parseTimeBlock(blockStr) {
     const match = blockStr.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
     if (!match) throw new Error(`Invalid time block format: ${blockStr}. Use HH:MM-HH:MM format.`);
-    const startTime = parseTime(match[1]),
-        endTime = parseTime(match[2]);
+    const startTime = parseTime(match[1]);
+    const endTime = parseTime(match[2]);
     return { startTime, endTime };
 }
 
@@ -270,15 +291,11 @@ async function runWatch(options, context) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 registerCommand('version', {
-    description: 'Get version information',
+    description: 'Get firmware/hardware version',
     targets: ['robot', 'base'],
-    help: () => {
-        display.log('Usage: stiga-command [--robot|--base] version [help]');
-        display.log('\nGet version information for the selected target.');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot version');
-        display.log('  stiga-command --base version');
-    },
+    usage: 'stiga-command [--robot|--base] version [help]',
+    summary: 'Get version information for the selected target.',
+    examples: ['stiga-command --robot version', 'stiga-command --base version'],
     execute: async (options, context) => {
         const { target, device, base, connectors } = context;
         if (target === 'both' || target === 'robot') {
@@ -297,29 +314,27 @@ registerCommand('version', {
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 registerCommand('status', {
-    description: 'Get status information',
+    description: 'Get operation/battery/mowing/location/network status',
     targets: ['robot', 'base'],
-    help: () => {
-        display.log('Usage: stiga-command [--robot|--base] status [types] [help]');
-        display.log('\nGet status information for the selected target.');
-        display.log('\nRobot status types:');
-        display.log('  operation - Operational status (type, valid, docking)');
-        display.log('  battery   - Battery status (charge level, capacity)');
-        display.log('  mowing    - Mowing status (zone, completion)');
-        display.log('  location  - GPS/location status');
-        display.log('  network   - Network connectivity status');
-        display.log('\nBase status types:');
-        display.log('  operation - Operational status (type, flag)');
-        display.log('  location  - GPS/RTK location status');
-        display.log('  network   - Network connectivity status');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot status');
-        display.log('  stiga-command --robot status battery,operation');
-        display.log('  stiga-command --base status detailed');
-    },
+    usage: 'stiga-command [--robot|--base] status [types] [help]',
+    summary: 'Get status information for the selected target.',
+    details: [
+        '',
+        'Robot status types:',
+        '  operation - Operational status (type, valid, docking)',
+        '  battery   - Battery status (charge level, capacity)',
+        '  mowing    - Mowing status (zone, completion)',
+        '  location  - GPS/location status',
+        '  network   - Network connectivity status',
+        '',
+        'Base status types:',
+        '  operation - Operational status (type, flag)',
+        '  location  - GPS/RTK location status',
+        '  network   - Network connectivity status',
+    ],
+    examples: ['stiga-command --robot status', 'stiga-command --robot status battery,operation', 'stiga-command --base status'],
     execute: async (options, context) => {
         const { target, params, device, base, connectors } = context;
         if (target === 'both' || target === 'robot') {
@@ -332,11 +347,9 @@ registerCommand('status', {
                 if (status.mowing) display.log(`  Mowing: ${status.mowing.toString()}`);
                 if (status.location) display.log(`  Location: ${status.location.toString()}`);
                 if (status.network) display.log(`  Network: ${status.network.toString()}`);
-            } else {
-                const types = params[0].split(',');
-                for (const type of types) {
-                    const typeClean = type.trim().toLowerCase();
-                    switch (typeClean) {
+            } else
+                for (const type of params[0].split(','))
+                    switch (type.trim().toLowerCase()) {
                         case 'operation':
                             const opStatus = await device.getStatusOperation({ refresh: 'force' });
                             display.log(`Operation: ${opStatus.value?.type || 'unknown'}, valid=${opStatus.value?.valid}, docking=${opStatus.value?.docking}`);
@@ -360,8 +373,6 @@ registerCommand('status', {
                         default:
                             display.log(`Unknown status type: ${type}`);
                     }
-                }
-            }
         }
         if (target === 'both' || target === 'base') {
             await connectToBase(base, connectors);
@@ -371,11 +382,9 @@ registerCommand('status', {
                 if (status.operation) display.log(`  Operation: type=${status.operation.type}, flag=${status.operation.flag}`);
                 if (status.location) display.log(`  Location: ${status.location.toString()}`);
                 if (status.network) display.log(`  Network: ${status.network.toString()}`);
-            } else {
-                const types = params[0].split(',');
-                for (const type of types) {
-                    const typeClean = type.trim().toLowerCase();
-                    switch (typeClean) {
+            } else
+                for (const type of params[0].split(','))
+                    switch (type.trim().toLowerCase()) {
                         case 'operation':
                             const opStatus = await base.getStatusOperation({ refresh: 'force' });
                             display.log(`Operation: type=${opStatus.value?.type}, flag=${opStatus.value?.flag}`);
@@ -391,13 +400,10 @@ registerCommand('status', {
                         default:
                             display.log(`Unknown status type for base: ${type}`);
                     }
-                }
-            }
         }
     },
 });
 
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function scheduleUpdateAndDisplay(device, subCommand, value) {
@@ -408,31 +414,35 @@ async function scheduleUpdateAndDisplay(device, subCommand, value) {
 }
 
 registerCommand('schedule', {
-    description: 'Manage robot schedule',
+    description: 'Display/enable/disable/insert/remove mowing schedule',
     targets: ['robot'],
-    help: () => {
-        display.log('Usage: stiga-command --robot schedule [subcommand] [params...] [help]');
-        display.log("\nManage the robot's mowing schedule.");
-        display.log('\nSubcommands:');
-        display.log('  (none)           - Display current schedule');
-        display.log('  enable           - Enable the schedule');
-        display.log('  disable          - Disable the schedule');
-        display.log('  insert <specs>   - Insert time blocks');
-        display.log('  add <specs>      - Alias for insert');
-        display.log('  remove <specs>   - Remove time blocks');
-        display.log('\nSchedule specification format:');
-        display.log('  days:HH:MM-HH:MM');
-        display.log('\nDays can be:');
-        display.log('  Mon, Tue, Wed, Thu, Fri, Sat, Sun (or full names)');
-        display.log('  Multiple days separated by commas: Mon,Wed,Fri');
-        display.log('\nTimes must be on half-hour boundaries (00 or 30 minutes)');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot schedule');
-        display.log('  stiga-command --robot schedule enable');
-        display.log('  stiga-command --robot schedule insert Mon,Wed,Fri:09:00-11:30');
-        display.log('  stiga-command --robot schedule insert Sat,Sun:08:00-10:00 Sat,Sun:14:00-16:00');
-        display.log('  stiga-command --robot schedule remove Tue:14:00-16:00');
-    },
+    usage: 'stiga-command --robot schedule [subcommand] [params...] [help]',
+    summary: "Manage the robot's mowing schedule.",
+    details: [
+        '',
+        'Subcommands:',
+        '  (none)               - Display current schedule',
+        '  enable               - Enable the schedule',
+        '  disable              - Disable the schedule',
+        '  insert|add <specs>   - Insert time blocks',
+        '  remove <specs>       - Remove time blocks',
+        '',
+        'Schedule specification format:',
+        '  days:HH:MM-HH:MM',
+        '',
+        'Days can be:',
+        '  Mon, Tue, Wed, Thu, Fri, Sat, Sun (or full names)',
+        '  Multiple days separated by commas: Mon,Wed,Fri',
+        '',
+        'Times must be on half-hour boundaries (00 or 30 minutes)',
+    ],
+    examples: [
+        'stiga-command --robot schedule',
+        'stiga-command --robot schedule enable',
+        'stiga-command --robot schedule add Mon,Wed,Fri:09:00-11:30',
+        'stiga-command --robot schedule insert Sat,Sun:08:00-10:00 Sat,Sun:14:00-16:00',
+        'stiga-command --robot schedule remove Tue:14:00-16:00',
+    ],
     execute: async (options, context) => {
         const { params, device, connectors } = context;
         await connectToRobot(device, connectors);
@@ -467,6 +477,7 @@ registerCommand('schedule', {
                 break;
             }
 
+            case 'add':
             case 'insert': {
                 if (params.length < 2) throw new Error('Insert requires schedule specifications');
                 const schedule = await device.getScheduleSettings({ refresh: 'force' });
@@ -490,17 +501,13 @@ registerCommand('schedule', {
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 registerCommand('start', {
     description: 'Start mowing',
     targets: ['robot'],
-    help: () => {
-        display.log('Usage: stiga-command --robot start [help]');
-        display.log('\nStart the robot mowing.');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot start');
-    },
+    usage: 'stiga-command --robot start [help]',
+    summary: 'Start the robot mowing.',
+    examples: ['stiga-command --robot start'],
     execute: async (options, context) => {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
@@ -509,15 +516,14 @@ registerCommand('start', {
     },
 });
 
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 registerCommand('stop', {
     description: 'Stop the robot',
     targets: ['robot'],
-    help: () => {
-        display.log('Usage: stiga-command --robot stop [help]');
-        display.log('\nStop the robot.');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot stop');
-    },
+    usage: 'stiga-command --robot stop [help]',
+    summary: 'Stop the robot.',
+    examples: ['stiga-command --robot stop'],
     execute: async (options, context) => {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
@@ -526,15 +532,14 @@ registerCommand('stop', {
     },
 });
 
-registerCommand('go-home', {
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['go-home', 'home'], {
     description: 'Send the robot home to dock',
     targets: ['robot'],
-    help: () => {
-        display.log('Usage: stiga-command --robot go-home [help]');
-        display.log('\nSend the robot back to its docking station.');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot go-home');
-    },
+    usage: 'stiga-command --robot go-home [help]',
+    summary: 'Send the robot back to its docking station.',
+    examples: ['stiga-command --robot go-home'],
     execute: async (options, context) => {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
@@ -543,15 +548,14 @@ registerCommand('go-home', {
     },
 });
 
-registerCommand('calibrate-blades', {
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['calibrate-blades', 'blades'], {
     description: 'Calibrate the cutting blades',
     targets: ['robot'],
-    help: () => {
-        display.log('Usage: stiga-command --robot calibrate-blades [help]');
-        display.log('\nTrigger blade calibration on the robot.');
-        display.log('\nExamples:');
-        display.log('  stiga-command --robot calibrate-blades');
-    },
+    usage: 'stiga-command --robot calibrate-blades [help]',
+    summary: 'Trigger blade calibration on the robot.',
+    examples: ['stiga-command --robot calibrate-blades'],
     execute: async (options, context) => {
         const { device, connectors } = context;
         await connectToRobot(device, connectors);
@@ -573,16 +577,14 @@ async function showGeneralHelp() {
     display.log('  --verbose        Enable verbose output');
     display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
     display.log('  --no-format      Suppress formatted watch output (useful with --debug to see raw message flow)');
-    display.log('\nCommands:');
-
-    for (const [name, cmd] of Object.entries(commands)) display.log(`  ${name.padEnd(15)} ${cmd.description} (${cmd.targets.join(', ')})`);
-
+    display.log('\nCommands (| separates aliases, any unique prefix also matches):');
+    for (const [name, cmd] of Object.entries(commands)) display.log(`  ${(cmd.aliases?.length > 0 ? `${name}|${cmd.aliases.join('|')}` : name).padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
     display.log('\nFor command-specific help:');
     display.log('  stiga-command <command> help');
     display.log('\nExamples:');
-    display.log('  stiga-command version help');
-    display.log('  stiga-command --robot status');
-    display.log('  stiga-command --robot schedule help');
+    for (const cmd of Object.values(commands).filter((cmd) => cmd.examples?.[0])) display.log(`  ${cmd.examples[0]}`);
+    display.log('  stiga-command --robot --watch');
+    display.log('  stiga-command --robot --watch 0 --debug');
 }
 
 async function main() {
@@ -595,14 +597,19 @@ async function main() {
 
     let cmd;
     if (options.command) {
-        if (options.params.length > 0 && options.params[options.params.length - 1] === 'help') {
-            const c = commands[options.command.toLowerCase()];
-            if (c?.help) {
-                c.help();
-                process.exit(0);
+        try {
+            if (options.params.length > 0 && options.params[options.params.length - 1] === 'help') {
+                const c = resolveCommand(options.command);
+                if (c) {
+                    showCommandHelp(c);
+                    process.exit(0);
+                }
             }
+            cmd = resolveCommand(options.command);
+        } catch (e) {
+            display.error(e.message);
+            process.exit(1);
         }
-        cmd = commands[options.command.toLowerCase()];
         if (!cmd) {
             display.error(`Unknown command: ${options.command}`);
             await showGeneralHelp();
