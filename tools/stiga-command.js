@@ -46,6 +46,7 @@ function parseArgs() {
         debug: false,
         verbose: false,
         watch: undefined,
+        noFormat: false,
     };
     let i = 0;
     while (i < args.length) {
@@ -67,7 +68,10 @@ function parseArgs() {
             i++;
         } else if (args[i] === '--watch') {
             options.watch = 5;
-            if (i + 1 < args.length && /^\d+$/.test(args[i + 1]) && Number.parseInt(args[i + 1]) > 0) options.watch = Number.parseInt(args[++i]);
+            if (i + 1 < args.length && /^\d+$/.test(args[i + 1])) options.watch = Number.parseInt(args[++i]);
+            i++;
+        } else if (args[i] === '--no-format') {
+            options.noFormat = true;
             i++;
             // eslint-disable-next-line unicorn/no-negated-condition
         } else if (!options.command) {
@@ -191,6 +195,8 @@ async function runWatch(options, context) {
     const { target, device, base, connectors } = context;
     const intervalSeconds = options.watch;
     const intervalMs = intervalSeconds * 1000;
+    const pollEnabled = intervalSeconds > 0;
+    const formatted = !options.noFormat;
 
     const watchRobot = target === 'both' || target === 'robot';
     const watchBase = target === 'both' || target === 'base';
@@ -201,10 +207,12 @@ async function runWatch(options, context) {
     let pollTimer;
     let stopping = false;
 
-    const log = (source, kind, value) => display.log(`[${formatWatchTimestamp()}] ${source} ${kind}: ${formatWatchValue(value)}`);
+    const log = (source, kind, value) => {
+        if (formatted) display.log(`[${formatWatchTimestamp()}] ${source} ${kind}: ${formatWatchValue(value)}`);
+    };
 
     const schedulePoll = () => {
-        if (stopping) return;
+        if (!pollEnabled || stopping) return;
         if (pollTimer) clearTimeout(pollTimer);
         pollTimer = setTimeout(async () => {
             if (stopping) return;
@@ -242,14 +250,17 @@ async function runWatch(options, context) {
         cb.on('notification', onEvent('base', 'notification'));
     }
 
-    display.log(`[${formatWatchTimestamp()}] watch starting (poll every ${intervalSeconds}s when idle, Ctrl-C to stop)`);
+    if (formatted) {
+        const pollDesc = pollEnabled ? `poll every ${intervalSeconds}s when idle` : 'passive (no polling)';
+        display.log(`[${formatWatchTimestamp()}] watch starting (${pollDesc}, Ctrl-C to stop)`);
+    }
     schedulePoll();
 
     await new Promise((resolve) =>
         process.once('SIGINT', () => {
             stopping = true;
             if (pollTimer) clearTimeout(pollTimer);
-            display.log(`\n[${formatWatchTimestamp()}] watch stopping`);
+            if (formatted) display.log(`\n[${formatWatchTimestamp()}] watch stopping`);
             resolve();
         })
     );
@@ -560,7 +571,8 @@ async function showGeneralHelp() {
     display.log('  --both           Select both robot and base station as targets (default)');
     display.log('  --debug          Enable debug output');
     display.log('  --verbose        Enable verbose output');
-    display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle');
+    display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
+    display.log('  --no-format      Suppress formatted watch output (useful with --debug to see raw message flow)');
     display.log('\nCommands:');
 
     for (const [name, cmd] of Object.entries(commands)) display.log(`  ${name.padEnd(15)} ${cmd.description} (${cmd.targets.join(', ')})`);
@@ -576,7 +588,7 @@ async function showGeneralHelp() {
 async function main() {
     const options = parseArgs();
 
-    if (!options.command && !options.watch) {
+    if (!options.command && options.watch === undefined) {
         await showGeneralHelp();
         process.exit(1);
     }
@@ -635,7 +647,7 @@ async function main() {
             await cmd.execute(options, context);
         }
 
-        if (options.watch) await runWatch(options, context);
+        if (options.watch !== undefined) await runWatch(options, context);
 
         display.debug('Cleaning up connections...');
         if (connectors.connectedDevice) connectors.connectedDevice.destroy();

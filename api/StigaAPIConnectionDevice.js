@@ -190,15 +190,16 @@ class StigaAPIConnectionDevice extends StigaAPIComponent {
     }
 
     _handleMessage(topic, message) {
+        this.display.debug(`connection: received (${topic}):`);
+        this.display.debug(formatHexDump(message, '  ').join('\n'));
         if (topic.includes('_ACK/')) this._handleAck(topic, message);
         else if (topic.includes('/LOG/')) this._handleResponse(topic, message);
         this._emitMessage(topic, message);
     }
 
     // XXX not just CMD_REFERENCE
-    _handleAckUnknown(topic, message) {
-        this.display.debug(`connection: external ACK (${topic}):`);
-        this.display.debug(formatHexDump(message, '  ').join('\n'));
+    _handleAckUnknown(topic, _message) {
+        this.display.debug(`connection: external ACK unmatched (${topic})`);
     }
 
     // XXX not just CMD_REFERENCE ... should propagate unhandled acks if they are being listened to
