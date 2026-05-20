@@ -8,8 +8,9 @@
 5. Run "tools/stiga-command.js check" for Cloud and MQTT connectivity checks.
 6. Exercise "tools/stiga-command.js" as you please for version, status, actions, etc.
 7. Utilise "tools/stiga-monitor.js --monitor" for console based real-time status interface.
+8. Read the updates/details below, if you please, note that newer updates may invalid details in older.
 
-*** USAGE (20 MAY 2026) ***
+*** UPDATE (20 MAY 2026) ***
 
 Added further commands to "stiga-command.js": all the basic ones plus ability to read settings.
 
@@ -78,7 +79,7 @@ Commands (| separates aliases, any unique prefix also matches):
 For command-specific help:
   stiga-command <command> help
 
-*** USAGE (13 MAY 2026) *** 
+*** UPDATE (13 MAY 2026) *** 
 
 To use this repo, you should clone it locally, follow the instructions below to configure authentication, and
 then smoke test with "tools/stiga-command.js check". If this succeeds, you can progress. If this does not
