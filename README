@@ -10,6 +10,22 @@
 7. Utilise "tools/stiga-monitor.js --monitor" for console based real-time status interface.
 8. Read the updates/details below, if you please, note that newer updates may invalid details in older.
 
+root@workshop:/opt/stiga-api# tools/stiga-command.js check
+Installation check:
+  [OK]   credentials: username=user.name@gmail.com
+  [OK]   authentication: token obtained
+  [OK]   server reachable: https://connectivity-production.stiga.com
+  [OK]   garage load: devices=1, bases=1, packs=1
+  [OK]   device found: mac=D0:EF:76:64:32:BA
+  [OK]   device metadata: name='Stiga Stuga' fw=0.0.3.151.0.0.3.143.0.0.3.68 broker=broker2
+  [OK]   base found: mac=FC:E8:C0:72:EC:62
+  [OK]   mqtt connect: TLS+auth OK
+  [OK]   robot subscribe: 4 topics
+  [OK]   robot version: 0.0.3.151/0.0.3.143/0.0.3.68/EG912UGLAAR03A09M08_01.200.01/1.32
+  [OK]   robot status: op=BLOCKED
+  [OK]   base subscribe: 4 topics
+  [OK]   base status: op=STANDBY
+
 *** UPDATE (20 MAY 2026) ***
 
 Added further commands to "stiga-command.js": all the basic ones plus ability to read settings.
