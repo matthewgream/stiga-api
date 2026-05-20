@@ -1,12 +1,12 @@
 
 *** QUICK START ***
 
-1. install nodejs (e.g. as per "https://nodesource.com/products/distributions").
-2. Clone the repo ("git clone https://github.com/matthewgream/stiga-api").
-3. Run "npm install" in "stiga-api" to get the module dependencies.
-4. Edit "stiga-config.js" to specify your username and password, plus your station's lat/lon
+1. Install NodeJS (e.g. as per "https://nodesource.com/products/distributions").
+2. Clone this repo ("git clone https://github.com/matthewgream/stiga-api").
+3. Run "npm install" in "stiga-api" to get the "package.json" module dependencies.
+4. Edit "stiga-config.js" to specify your username and password, plus your station's lat/lon.
 5. Run "tools/stiga-command.js check" for Cloud and MQTT connectivity checks.
-6. Exercise "tools/stiga-command.js" as you please for version, status, actions.
+6. Exercise "tools/stiga-command.js" as you please for version, status, actions, etc.
 7. Utilise "tools/stiga-monitor.js --monitor" for console based real-time status interface.
 
 *** USAGE (20 MAY 2026) ***
