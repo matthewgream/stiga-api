@@ -64,14 +64,20 @@ class StigaAPIConnectionDevice extends StigaAPIComponent {
     }
 
     async connect(clientId) {
-        if (this.connected || this.client) {
-            this.display.error('connection: mqtt broker already connected');
+        if (this.connected) {
+            this.display.debug('connection: mqtt broker already connected');
             return true;
         }
+        if (this.client) {
+            this.display.debug('connection: mqtt broker client present but disconnected, recreating');
+            this.client.removeAllListeners();
+            this.client.end(true);
+            this.client = undefined;
+        }
         try {
-            this.options.clientId = clientId;
+            this.options.clientId = `${clientId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
             if (!(await this.authenticate())) return false;
-            this.display.debug(`connection: mqtt broker connection request (client=${clientId}, broker=${this.broker})`);
+            this.display.debug(`connection: mqtt broker connection request (client=${this.options.clientId}, broker=${this.broker})`);
             return new Promise((resolve, reject) => {
                 let connected = false;
                 this.client = mqtt.connect(this.broker, this.options);

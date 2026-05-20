@@ -84,8 +84,7 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
                 this.display.error(`connectedDevice ${this.macAddress}: failed to connect to MQTT broker`);
                 return false;
             }
-        this._subscribeToTopics();
-        return true;
+        return this._subscribeToTopics();
     }
 
     provides(key) {
@@ -113,11 +112,9 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
                 handler: (topic, message) => this._handleMessageJsonNotification(topic, message),
             },
         ];
-        subscriptions.forEach(({ topic, handler }) => {
-            this.connection.subscribe(topic, handler);
-            this.subscriptions.push(topic);
-        });
-        this.display.debug(`connectedDevice ${this.macAddress}: subscribed to ${this.subscriptions.length} topics`);
+        subscriptions.forEach(({ topic, handler }) => this.connection.subscribe(topic, handler) && this.subscriptions.push(topic));
+        this.display.debug(`connectedDevice ${this.macAddress}: subscribed to ${this.subscriptions.length} of ${subscriptions.length} topics`);
+        return this.subscriptions.length === subscriptions.length;
     }
     _unsubscribeFromTopics() {
         for (const topic of this.subscriptions) this.connection.unsubscribe(topic);

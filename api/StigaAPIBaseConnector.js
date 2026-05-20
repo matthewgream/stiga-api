@@ -60,8 +60,7 @@ class StigaAPIBaseConnector extends StigaAPIComponent {
                 return false;
             }
         }
-        this._subscribeToTopics();
-        return true;
+        return this._subscribeToTopics();
     }
 
     provides(key) {
@@ -89,11 +88,9 @@ class StigaAPIBaseConnector extends StigaAPIComponent {
                 handler: (topic, message) => this._handleMessageJsonNotification(topic, message),
             },
         ];
-        subscriptions.forEach(({ topic, handler }) => {
-            this.connection.subscribe(topic, handler);
-            this.subscriptions.push(topic);
-        });
-        this.display.debug(`connectedBase ${this.macAddress}: subscribed to ${this.subscriptions.length} topics`);
+        subscriptions.forEach(({ topic, handler }) => this.connection.subscribe(topic, handler) && this.subscriptions.push(topic));
+        this.display.debug(`connectedBase ${this.macAddress}: subscribed to ${this.subscriptions.length} of ${subscriptions.length} topics`);
+        return this.subscriptions.length === subscriptions.length;
     }
 
     _unsubscribeFromTopics() {
