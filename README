@@ -26,6 +26,22 @@ Installation check:
   [OK]   base subscribe: 4 topics
   [OK]   base status: op=STANDBY
 
+
+*** UPDATE (22 MAY 2026) ***
+
+Corrected the display of RTK offset in status and position messages.
+
+Implemented a "--webstatus" option to stiga-monitor.js, which will render a map and robot status/position, with
+also breadcrumb tail of activity, defaulting to port 3001. This gives you a web based way to monitor the robot.
+For this, you need a Google Maps API key (https://developers.google.com/maps/documentation/javascript/get-api-key)
+which you can then place in your stiga-config.js.
+
+Implemented "user", "notifications", and "perimeter" commands in stiga-command.js, to show all of this data,
+including qualifiers for notifications (unread, recent, etc). The perimeters are rendered on the webstatus map,
+as they are also in the mobile app. Note this shows both zones and obstacles, but not temporary go-away areas 
+at the moment. 
+
+
 *** UPDATE (20 MAY 2026) ***
 
 Added further commands to "stiga-command.js": all the basic ones plus ability to read settings.
@@ -94,6 +110,7 @@ Commands (| separates aliases, any unique prefix also matches):
 
 For command-specific help:
   stiga-command <command> help
+
 
 *** UPDATE (13 MAY 2026) *** 
 
