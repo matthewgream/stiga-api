@@ -30,7 +30,7 @@ const DEFAULT_CONFIG = {
     intercept_port: 8083,
     webstatus_port: 3001,
     timing_levels_docked: 'status:30s,version:60m,settings:30m',
-    timing_levels_undocked: 'status:30s,version:30m,settings:5m',
+    timing_levels_undocked: 'status:15s,version:30m,settings:5m',
 };
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -176,12 +176,13 @@ Configuration:
   --apikey=KEY                 Google Maps API key for --webstatus (or mapsApiKey in stiga-config.js)
 
 Monitor Timing Options:
-  --timing-levels-docked       Timing when docked (format: status:30s,version:60m,settings:30m)
-  --timing-levels-undocked     Timing when undocked (format: status:30s,version:30m,settings:5m)
+  --timing-levels-docked       Timing when docked (default: status:30s,version:60m,settings:30m)
+  --timing-levels-undocked     Timing when undocked (default: status:15s,version:30m,settings:5m)
 
 Examples:
   stiga-monitor --monitor --capture=capture.db --listen=listen.log --intercept --background
   stiga-monitor --webstatus --apikey=YOUR_GOOGLE_MAPS_KEY
+  stiga-monitor --monitor --timing-levels-undocked=status:10s,version:20m,settings:5m
   stiga-monitor --connect
 `);
 }

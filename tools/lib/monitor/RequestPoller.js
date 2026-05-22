@@ -23,7 +23,7 @@ const DEFAULT_TIMING_DOCKED = {
 const DEFAULT_TIMING_UNDOCKED = {
     version: 30 * 60 * 1000, // 30 minutes
     settings: 5 * 60 * 1000, // 5 minutes
-    status: 30 * 1000, // 30 seconds
+    status: 15 * 1000, // 15 seconds
 };
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------

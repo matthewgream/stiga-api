@@ -283,6 +283,9 @@ html,body{margin:0;height:100%}
 .infobox td{padding:1px 0;vertical-align:top}
 .infobox td.k{color:#80868b;padding-right:12px;white-space:nowrap}
 .infobox .muted{color:#9aa0a6;margin-top:4px}
+#statusbox .tracks{margin-top:6px;font-size:11px;color:#80868b}
+#statusbox .btn{cursor:pointer;border:1px solid #c4c7c5;border-radius:3px;padding:0 6px;margin-left:4px;color:#202124;user-select:none}
+#statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
 `;
 
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
@@ -292,6 +295,7 @@ var map, infoWindow, baseMarker, robotMarker, robotPin;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
+var tracksOn = false, crumbs = [], trackLine = null, lastCrumbTime = null;
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
 var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
 
@@ -322,10 +326,14 @@ function initMap(){
   robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin.element });
   attachHover(robotMarker, 'robot');
 
+  trackLine = new google.maps.Polyline({ path: [], strokeColor: '#ffffff', strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3 });
+
   refresh();
   setInterval(refresh, CONFIG.pollMs);
 }
 window.initMap = initMap;
+window.toggleTracks = toggleTracks;
+window.clearTracks = clearTracks;
 
 function attachHover(marker, kind){
   var node = marker.content;
@@ -419,6 +427,7 @@ function refresh(){
           map.fitBounds(b, 90);
         }
       }
+      recordCrumb();
       renderStatusBox();
       highlightActiveZone();
       if(hovered) infoWindow.setContent(hovered === 'base' ? baseInfo() : robotInfo());
@@ -436,6 +445,30 @@ function robotColor(r){
   return '#fbbc04';
 }
 
+// client-side breadcrumb trail — a point is appended on each fresh position report while
+// tracks are ON. Session-only: not persisted, lost on page refresh.
+function recordCrumb(){
+  if(!tracksOn || !state || !state.robot) return;
+  var r = state.robot;
+  if(typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return;
+  if(r.updatedPosition === lastCrumbTime) return;
+  lastCrumbTime = r.updatedPosition;
+  crumbs.push({ lat: r.latitude, lng: r.longitude });
+  trackLine.setPath(crumbs);
+}
+function toggleTracks(){
+  tracksOn = !tracksOn;
+  trackLine.setMap(tracksOn ? map : null);
+  if(tracksOn){ lastCrumbTime = null; recordCrumb(); }
+  renderStatusBox();
+}
+function clearTracks(){
+  crumbs = [];
+  lastCrumbTime = null;
+  trackLine.setPath([]);
+  renderStatusBox();
+}
+
 function row(k,v){ return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>'; }
 
 function renderStatusBox(){
@@ -448,10 +481,13 @@ function renderStatusBox(){
   var batt = r.battery ? (r.battery.charge + '%') : '-';
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
+  var trk = '<div class="tracks">Tracks:' +
+    '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
+    '<span class="btn" onclick="clearTracks()">CLR</span></div>';
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot</h1>' +
     row('State', place) + row('Status', op) + row('Battery', batt) + row('Mowing', mow) +
-    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>';
+    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
 }
 
 function table(rows){
