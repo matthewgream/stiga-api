@@ -354,6 +354,7 @@ registerCommand('version', {
 registerCommand('status', {
     description: 'Get operation/battery/mowing/location/network status',
     targets: ['robot', 'base'],
+    args: '[types...]',
     usage: 'stiga-command [--robot|--base] status [types] [help]',
     summary: 'Get status information for the selected target.',
     details: [
@@ -470,6 +471,7 @@ async function scheduleUpdateAndDisplay(device, subCommand, value) {
 registerCommand('schedule', {
     description: 'Display/enable/disable/insert/remove mowing schedule',
     targets: ['robot'],
+    args: '[subcommand]',
     usage: 'stiga-command --robot schedule [subcommand] [params...] [help]',
     summary: "Manage the robot's mowing schedule.",
     details: [
@@ -1175,6 +1177,7 @@ async function runNotifications(credentials, selectors) {
 registerCommand('notifications', {
     description: 'Display device notifications/events from the cloud',
     targets: ['robot', 'base'],
+    args: '[qualifier...]',
     usage: 'stiga-command notifications [qualifier...] [help]',
     summary: 'Fetch the notification/event feed (events, errors) from the Stiga Cloud.',
     details: [
@@ -1214,7 +1217,12 @@ async function showGeneralHelp() {
     display.log(`  3. stiga-config.<hostname>.js  (this host: stiga-config.${require('node:os').hostname()}.js)`);
     display.log('  4. stiga-config.js');
     display.log('\nCommands (| separates aliases, any unique prefix also matches):');
-    for (const [name, cmd] of Object.entries(commands)) display.log(`  ${(cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name).padEnd(25)} ${cmd.description} (${cmd.targets.join(', ')})`);
+    const labels = Object.entries(commands).map(([name, cmd]) => ({
+        cmd,
+        label: (cmd.aliases?.length > 0 ? [name, ...cmd.aliases].join('|') : name) + (cmd.args ? ' ' + cmd.args : ''),
+    }));
+    const labelWidth = Math.max(...labels.map((l) => l.label.length)) + 2;
+    for (const { label, cmd } of labels) display.log(`  ${label.padEnd(labelWidth)} ${cmd.description} (${cmd.targets.join(', ')})`);
     display.log('\nFor command-specific help:');
     display.log('  stiga-command <command> help');
     display.log('\nExamples:');
