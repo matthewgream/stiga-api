@@ -3,7 +3,19 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const { StigaAPIFramework, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector, StigaAPIConfig } = require('../api/StigaAPI');
+const {
+    StigaAPIFramework,
+    StigaAPIAuthentication,
+    StigaAPIConnectionServer,
+    StigaAPIGarage,
+    StigaAPIPerimeters,
+    StigaAPIUser,
+    StigaAPINotifications,
+    StigaAPIConnectionDevice,
+    StigaAPIDeviceConnector,
+    StigaAPIBaseConnector,
+    StigaAPIConfig,
+} = require('../api/StigaAPI');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1045,6 +1057,139 @@ registerCommand('perimeters', {
     examples: ['stiga-command perimeters', 'stiga-command perimeters --format json | jq .'],
     skipDefaultSetup: true,
     execute: async (options, context) => runPerimeters(context.credentials),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function runUser(credentials) {
+    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+    const server = new StigaAPIConnectionServer(auth);
+    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
+    const user = new StigaAPIUser(server);
+    if (!(await user.load())) throw throwExit('failed to load user account', 2);
+
+    const lastLogin = user.getLastLogin();
+    display.text('User Account:');
+    display.text(`  Name:       ${user.getFullName() || '-'}`);
+    display.text(`  Email:      ${user.getEmail() || '-'}`);
+    display.text(`  Mobile:     ${user.getMobile() || '-'}`);
+    display.text(`  Country:    ${user.getCountry() || '-'}`);
+    display.text(`  Language:   ${user.getLanguage() || '-'}`);
+    display.text(`  Verified:   ${user.isVerified() ? 'yes' : 'no'}`);
+    display.text(`  Last login: ${lastLogin ? lastLogin.toISOString() : '-'}`);
+    display.text(`  Consent:    terms=${user.hasAcceptedTerms() ? 'yes' : 'no'}, marketing=${user.hasMarketingConsent() ? 'yes' : 'no'}, dataAnalysis=${user.hasDataAnalysisConsent() ? 'yes' : 'no'}`);
+    display.json({
+        source: 'cloud',
+        kind: 'user',
+        value: {
+            uuid: user.getUuid() ?? null,
+            name: user.getFullName() ?? null,
+            email: user.getEmail() ?? null,
+            mobile: user.getMobile() ?? null,
+            country: user.getCountry() ?? null,
+            language: user.getLanguage() ?? null,
+            verified: user.isVerified(),
+            lastLogin: lastLogin ? lastLogin.toISOString() : null,
+            termsAccepted: user.hasAcceptedTerms(),
+            marketingConsent: user.hasMarketingConsent(),
+            dataAnalysisConsent: user.hasDataAnalysisConsent(),
+        },
+    });
+}
+
+registerCommand('user', {
+    description: 'Display the cloud account profile',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command user [help]',
+    summary: 'Fetch the Stiga Cloud account profile (name, email, verification, consents).',
+    examples: ['stiga-command user', 'stiga-command user --format json | jq .'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runUser(context.credentials),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// build a predicate for one --select qualifier; multiple qualifiers combine with AND
+function notificationPredicate(selector) {
+    const sel = selector.toLowerCase();
+    if (sel === 'unread') return (n) => !n.isRead();
+    if (sel === 'read') return (n) => n.isRead();
+    if (sel === 'recent' || sel.startsWith('recent:')) {
+        const hours = sel.includes(':') ? Number.parseInt(sel.slice(sel.indexOf(':') + 1)) || 24 : 24;
+        const cutoff = Date.now() - hours * 60 * 60 * 1000;
+        return (n) => {
+            const createdAt = n.getCreatedAt();
+            return createdAt !== undefined && createdAt.getTime() > cutoff;
+        };
+    }
+    if (sel.startsWith('type:')) return (n) => (n.getType() || '').toLowerCase() === sel.slice(5);
+    if (sel.startsWith('category:')) return (n) => (n.getCategory() || '').toLowerCase() === sel.slice(9);
+    return (n) => (n.getType() || '').toLowerCase() === sel || (n.getCategory() || '').toLowerCase() === sel;
+}
+
+async function runNotifications(credentials, selectors) {
+    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+    const server = new StigaAPIConnectionServer(auth);
+    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
+    const notifications = new StigaAPINotifications(server);
+    if (!(await notifications.load())) throw throwExit('failed to load notifications', 2);
+
+    let list = notifications.getAll();
+    for (const selector of selectors) list = list.filter(notificationPredicate(selector));
+    list = [...list].sort((a, b) => (b.getCreatedAt()?.getTime() ?? 0) - (a.getCreatedAt()?.getTime() ?? 0));
+
+    const filterNote = selectors.length > 0 ? ` [qualifiers: ${selectors.join(', ')}]` : '';
+    display.text(`Notifications: ${list.length} shown of ${notifications.getCount()} total, ${notifications.getUnreadCount()} unread${filterNote}`);
+    for (const n of list) {
+        const when = n.getCreatedAt()?.toISOString() ?? 'unknown';
+        const status = n.isRead() ? 'read  ' : 'UNREAD';
+        const kind = [n.getType(), n.getCategory()].filter(Boolean).join('/') || '-';
+        display.text(`  ${when}  ${status}  ${kind}  ${n.getTitle()}`);
+    }
+    display.json({
+        source: 'cloud',
+        kind: 'notifications',
+        value: {
+            total: notifications.getCount(),
+            unread: notifications.getUnreadCount(),
+            shown: list.length,
+            qualifiers: selectors,
+            notifications: list.map((n) => ({
+                uuid: n.getUuid() ?? null,
+                createdAt: n.getCreatedAt()?.toISOString() ?? null,
+                readAt: n.getReadAt()?.toISOString() ?? null,
+                read: n.isRead(),
+                type: n.getType() ?? null,
+                category: n.getCategory() ?? null,
+                title: n.getTitle(),
+                body: n.getBody(),
+                deviceUuid: n.getDeviceUuid() ?? null,
+                position: n.getPosition() ?? null,
+            })),
+        },
+    });
+}
+
+registerCommand('notifications', {
+    description: 'Display device notifications/events from the cloud',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command notifications [qualifier...] [help]',
+    summary: 'Fetch the notification/event feed (events, errors) from the Stiga Cloud.',
+    details: [
+        '',
+        'Optionally pass one or more qualifier arguments to filter; multiple qualifiers',
+        'combine with AND. Recognised qualifiers:',
+        '  unread | read            by read state',
+        '  recent | recent:<hours>  created within the last <hours> (default 24)',
+        '  type:<value>             match notification type',
+        '  category:<value>         match notification category',
+        '  <value>                  bare value matches either type or category',
+    ],
+    examples: ['stiga-command notifications', 'stiga-command notifications unread', 'stiga-command notifications recent:48 error', 'stiga-command notifications recent unread --format json | jq .'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runNotifications(context.credentials, context.params),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
