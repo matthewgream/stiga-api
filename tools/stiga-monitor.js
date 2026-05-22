@@ -15,6 +15,7 @@ const CaptureProcessor = require('./lib/monitor/CaptureProcessor');
 const InterceptProcessor = require('./lib/monitor/InterceptProcessor');
 const ListenProcessor = require('./lib/monitor/ListenProcessor');
 const MonitorProcessor = require('./lib/monitor/MonitorProcessor');
+const WebStatusProcessor = require('./lib/monitor/WebStatusProcessor');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -26,6 +27,7 @@ const DEFAULT_CONFIG = {
     capture_db: 'capture.db',
     listen_file: 'listen.log',
     intercept_port: 8083,
+    webstatus_port: 3001,
     timing_levels_docked: 'status:30s,version:60m,settings:30m',
     timing_levels_undocked: 'status:30s,version:30m,settings:5m',
 };
@@ -60,7 +62,7 @@ class StigaMonitor {
     }
 
     async start() {
-        const { username, password, referencePosition } = require('../api/StigaAPIConfig').load();
+        const { username, password, referencePosition, mapsApiKey } = require('../api/StigaAPIConfig').load();
         const lat = this.config.location_lat ?? referencePosition?.latitude;
         const lon = this.config.location_lon ?? referencePosition?.longitude;
         if (lat === undefined || lon === undefined) throw new Error('stiga-monitor: RTK reference origin not set; provide --location_lat/--location_lon or referencePosition in stiga-config.js');
@@ -118,6 +120,15 @@ class StigaMonitor {
             this.displayLocal.updateStatus('intercept', `port:${port}`);
         }
 
+        if (this.config.webstatus) {
+            const port = typeof this.config.webstatus === 'number' ? this.config.webstatus : this.config.webstatus_port;
+            const apiKey = this.config.apikey ?? mapsApiKey;
+            if (!apiKey) throw new Error('stiga-monitor: --webstatus requires a Google Maps API key; provide --apikey=KEY or set mapsApiKey in stiga-config.js');
+            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password });
+            this.processors.push(webstatus);
+            this.displayLocal.updateStatus('webstatus', `port:${port}`);
+        }
+
         await this.connectionManager.connect();
 
         for (const processor of this.processors) await processor.start();
@@ -149,13 +160,15 @@ Processor Options:
   --capture[=database]         Enable capture mode (default: capture.db)
   --listen[=filename]          Enable listen mode (default: listen.log)
   --intercept[=port]           Enable intercept mode (default: 8083)
-  
+  --webstatus[=port]           Enable real-time status web page (default: 3001)
+
 Configuration:
   --directory=dir              Data directory (default: '/opt/stiga-api/data')
   --mac_device=MAC             Device MAC address (default: D0:EF:76:64:32:BA)
   --mac_base=MAC               Base MAC address (default: FC:E8:C0:72:EC:62)
   --location_lat=LAT           RTK reference latitude (override stiga-config.js)
   --location_lon=LON           RTK reference longitude (override stiga-config.js)
+  --apikey=KEY                 Google Maps API key for --webstatus (or mapsApiKey in stiga-config.js)
 
 Monitor Timing Options:
   --timing-levels-docked       Timing when docked (format: status:30s,version:60m,settings:30m)
@@ -163,6 +176,7 @@ Monitor Timing Options:
 
 Examples:
   stiga-monitor --monitor --capture=capture.db --listen=listen.log --intercept --background
+  stiga-monitor --webstatus --apikey=YOUR_GOOGLE_MAPS_KEY
   stiga-monitor --connect
 `);
 }
@@ -180,6 +194,12 @@ function parseArgs() {
                     break;
                 case 'intercept':
                     config.intercept = value ? Number.parseInt(value) : true;
+                    break;
+                case 'webstatus':
+                    config.webstatus = value ? Number.parseInt(value) : true;
+                    break;
+                case 'apikey':
+                    config.apikey = value;
                     break;
                 case 'listen':
                     config.listen = value || true;
@@ -220,7 +240,7 @@ function parseArgs() {
                     process.exit(1);
             }
         });
-    if (!config.connect && !config.capture && !config.intercept && !config.listen && !config.monitor) {
+    if (!config.connect && !config.capture && !config.intercept && !config.listen && !config.monitor && !config.webstatus) {
         displayHelp();
         process.exit(1);
     }

@@ -204,7 +204,7 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
             docking: decodeRobotStatusDocking(decoded[13]),
             battery: decodeRobotBatteryStatus(decoded[17]),
             mowing: decodeRobotMowingStatus(decoded[18]),
-            location: decodeLocationStatus(decoded[19], this._getReferencePosition()),
+            location: decodeLocationStatus(decoded[19]),
             network: decodeNetworkStatus(decoded[20]),
         };
         const operation = {

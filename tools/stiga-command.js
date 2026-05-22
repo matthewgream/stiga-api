@@ -3,7 +3,7 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const { StigaAPIFramework, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector, StigaAPIConfig } = require('../api/StigaAPI');
+const { StigaAPIFramework, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPIConnectionDevice, StigaAPIDeviceConnector, StigaAPIBaseConnector, StigaAPIConfig } = require('../api/StigaAPI');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -946,6 +946,105 @@ registerCommand('check', {
     examples: ['stiga-command check', 'stiga-command --robot check', 'stiga-command check --format json | jq .'],
     skipDefaultSetup: true,
     execute: async (options, context) => runChecks(context.credentials, context.target),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// bounding box (width/height in metres) and centroid of a lat/lng polygon
+function perimeterGeometry(path) {
+    if (!path || path.length === 0) return undefined;
+    let minLat = Infinity,
+        maxLat = -Infinity,
+        minLng = Infinity,
+        maxLng = -Infinity,
+        sumLat = 0,
+        sumLng = 0;
+    for (const point of path) {
+        minLat = Math.min(minLat, point.latitude);
+        maxLat = Math.max(maxLat, point.latitude);
+        minLng = Math.min(minLng, point.longitude);
+        maxLng = Math.max(maxLng, point.longitude);
+        sumLat += point.latitude;
+        sumLng += point.longitude;
+    }
+    const centreLat = sumLat / path.length,
+        centreLng = sumLng / path.length;
+    return {
+        centreLat,
+        centreLng,
+        widthM: (maxLng - minLng) * 111320 * Math.cos((centreLat * Math.PI) / 180),
+        heightM: (maxLat - minLat) * 111320,
+    };
+}
+
+async function runPerimeters(credentials) {
+    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+    const server = new StigaAPIConnectionServer(auth);
+    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
+    const garage = new StigaAPIGarage(server);
+    if (!(await garage.load())) throw throwExit('garage load failed', 2);
+    const device = garage.getDevices()?.[0];
+    if (!device) throw throwExit('no device found in garage', 2);
+    const perimeters = new StigaAPIPerimeters(server, device);
+    if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+
+    const ref = perimeters.getReferencePosition();
+    const timestamp = perimeters.getTimestamp();
+    const zones = perimeters.getZones();
+    const obstacles = perimeters.getObstacles();
+
+    display.text('Garden Perimeters:');
+    display.text(`  Total: ${perimeters.getTotalArea().toFixed(1)} m² across ${perimeters.getZoneCount()} zones, ${perimeters.getObstacleCount()} obstacles (${perimeters.getTotalPoints()} points)`);
+    if (ref) display.text(`  Reference: ${ref.latitude.toFixed(7)}, ${ref.longitude.toFixed(7)}`);
+    if (timestamp) display.text(`  Updated: ${timestamp.toISOString()}`);
+    display.text('  Zones:');
+    for (const zone of zones) {
+        const geo = perimeterGeometry(zone.getPath());
+        const name = (zone.getName() || '-').padEnd(16);
+        const area = `${zone.getArea().toFixed(1)} m²`.padStart(11);
+        const points = `${zone.getNumPoints()} pts`.padStart(8);
+        const span = geo ? `  ${geo.widthM.toFixed(0)}x${geo.heightM.toFixed(0)} m` : '';
+        const centre = geo ? `  centre ${geo.centreLat.toFixed(6)},${geo.centreLng.toFixed(6)}` : '';
+        display.text(`    [${zone.getId()}] ${name} ${area} ${points}${span}${centre}`);
+    }
+    display.text(`  Obstacles (${obstacles.length}):`);
+    for (const obstacle of obstacles) {
+        const area = `${obstacle.getArea().toFixed(2)} m²`.padStart(11);
+        const points = `${obstacle.getNumPoints()} pts`.padStart(8);
+        display.text(`    [${obstacle.getId()}] ${area} ${points}`);
+    }
+
+    display.json({
+        source: 'robot',
+        kind: 'perimeters',
+        value: {
+            referencePosition: ref ?? null,
+            totalArea: perimeters.getTotalArea(),
+            zoneCount: perimeters.getZoneCount(),
+            obstacleCount: perimeters.getObstacleCount(),
+            totalPoints: perimeters.getTotalPoints(),
+            timestamp: timestamp ? timestamp.toISOString() : null,
+            zones: zones.map((zone) => ({ id: zone.getId(), name: zone.getName() ?? null, area: zone.getArea(), numPoints: zone.getNumPoints(), path: zone.getPath() })),
+            obstacles: obstacles.map((obstacle) => ({ id: obstacle.getId(), area: obstacle.getArea(), numPoints: obstacle.getNumPoints(), path: obstacle.getPath() })),
+        },
+    });
+}
+
+registerCommand('perimeters', {
+    description: 'Display garden zones and obstacles from the cloud',
+    targets: ['robot'],
+    usage: 'stiga-command perimeters [help]',
+    summary: 'Fetch the garden perimeter map (zones and obstacles, with geometry) from the Stiga Cloud.',
+    details: [
+        '',
+        'Each zone is listed with its id, name, area, point count, bounding-box size and',
+        'centre coordinate; obstacles are listed with id, area and point count. JSON output',
+        'additionally includes the full polygon path (lat/lng) of every zone and obstacle.',
+    ],
+    examples: ['stiga-command perimeters', 'stiga-command perimeters --format json | jq .'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runPerimeters(context.credentials),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------

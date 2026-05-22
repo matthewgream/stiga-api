@@ -243,11 +243,13 @@ class MonitorProcessor {
     //
 
     _updateLocationInfo(data, decoded, _type) {
-        const location = elements.decodeLocationStatus(decoded, this.location);
+        const location = elements.decodeLocationStatus(decoded);
         if (location) {
-            data.locationPosition = `${location.latitude?.toFixed(8) || '-'}, ${location.longitude?.toFixed(8) || '-'} (${location.satellites} satellites)`;
+            // decoded[19]/[8] is GNSS/RTK quality, not a position — show satellites/coverage,
+            // not a lat/lon. The robot's actual location is the separate 'Position:' line.
+            data.locationPosition = `${location.satellites} satellites`;
             if (location.coverage) data.locationPosition += ` [${['GOOD', 'POOR', 'BAD', 'WORSE'][location.coverage]}]`;
-            data.locationOffset = `${location.offsetDistance.toFixed(2)} cm at ${location.offsetCompass.toFixed(0)}°`;
+            data.locationOffset = `RTK offset ${location.offsetDistance.toFixed(1)} cm`;
             if (location.rtkQuality !== undefined) data.locationOffset += ` (quality ${(location.rtkQuality * 100).toFixed(2)}%)`;
         }
     }

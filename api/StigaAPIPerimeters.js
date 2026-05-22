@@ -2,7 +2,65 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const { formatStruct } = require('./StigaAPIUtilitiesFormat');
+const { protobufDecode } = require('./StigaAPIUtilitiesProtobuf');
 const StigaAPIComponent = require('./StigaAPIComponent');
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Perimeter point geometry lives in attributes.data_points.data — a protobuf blob, separate
+// from the attributes.preview metadata. Layout (reverse engineered):
+//   field 1 = zones, field 2 = paths, field 3 = obstacles.
+//   each entry: [1]=id, [2]=points[], [15]=name; anchor doubles at [16] (zone) / [8] (path) / [6] (obstacle).
+//   anchor = { 1: eastMetres, 2: northMetres } ENU offset from referencePosition.
+//   point  = { 1: x, 2: y } zigzag-encoded signed centimetres, absolute offset from the anchor
+//            (zero fields omitted; first point {} = the anchor itself).
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function _zigzag(n) {
+    return (n >>> 1) ^ -(n & 1);
+}
+function _decodePerimeterName(value) {
+    // protobufDecode returns plain text for ASCII names, but a hex string for names with
+    // non-ASCII (e.g. Swedish) characters — decode those back to UTF-8.
+    if (typeof value !== 'string') return value;
+    if (/^(?:[\da-f]{2})+$/i.test(value)) return Buffer.from(value, 'hex').toString('utf8');
+    return value;
+}
+function _decodePerimeterGeometry(perimeterData) {
+    const bytes = perimeterData?.attributes?.data_points?.data;
+    const ref = perimeterData?.attributes?.preview?.referencePosition;
+    if (!Array.isArray(bytes) || bytes.length === 0 || !ref?.lat || !ref?.lng) return {};
+    let decoded;
+    try {
+        decoded = protobufDecode(Buffer.from(bytes));
+    } catch {
+        return {};
+    }
+    const mPerDegLat = 111320,
+        mPerDegLon = 111320 * Math.cos((ref.lat * Math.PI) / 180);
+    const toPath = (entry) => {
+        const anchor = entry[16] || entry[8] || entry[6];
+        if (!anchor?.[1] || !anchor?.[2]) return [];
+        const anchorE = Buffer.from(anchor[1], 'hex').readDoubleLE(0),
+            anchorN = Buffer.from(anchor[2], 'hex').readDoubleLE(0);
+        let points = [];
+        if (Array.isArray(entry[2])) points = entry[2];
+        else if (entry[2] !== undefined) points = [entry[2]];
+        return points.map((point) => {
+            const p = point && typeof point === 'object' ? point : {};
+            const eastM = anchorE + _zigzag(p[1] || 0) / 100,
+                northM = anchorN + _zigzag(p[2] || 0) / 100;
+            return { latitude: ref.lat + northM / mPerDegLat, longitude: ref.lng + eastM / mPerDegLon };
+        });
+    };
+    const byId = (entries) => {
+        const map = {};
+        (Array.isArray(entries) ? entries : []).forEach((entry) => {
+            map[entry[1]] = { name: _decodePerimeterName(entry[15]), path: toPath(entry) };
+        });
+        return map;
+    };
+    return { zones: byId(decoded[1]), obstacles: byId(decoded[3]) };
+}
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -11,6 +69,8 @@ class StigaAPIPerimeter {
     constructor(zoneData, index) {
         this.data = zoneData;
         this.index = index;
+        this.name = undefined;
+        this.path = undefined;
     }
 
     getId() {
@@ -25,8 +85,17 @@ class StigaAPIPerimeter {
         return this.data?.numPoints || 0;
     }
 
+    getName() {
+        return this.name;
+    }
+
+    // polygon outline as [{ latitude, longitude }] — empty until geometry is parsed
+    getPath() {
+        return this.path ?? [];
+    }
+
     toString() {
-        return formatStruct({ id: this.getId(), area: this.getArea().toFixed(1), points: this.getNumPoints() }, 'perimeter', { area: { units: 'm2' } });
+        return formatStruct({ id: this.getId(), name: this.getName(), area: this.getArea().toFixed(1), points: this.getNumPoints() }, 'perimeter', { area: { units: 'm2' } });
     }
 }
 
@@ -71,8 +140,19 @@ class StigaAPIPerimeters extends StigaAPIComponent {
 
     _parseData() {
         const preview = this.perimeterData?.attributes?.preview;
-        this.zones = preview?.zones?.elements?.map((zone, index) => new StigaAPIPerimeter(zone, index)) ?? [];
-        this.obstacles = preview?.obstacles?.elements?.map((obstacle, index) => new StigaAPIPerimeter(obstacle, index)) ?? [];
+        const geometry = _decodePerimeterGeometry(this.perimeterData);
+        const build = (elements, kind) =>
+            (elements ?? []).map((element, index) => {
+                const perimeter = new StigaAPIPerimeter(element, index);
+                const geo = geometry[kind]?.[perimeter.getId()];
+                if (geo) {
+                    perimeter.name = geo.name;
+                    perimeter.path = geo.path;
+                }
+                return perimeter;
+            });
+        this.zones = build(preview?.zones?.elements, 'zones');
+        this.obstacles = build(preview?.obstacles?.elements, 'obstacles');
     }
 
     getZones() {

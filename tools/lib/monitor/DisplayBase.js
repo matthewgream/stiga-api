@@ -171,7 +171,7 @@ class DisplayBase {
             this.baseBox.setLabel(` Base (${data.baseMac || '-'}) `);
         }
         this.baseBox.setContent(baseLines.join('\n'));
-        const statusItems = ['monitor', 'capture', 'listen', 'intercept'].map((item) => `${item[0].toUpperCase()}${item.slice(1)}: ${this._formatStatus(displayData.statusData[item])}`);
+        const statusItems = ['monitor', 'capture', 'listen', 'intercept', 'webstatus'].map((item) => `${item[0].toUpperCase()}${item.slice(1)}: ${this._formatStatus(displayData.statusData[item])}`);
         this.statusBar.setContent(` ${location.toUpperCase()} | ${statusItems.join(' | ')} | Press 'q' to quit`);
         this.screen.render();
     }

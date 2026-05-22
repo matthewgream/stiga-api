@@ -166,8 +166,8 @@ function loadFromDatabase(dbPath) {
                         xOffsetM: xOffset,
                         yOffsetM: yOffset,
                         offsetDistanceM: Math.hypot(xOffset, yOffset),
-                        offsetDegrees: (Math.atan2(xOffset, yOffset) * 180) / Math.PI,
-                        offsetCompass: (90 - (Math.atan2(xOffset, yOffset) * 180) / Math.PI + 360) % 360,
+                        offsetDegrees: (Math.atan2(yOffset, xOffset) * 180) / Math.PI,
+                        offsetCompass: (90 - (Math.atan2(yOffset, xOffset) * 180) / Math.PI + 360) % 360,
                     };
                     if (decoded[3]) {
                         const orientRad = hexToDouble(decoded[3]);
@@ -208,7 +208,7 @@ function loadFromDatabase(dbPath) {
                         location.offsetLatitudeCm = latOffset;
                         location.offsetLongitudeCm = lonOffset;
                         location.offsetDistanceCm = Math.hypot(latOffset, lonOffset);
-                        location.offsetDegrees = (Math.atan2(lonOffset, latOffset) * 180) / Math.PI;
+                        location.offsetDegrees = (Math.atan2(latOffset, lonOffset) * 180) / Math.PI;
                         location.offsetCompass = (90 - location.offsetDegrees + 360) % 360;
                     }
                 }

@@ -74,17 +74,18 @@ function upgradeVersion(version) {
 // **Number of Satellites**: The robot needs to connect to an adequate number of satellites to ensure reliable positioning.
 // **Svin**: Indicates the positioning accuracy of the single antenna. A lower value corresponds to higher accuracy in positioning. (Worst >2  ; Good 0.5)
 
-// XXX not sure ...
-function _decodeLocationStatus(latitudeOffset, longitudeOffset, latitude, longitude) {
+// decoded[3]/[4] are an RTK accuracy/correction figure in centimetres (how far the
+// RTK-corrected fix sits from the raw GNSS fix) — NOT the robot's position offset from
+// the base. Verified 2026-05-22: the value stays ~constant (~44 cm) regardless of where
+// the robot actually is, so no absolute lat/lon is derived from it. The robot's actual
+// location comes only from LOG/ROBOT_POSITION (decodeRobotPosition).
+function _decodeLocationStatus(latitudeOffset, longitudeOffset) {
     const offsetLatitudeCm = hexToDouble(latitudeOffset),
         offsetLongitudeCm = hexToDouble(longitudeOffset);
-    const latitudeCmPerDeg = 111320 * 100,
-        longitudeCmPerDeg = 111320 * 100 * (latitude === undefined ? 1 : Math.cos((latitude * Math.PI) / 180));
-    const offsetDegrees = (Math.atan2(offsetLongitudeCm, offsetLatitudeCm) * 180) / Math.PI,
+    // offsetDegrees is a math angle (0°=East, anticlockwise); offsetCompass is a compass bearing (0°=North, clockwise).
+    const offsetDegrees = (Math.atan2(offsetLatitudeCm, offsetLongitudeCm) * 180) / Math.PI,
         offsetCompass = (90 - offsetDegrees + 360) % 360;
     return {
-        latitude: latitude === undefined ? undefined : latitude + offsetLatitudeCm / latitudeCmPerDeg,
-        longitude: longitude === undefined ? undefined : longitude + offsetLongitudeCm / longitudeCmPerDeg,
         offsetLatitudeCm,
         offsetLongitudeCm,
         offsetDistance: Math.hypot(offsetLatitudeCm, offsetLongitudeCm),
@@ -92,7 +93,7 @@ function _decodeLocationStatus(latitudeOffset, longitudeOffset, latitude, longit
         offsetCompass,
     };
 }
-function decodeLocationStatus(decoded, location) {
+function decodeLocationStatus(decoded) {
     return decoded?.[3] || decoded?.[4]
         ? upgradeLocationStatus({
               // correlates with now low satellite count
@@ -100,7 +101,7 @@ function decodeLocationStatus(decoded, location) {
               // lowest satellite count I have seen is 8 (still marked as 2)
               coverage: decoded[1] || 0, // DOP? https://www.tersus-gnss.com/tech_blog/what-is-dop-in-gnss
               satellites: decoded[2],
-              ..._decodeLocationStatus(decoded[3], decoded[4], location?.latitude, location?.longitude),
+              ..._decodeLocationStatus(decoded[3], decoded[4]),
               rtkQuality: decoded[5], // probably Svin
           })
         : undefined;
@@ -425,7 +426,9 @@ function decodeRobotPosition(decoded, location) {
         offsetLatitutdeMetres = hexToDouble(decoded[2] === undefined ? 0 : decoded[2]);
     const orientRad = decoded[3] === undefined ? 0 : hexToDouble(decoded[3]);
 
-    const offsetDegrees = (Math.atan2(offsetLongitudeMetres, offsetLatitutdeMetres) * 180) / Math.PI,
+    // offsetDegrees is a math angle (0°=East, anticlockwise); offsetCompass is a true compass
+    // bearing of the robot from the base (0°=North, clockwise).
+    const offsetDegrees = (Math.atan2(offsetLatitutdeMetres, offsetLongitudeMetres) * 180) / Math.PI,
         offsetCompass = (90 - offsetDegrees + 360) % 360;
     const orientationDegrees = (orientRad * 180) / Math.PI,
         orientationCompass = (450 - orientationDegrees) % 360;
@@ -1101,12 +1104,12 @@ function decodeBaseaMessageVersion(decoded) {
     return decodeVersion(decoded);
 }
 
-function decodeBaseMessageStatus(decoded, position) {
+function decodeBaseMessageStatus(decoded) {
     const status = {
         type: decodeBaseStatusType(decoded[1]),
         flag: decodeBaseStatusFlag(decoded[4]),
         led: decodeBaseSettingLED(decoded[10]),
-        location: decodeLocationStatus(decoded[8], position),
+        location: decodeLocationStatus(decoded[8]),
         network: decodeNetworkStatus(decoded[9]),
     };
     status.toString = () => formatStruct(status, 'status', { network: { recurse: true, squarebrackets: true }, location: { recurse: true, squarebrackets: true } });

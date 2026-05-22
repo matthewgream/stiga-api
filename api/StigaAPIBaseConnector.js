@@ -159,7 +159,7 @@ class StigaAPIBaseConnector extends StigaAPIComponent {
         this._commandResponseResolve('version', version);
     }
     _handleStatus(decoded) {
-        const status = decodeBaseMessageStatus(decoded, this.base.getReferencePosition());
+        const status = decodeBaseMessageStatus(decoded);
         const operation = {
             type: status.type,
             flag: status.flag,
