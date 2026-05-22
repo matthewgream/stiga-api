@@ -4,18 +4,6 @@
 const { StigaAPIUtilities, StigaAPIElements: elements } = require('../../../api/StigaAPI');
 const { protobufDecode, stringToBytes, formatMinutesNicely, formatNetworkId } = StigaAPIUtilities;
 
-const DEFAULT_TIMING_DOCKED = {
-    version: 60 * 60 * 1000, // 60 minutes
-    settings: 30 * 60 * 1000, // 30 minutes
-    status: 5 * 60 * 1000, // 5 minutes
-};
-
-const DEFAULT_TIMING_UNDOCKED = {
-    version: 30 * 60 * 1000, // 30 minutes
-    settings: 5 * 60 * 1000, // 5 minutes
-    status: 30 * 1000, // 30 seconds
-};
-
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -25,46 +13,21 @@ class MonitorProcessor {
         this.display = displayManager;
         this.location = options.location;
         if (!this.location) throw new Error('MonitorProcessor: options.location is required (RTK reference origin)');
-
-        this.timers = [];
-        this.ackFlags = {};
-
-        this.timingDocked = { ...DEFAULT_TIMING_DOCKED, ...options.timingDocked };
-        this.timingUndocked = { ...DEFAULT_TIMING_UNDOCKED, ...options.timingUndocked };
-        this.isDocked = true;
-        this.currentTiming = this.timingDocked;
+        // status/version/schedule requests are driven by the shared RequestPoller
+        this.poller = options.poller;
     }
 
     //
 
     async start() {
         this.connection.on('message', (topic, message) => this._handleMessage(topic, message));
-        this._startTimers();
+        this.poller?.acquire();
         this.display.log('Monitor started');
     }
 
     async stop() {
-        for (const timer of this.timers) clearInterval(timer);
-        this.timers = [];
+        this.poller?.release();
         this.display.log('Monitor stopped');
-    }
-
-    //
-
-    _startTimers() {
-        this._sendStatusRequests();
-        this._sendVersionRequests();
-        this._sendSettingsRequests();
-        this._updateTimers();
-    }
-
-    _updateTimers() {
-        for (const timer of this.timers) clearInterval(timer);
-        this.timers = [];
-        this.timers.push(setInterval(() => this._sendStatusRequests(), this.currentTiming.status));
-        this.timers.push(setInterval(() => this._sendVersionRequests(), this.currentTiming.version));
-        this.timers.push(setInterval(() => this._sendSettingsRequests(), this.currentTiming.settings));
-        this.display.log(`timers configured: status=${this.currentTiming.status / 1000}s, version=${this.currentTiming.version / 60000}m, settings=${this.currentTiming.settings / 60000}m`);
     }
 
     //
@@ -85,24 +48,12 @@ class MonitorProcessor {
         } else if (topic.includes('/LOG/VERSION')) {
             this.display.log('Robot version response received');
             this._updateRobotVersion(decoded);
-            if (this.ackFlags.robot_version) {
-                this.ackFlags.robot_version = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/STATUS')) {
             this.display.log('Robot status response received');
             this._updateRobotStatus(decoded);
-            if (this.ackFlags.robot_status) {
-                this.ackFlags.robot_status = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/SCHEDULING_SETTINGS')) {
             this.display.log('Robot scheduling settings received');
             this._updateRobotSchedule(decoded);
-            if (this.ackFlags.robot_schedule) {
-                this.ackFlags.robot_schedule = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/ROBOT_POSITION')) {
             this.display.log('Robot position received');
             this._updateRobotPosition(decoded);
@@ -115,17 +66,9 @@ class MonitorProcessor {
         } else if (topic.includes('/LOG/VERSION')) {
             this.display.log('Base version response received');
             this._updateBaseVersion(decoded);
-            if (this.ackFlags.base_version) {
-                this.ackFlags.base_version = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/STATUS')) {
             this.display.log('Base status response received');
             this._updateBaseStatus(decoded);
-            if (this.ackFlags.base_status) {
-                this.ackFlags.base_status = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         }
     }
 
@@ -150,13 +93,6 @@ class MonitorProcessor {
         updates.statusText = statusInfo || statusError ? `${statusInfo}${statusInfo && statusError ? ', ' : ''}${statusError}` : '-';
         updates.statusFlag = `(valid ${elements.formatRobotStatusValid(elements.decodeRobotStatusValid(decoded[1]))}, flag ${elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]))})`;
         updates.statusDocked = elements.formatRobotStatusDocking(elements.decodeRobotStatusDocking(decoded[13])).startsWith('yes') ? 'Docked' : 'Not docked';
-        const isDocked = updates.statusDocked === 'Docked';
-        if (isDocked !== this.isDocked) {
-            this.isDocked = isDocked;
-            this.currentTiming = isDocked ? this.timingDocked : this.timingUndocked;
-            this.display.log(`Robot ${isDocked ? 'docked' : 'undocked'} - switching to ${isDocked ? 'docked' : 'undocked'} timing`);
-            this._updateTimers();
-        }
         if (decoded[17]) {
             const battery = elements.decodeRobotBatteryStatus(decoded[17]);
             updates.battery = `${battery.charge}% (${battery.capacity} mAh)`;
@@ -260,56 +196,6 @@ class MonitorProcessor {
             data.networkDetail = `${formatNetworkId(network.network)} (${network.type})`;
             data.networkSignal = `${network.rssi} dBm (rsrp ${network.rsrp} dBm, rsrq ${network.rsrq} dB)`;
         }
-    }
-
-    //
-
-    _sendStatusRequests() {
-        if (!this.connection.isConnected()) {
-            this.display.log('Skipping status requests (not connected)');
-            return;
-        }
-
-        this.display.log('Sending status requests...');
-        this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.POSITION_REQUEST), { qos: 2 });
-        this.ackFlags.robot_status = true;
-        this.connection.publish(
-            `${this.connection.getRobotMac()}/CMD_ROBOT`,
-            elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.STATUS_REQUEST, elements.encodeRobotStatusRequestTypes({ battery: true, mowing: true, location: true, network: true })),
-            {
-                qos: 2,
-            }
-        );
-        this.ackFlags.base_status = true;
-        this.connection.publish(`${this.connection.getBaseMac()}/CMD_REFERENCE`, elements.encodeBaseCommand(elements.BASE_COMMAND_IDS.STATUS_REQUEST, elements.encodeBaseStatusRequestTypes({ location: true, network: true })), { qos: 2 });
-    }
-
-    _sendVersionRequests() {
-        if (!this.connection.isConnected()) {
-            this.display.log('Skipping version requests (not connected)');
-            return;
-        }
-
-        this.display.log('Sending version requests...');
-        this.ackFlags.robot_version = true;
-        this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.VERSION_REQUEST), { qos: 2 });
-        this.ackFlags.base_version = true;
-        this.connection.publish(`${this.connection.getBaseMac()}/CMD_REFERENCE`, elements.encodeBaseCommand(elements.BASE_COMMAND_IDS.VERSION_REQUEST), { qos: 2 });
-    }
-
-    _sendSettingsRequests() {
-        if (!this.connection.isConnected()) {
-            this.display.log('Skipping settings requests (not connected)');
-            return;
-        }
-
-        this.display.log('Sending settings requests...');
-        this.ackFlags.robot_schedule = true;
-        this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.SCHEDULING_SETTINGS_REQUEST), { qos: 2 });
-    }
-
-    _sendAck(topic) {
-        this.connection.publish(topic, elements.encodeMessageAck(), { qos: 2 });
     }
 }
 

@@ -16,6 +16,7 @@ const InterceptProcessor = require('./lib/monitor/InterceptProcessor');
 const ListenProcessor = require('./lib/monitor/ListenProcessor');
 const MonitorProcessor = require('./lib/monitor/MonitorProcessor');
 const WebStatusProcessor = require('./lib/monitor/WebStatusProcessor');
+const RequestPoller = require('./lib/monitor/RequestPoller');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -78,12 +79,16 @@ class StigaMonitor {
 
         this.connectionManager = new ConnectionManager(username, password, { ...options });
 
+        // one shared, reference-counted poller drives status/version/schedule requests for
+        // every processor, so the requests go out once regardless of how many are running
+        options.poller = new RequestPoller(this.connectionManager, {
+            logger: options.logger,
+            timingDocked: parseTimingLevels(this.config.timing_levels_docked),
+            timingUndocked: parseTimingLevels(this.config.timing_levels_undocked),
+        });
+
         if (this.config.monitor) {
-            const monitor = new MonitorProcessor(this.connectionManager, this.displayLocal, {
-                ...options,
-                timingDocked: parseTimingLevels(this.config.timing_levels_docked),
-                timingUndocked: parseTimingLevels(this.config.timing_levels_undocked),
-            });
+            const monitor = new MonitorProcessor(this.connectionManager, this.displayLocal, { ...options });
             this.processors.push(monitor);
             this.displayLocal.updateStatus('monitor', 'ACTIVE');
         }

@@ -5,7 +5,7 @@
 // station and a pin for the robot (the robot pin moves as position updates arrive). A fixed
 // status box (top-left, unaffected by map pan/zoom) shows the headline robot state; hovering
 // either pin reveals a detail popup. The browser polls /api/state; this processor keeps that
-// state fresh by decoding the live MQTT stream and issuing periodic status/version requests.
+// state fresh by decoding the live MQTT stream; the shared RequestPoller drives the requests.
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const express = require('express');
@@ -15,8 +15,6 @@ const { protobufDecode, formatNetworkId } = StigaAPIUtilities;
 
 const DEFAULT_PORT = 3001;
 const POLL_MS = 3000; // browser -> server poll interval (local, cheap)
-const STATUS_INTERVAL = 15 * 1000; // server -> MQTT status/position request interval
-const VERSION_INTERVAL = 30 * 60 * 1000; // server -> MQTT version request interval
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -33,9 +31,9 @@ class WebStatusProcessor {
         this.username = options.username;
         this.password = options.password;
         this.perimeters = undefined;
+        // status/version requests are driven by the shared RequestPoller
+        this.poller = options.poller;
 
-        this.timers = [];
-        this.ackFlags = {};
         this.state = {
             base: {
                 mac: options.baseMac,
@@ -87,10 +85,7 @@ class WebStatusProcessor {
             this.server.on('error', reject);
         });
 
-        this._sendVersionRequests();
-        this._sendStatusRequests();
-        this.timers.push(setInterval(() => this._sendStatusRequests(), STATUS_INTERVAL));
-        this.timers.push(setInterval(() => this._sendVersionRequests(), VERSION_INTERVAL));
+        this.poller?.acquire();
 
         this._loadPerimeters().catch((e) => this.logger(`WebStatus: perimeters unavailable (${e.message})`));
 
@@ -98,8 +93,7 @@ class WebStatusProcessor {
     }
 
     async stop() {
-        for (const timer of this.timers) clearInterval(timer);
-        this.timers = [];
+        this.poller?.release();
         if (this.server) await new Promise((resolve) => this.server.close(resolve));
         this.logger('WebStatus stopped');
     }
@@ -120,17 +114,9 @@ class WebStatusProcessor {
         if (topic.endsWith('ACK')) return;
         if (topic.includes('/LOG/STATUS')) {
             this._handleRobotStatus(decoded);
-            if (this.ackFlags.robot_status) {
-                this.ackFlags.robot_status = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/VERSION')) {
             this.state.robot.version = this._version(decoded);
             this.state.robot.updatedVersion = new Date().toISOString();
-            if (this.ackFlags.robot_version) {
-                this.ackFlags.robot_version = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/ROBOT_POSITION')) {
             this._handleRobotPosition(decoded);
         }
@@ -140,17 +126,9 @@ class WebStatusProcessor {
         if (topic.endsWith('ACK')) return;
         if (topic.includes('/LOG/STATUS')) {
             this._handleBaseStatus(decoded);
-            if (this.ackFlags.base_status) {
-                this.ackFlags.base_status = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         } else if (topic.includes('/LOG/VERSION')) {
             this.state.base.version = this._version(decoded);
             this.state.base.updatedVersion = new Date().toISOString();
-            if (this.ackFlags.base_version) {
-                this.ackFlags.base_version = false;
-                this._sendAck(`${topic}/ACK`);
-            }
         }
     }
 
@@ -259,33 +237,6 @@ class WebStatusProcessor {
             this.state.base.longitude = ref.longitude;
         }
         this.logger(`WebStatus: loaded ${this.perimeters.zones.length} zones, ${this.perimeters.obstacles.length} obstacles`);
-    }
-
-    //
-
-    _sendStatusRequests() {
-        if (!this.connection.isConnected()) return;
-        this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.POSITION_REQUEST), { qos: 2 });
-        this.ackFlags.robot_status = true;
-        this.connection.publish(
-            `${this.connection.getRobotMac()}/CMD_ROBOT`,
-            elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.STATUS_REQUEST, elements.encodeRobotStatusRequestTypes({ battery: true, mowing: true, location: true, network: true })),
-            { qos: 2 }
-        );
-        this.ackFlags.base_status = true;
-        this.connection.publish(`${this.connection.getBaseMac()}/CMD_REFERENCE`, elements.encodeBaseCommand(elements.BASE_COMMAND_IDS.STATUS_REQUEST, elements.encodeBaseStatusRequestTypes({ location: true, network: true })), { qos: 2 });
-    }
-
-    _sendVersionRequests() {
-        if (!this.connection.isConnected()) return;
-        this.ackFlags.robot_version = true;
-        this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.VERSION_REQUEST), { qos: 2 });
-        this.ackFlags.base_version = true;
-        this.connection.publish(`${this.connection.getBaseMac()}/CMD_REFERENCE`, elements.encodeBaseCommand(elements.BASE_COMMAND_IDS.VERSION_REQUEST), { qos: 2 });
-    }
-
-    _sendAck(topic) {
-        this.connection.publish(topic, elements.encodeMessageAck(), { qos: 2 });
     }
 
     //
