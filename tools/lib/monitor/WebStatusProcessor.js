@@ -12,8 +12,10 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 //
 // Layout
-//   boxStatus               lt | rt | lb | rb | no       Status-box position (default lt). 'no' hides it.
-//   boxNotify               lt | rt | lb | rb | no       Notifications-box position (default lb). 'no' hides it.
+//   boxStatus               lt | rt | lb | rb | no            Status-box position (default lt). 'no' hides it.
+//   boxNotify               st | lt | rt | lb | rb | no       Notifications-box position (default st).
+//                                                             'st' = stacked under status box, same width as it (also
+//                                                             reads as "status" — pun intended). 'no' hides it.
 //
 // Map
 //   mapPosition             <lat>,<lon>,<zoom>           Lock the map view. Disables auto-fit-to-bounds.
@@ -385,7 +387,7 @@ class WebStatusProcessor {
 <body>
 <div id="map"></div>
 <div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
-<div id="notifbox" class="pos-lb empty"></div>
+<div id="notifbox" class="pos-st empty"></div>
 <script>var CONFIG = ${config};</script>
 <script>${CLIENT_JS}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
@@ -405,6 +407,7 @@ html,body{margin:0;height:100%}
 .pos-lb{bottom:12px;left:12px;right:auto;top:auto}
 .pos-rb{bottom:12px;right:12px;left:auto;top:auto}
 .pos-no{display:none !important}
+.pos-st{right:auto;bottom:auto} /* stacked under status box; top/left/width set by JS */
 #statusbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:9px 13px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:13px/1.45 system-ui,Segoe UI,Arial,sans-serif;min-width:200px;color:#202124}
@@ -501,14 +504,37 @@ else if(URL_CONFIG.tracks === 'off') tracksOn = false;
 function applyBoxPosition(id, defaultClass, override){
   var el = document.getElementById(id);
   if(!el) return;
-  ['pos-lt','pos-rt','pos-lb','pos-rb','pos-no'].forEach(function(c){ el.classList.remove(c); });
+  ['pos-lt','pos-rt','pos-lb','pos-rb','pos-no','pos-st'].forEach(function(c){ el.classList.remove(c); });
+  // clear inline styles that 'st' mode writes, so a switch back to a corner mode is clean
+  el.style.top = el.style.left = el.style.right = el.style.bottom = el.style.width = el.style.maxWidth = '';
   var cls = defaultClass;
   if(override === 'lt' || override === 'rt' || override === 'lb' || override === 'rb') cls = 'pos-' + override;
   else if(override === 'no') cls = 'pos-no';
+  else if(override === 'st') cls = 'pos-st';
   el.classList.add(cls);
 }
 applyBoxPosition('statusbox', 'pos-lt', URL_CONFIG.boxStatus);
-applyBoxPosition('notifbox', 'pos-lb', URL_CONFIG.boxNotify);
+applyBoxPosition('notifbox', 'pos-st', URL_CONFIG.boxNotify);
+
+// When the notifbox is in stacked mode it has no top/left/width of its own — it tracks the
+// status box's bounding rect so it sits flush underneath and matches its width. Re-run on:
+// status-box resize (content changes), window resize, and after the notif box itself rerenders.
+function applyStackedNotifyPosition(){
+  var nb = document.getElementById('notifbox');
+  if(!nb || !nb.classList.contains('pos-st')) return;
+  var sb = document.getElementById('statusbox');
+  if(!sb) return;
+  var rect = sb.getBoundingClientRect();
+  nb.style.top = (rect.bottom + 8) + 'px';
+  nb.style.left = rect.left + 'px';
+  nb.style.width = rect.width + 'px';
+  nb.style.maxWidth = 'none';
+}
+if(window.ResizeObserver){
+  var sb = document.getElementById('statusbox');
+  if(sb) new window.ResizeObserver(applyStackedNotifyPosition).observe(sb);
+}
+window.addEventListener('resize', applyStackedNotifyPosition);
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
 var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
 
