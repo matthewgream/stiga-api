@@ -1,6 +1,6 @@
 # stiga-api
 
-> An unofficial, reverse-engineered API for the **Stiga A-series robot mowers**, developed and tested against a Stiga A1500. Not officially provided nor supported by Stiga.
+> An unofficial, reverse-engineered API for the **Stiga A-series robot mowers**, developed and tested against a Stiga A1500. Not officially provided nor supported by Stiga. Mostly to MONITOR and ANALYSE, rather than CONTROL.
 
 ---
 
