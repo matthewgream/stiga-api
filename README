@@ -33,6 +33,27 @@ Do not know how to obtain/update: (a) zone settings, (b) temporary obstacles, (c
 management commands, (e) obstacle parameters.
 
 
+*** UPDATE (23 MAY 2026) ***
+
+Significantly expanded "--webstatus"; you can run it like this: 
+
+  tools/stiga-monitor.js --webstatus=3001/password --monitor --persist --persist-days=24
+
+Which will (a) cache and persist status and position information for up to 28 days; (b) render a webserver on
+port 3001 with http authentication "password" to show the status of the robot, including its recent positions
+and status.
+
+Then, on the client side, you can use arguments like this:
+
+https://workshop.local:3001/?boxStatus=rt&mapControls=off&tracks=on&tracksClr=3&statusBatterySparkline=off&mapPosition=-38cm,-4.60m,19&commands=on
+
+This (a) moves the status box to the right-top; (b) turns off the map controls (zoom, etc) so just use mouse;
+(c) shows the robots tracks by default; (d) clears the tracks after three zones (so you see up to three zones
+of history); (e) turns off the battery sparkline, (f) shows the map at an offset of 38cm/4.6m from the computed
+centre of the garden [check the browser console for help with this], (g) turns on the command box ("start",
+"stop", "home"). This is a kind of kiosk mode.
+
+
 *** UPDATE (22 MAY 2026) ***
 
 Corrected the display of RTK offset in status and position messages.
