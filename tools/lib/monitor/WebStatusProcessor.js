@@ -39,6 +39,10 @@
 //   statusBatterySparkline  on | off                     Show inline battery SVG (default off).
 //   statusTracksControls    on | off                     Show the Tracks line (default on).
 //
+// Commands (active control panel, stacked between status & notify boxes)
+//   commands                on | off                     Show command box with [Start|Stop] [Home] (default off).
+//                                                        Start/Stop is context-aware (the relevant verb is shown).
+//
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=2&statusBatterySparkline=off
 //
@@ -127,6 +131,8 @@ class WebStatusProcessor {
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state }));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
         app.get('/api/notifications', (req, res) => res.json(this.notifications));
+        app.post('/api/command/:name', (req, res) => this._handleCommandPost(req, res));
+        app.post('/api/refresh', (req, res) => this._handleRefreshPost(req, res));
         await new Promise((resolve, reject) => {
             this.server = app.listen(this.port, '0.0.0.0', () => resolve());
             this.server.on('error', reject);
@@ -177,6 +183,45 @@ class WebStatusProcessor {
         }
         res.setHeader('WWW-Authenticate', 'Basic realm="Stiga Webstatus", charset="UTF-8"');
         res.status(401).type('text/plain').send('Authentication required');
+    }
+
+    // Active robot commands the kiosk can trigger. Each maps to a ROBOT_COMMAND_IDS entry and
+    // is published directly on the shared MQTT connection (same path RequestPoller uses for
+    // its own commands). Fire-and-forget — the robot's next STATUS will reflect the new state.
+    _handleCommandPost(req, res) {
+        const map = { start: 'START', stop: 'STOP', home: 'GO_HOME' };
+        const id = map[(req.params.name || '').toLowerCase()];
+        if (!id) {
+            res.status(400).json({ ok: false, error: `unknown command '${req.params.name}'` });
+            return;
+        }
+        if (!this.connection.isConnected()) {
+            res.status(503).json({ ok: false, error: 'MQTT not connected' });
+            return;
+        }
+        try {
+            const topic = `${this.connection.getRobotMac()}/CMD_ROBOT`;
+            const payload = elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS[id]);
+            this.connection.publish(topic, payload, { qos: 2 });
+            this.logger(`WebStatus: command ${id} dispatched`);
+            res.json({ ok: true, command: id });
+        } catch (e) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
+    }
+
+    // Re-fetch cloud-side data on demand (perimeters from the cloud, then notification poll
+    // immediately). The MQTT state is already live, so nothing to do for it.
+    async _handleRefreshPost(req, res) {
+        try {
+            this.perimeters = undefined;
+            await this._loadPerimeters();
+            if (this.notifTimer) clearTimeout(this.notifTimer);
+            this._startNotificationPoll();
+            res.json({ ok: true });
+        } catch (e) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
     }
 
     _handleMessage(topic, message) {
@@ -392,6 +437,7 @@ class WebStatusProcessor {
 <body>
 <div id="map"></div>
 <div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
+<div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
 <script>var CONFIG = ${config};</script>
 <script>${CLIENT_JS}</script>
@@ -456,6 +502,19 @@ html,body{margin:0;height:100%}
 #statusbox h1 .linktag.offline{background:#ea4335}
 #statusbox .spark{margin-top:4px;display:block}
 #statusbox .nextmow{margin-top:4px;color:#80868b;font-size:11px}
+#cmdbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
+  border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
+  font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;color:#202124;
+  display:flex;gap:8px;align-items:center}
+#cmdbox .cbtn{cursor:pointer;border:1px solid #c4c7c5;border-radius:4px;padding:5px 14px;
+  font-size:12px;font-weight:600;color:#202124;background:#fff;user-select:none;letter-spacing:.3px}
+#cmdbox .cbtn:hover{background:#f1f3f4}
+#cmdbox .cbtn:active{background:#e8eaed}
+#cmdbox .cbtn.start{color:#137333;border-color:#137333}
+#cmdbox .cbtn.stop{color:#c5221f;border-color:#c5221f}
+#cmdbox .cbtn.home{color:#1967d2;border-color:#1967d2}
+#cmdbox .cbtn.busy{opacity:.55;pointer-events:none}
+#cmdbox .cmsg{font-size:11px;color:#80868b;margin-left:auto;min-width:0}
 `;
 
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
@@ -478,6 +537,7 @@ var batteryHistory = [], lastBatteryStatusTime = null;
 //   tracksClr              0|1|2|3|off      (decay limit; 0=kill prior on transition, off=keep all)
 //   statusBatterySparkline on|off           (default off)
 //   statusTracksControls   on|off           (default on)
+//   commands               on|off           (active control panel: Start/Stop/Home; default off)
 var URL_CONFIG = (function(){
   var p = new URLSearchParams(window.location.search);
   return {
@@ -488,7 +548,8 @@ var URL_CONFIG = (function(){
     tracks: p.get('tracks'),
     tracksClr: p.get('tracksClr'),
     statusBatterySparkline: p.get('statusBatterySparkline'),
-    statusTracksControls: p.get('statusTracksControls')
+    statusTracksControls: p.get('statusTracksControls'),
+    commands: p.get('commands')
   };
 })();
 
@@ -573,24 +634,37 @@ function applyBoxPosition(id, defaultClass, override){
 }
 applyBoxPosition('statusbox', 'pos-lt', URL_CONFIG.boxStatus);
 applyBoxPosition('notifbox', 'pos-st', URL_CONFIG.boxNotify);
+// commands box: default hidden ('no'); 'on' enables stacked layout under the status box
+applyBoxPosition('cmdbox', 'pos-no', URL_CONFIG.commands === 'on' ? 'st' : URL_CONFIG.commands);
 
-// When the notifbox is in stacked mode it has no top/left/width of its own — it tracks the
-// status box's bounding rect so it sits flush underneath and matches its width. Re-run on:
-// status-box resize (content changes), window resize, and after the notif box itself rerenders.
+// Stacked-mode layout: each .pos-st box chains under the previous one — statusbox → cmdbox →
+// notifbox. Boxes that are hidden or not in stacked mode are skipped, so the chain collapses
+// naturally when, say, the cmdbox is off. Re-runs on any box resize and on window resize.
 function applyStackedNotifyPosition(){
-  var nb = document.getElementById('notifbox');
-  if(!nb || !nb.classList.contains('pos-st')) return;
   var sb = document.getElementById('statusbox');
   if(!sb) return;
-  var rect = sb.getBoundingClientRect();
-  nb.style.top = (rect.bottom + 8) + 'px';
-  nb.style.left = rect.left + 'px';
-  nb.style.width = rect.width + 'px';
-  nb.style.maxWidth = 'none';
+  var sbRect = sb.getBoundingClientRect();
+  var topRef = sb;
+  var leftPx = sbRect.left;
+  var widthPx = sbRect.width;
+  ['cmdbox', 'notifbox'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(!el || !el.classList.contains('pos-st')) return;
+    // hidden boxes (display:none) report 0-size rect and don't push the chain forward
+    var visible = !el.classList.contains('pos-no') && !el.classList.contains('empty');
+    var refRect = topRef.getBoundingClientRect();
+    el.style.top = (refRect.bottom + 8) + 'px';
+    el.style.left = leftPx + 'px';
+    el.style.width = widthPx + 'px';
+    el.style.maxWidth = 'none';
+    if(visible) topRef = el;
+  });
 }
 if(window.ResizeObserver){
-  var sb = document.getElementById('statusbox');
-  if(sb) new window.ResizeObserver(applyStackedNotifyPosition).observe(sb);
+  ['statusbox', 'cmdbox', 'notifbox'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(el) new window.ResizeObserver(applyStackedNotifyPosition).observe(el);
+  });
 }
 window.addEventListener('resize', applyStackedNotifyPosition);
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
@@ -770,6 +844,7 @@ function refresh(){
       recordCrumb();
       recordBattery();
       renderStatusBox();
+      renderCommandBox();
       highlightActiveZone();
       if(hovered) infoWindow.setContent(hovered === 'base' ? baseInfo() : robotInfo());
     })
@@ -958,6 +1033,86 @@ function row(k,v){
   return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
 }
 
+// Active-control panel. Hidden unless URL_CONFIG.commands === 'on'. Start/Stop is shown as
+// the contextually-appropriate verb based on the live robot status; Home is always present.
+// Commands POST to /api/command/:name and the local server publishes via MQTT.
+var commandBusy = false;
+function isRobotActive(r){
+  if(!r) return false;
+  var t = (r.statusType || '').toUpperCase();
+  return t === 'MOWING' || t === 'CUTTING_BORDER' || t === 'REACHING_FIRST_POINT' || t === 'NAVIGATING_TO_AREA' || t === 'PLANNING_ONGOING' || t === 'GOING_HOME';
+}
+function renderCommandBox(){
+  var box = document.getElementById('cmdbox');
+  if(!box) return;
+  if(URL_CONFIG.commands !== 'on'){ box.classList.add('pos-no'); return; }
+  box.classList.remove('pos-no');
+  var r = state && state.robot;
+  var active = isRobotActive(r);
+  var busy = commandBusy ? ' busy' : '';
+  var primary = active
+    ? '<span class="cbtn stop' + busy + '" data-cmd="stop">Stop</span>'
+    : '<span class="cbtn start' + busy + '" data-cmd="start">Start</span>';
+  var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
+  var msg = box.querySelector('.cmsg');
+  var msgHtml = msg ? msg.outerHTML : '<span class="cmsg"></span>';
+  box.innerHTML = primary + home + msgHtml;
+  var btns = box.querySelectorAll('.cbtn');
+  for(var i = 0; i < btns.length; i++){
+    (function(el){ el.addEventListener('click', function(){ sendCommand(el.getAttribute('data-cmd')); }); })(btns[i]);
+  }
+}
+function setCommandMessage(text, isError){
+  var box = document.getElementById('cmdbox');
+  if(!box) return;
+  var span = box.querySelector('.cmsg');
+  if(!span) return;
+  span.textContent = text || '';
+  span.style.color = isError ? '#c5221f' : '#80868b';
+}
+function sendCommand(name){
+  if(commandBusy) return;
+  commandBusy = true;
+  renderCommandBox();
+  setCommandMessage('sending ' + name + '…', false);
+  fetch('api/command/' + encodeURIComponent(name), { method: 'POST', cache: 'no-store' })
+    .then(function(r){ return r.json().then(function(j){ return { ok: r.ok, body: j }; }); })
+    .then(function(rsp){
+      commandBusy = false;
+      if(rsp.ok) setCommandMessage(name + ' dispatched', false);
+      else setCommandMessage(name + ' failed: ' + ((rsp.body && rsp.body.error) || 'unknown'), true);
+      renderCommandBox();
+      setTimeout(function(){ setCommandMessage('', false); }, 4000);
+    })
+    .catch(function(e){
+      commandBusy = false;
+      setCommandMessage(name + ' error: ' + e.message, true);
+      renderCommandBox();
+    });
+}
+
+// Refresh button (passive read; lives in the status box). Triggers a server-side re-fetch
+// of perimeters and notifications, then redraws the relevant client state.
+var refreshBusy = false;
+function triggerRefresh(){
+  if(refreshBusy) return;
+  refreshBusy = true;
+  renderStatusBox();
+  fetch('api/refresh', { method: 'POST', cache: 'no-store' })
+    .then(function(r){ return r.json(); })
+    .then(function(){
+      perimetersDrawn = false;
+      Object.keys(zonePolys).forEach(function(id){ zonePolys[id].setMap(null); });
+      zonePolys = {}; zoneNames = {};
+      loadPerimeters();
+      refreshNotifications();
+    })
+    .catch(function(){})
+    .finally(function(){ refreshBusy = false; renderStatusBox(); });
+}
+window.triggerRefresh = triggerRefresh;
+window.sendCommand = sendCommand;
+
 function renderStatusBox(){
   var box = document.getElementById('statusbox');
   if(!state){ box.innerHTML = '<div class="muted">connecting…</div>'; return; }
@@ -976,7 +1131,8 @@ function renderStatusBox(){
   var trk = '';
   if(URL_CONFIG.statusTracksControls !== 'off'){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
-    trk = '<div class="tracks">Tracks:' +
+    var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-fetch perimeters and notifications">' + (refreshBusy ? '↻…' : '↻') + '</span>';
+    trk = '<div class="tracks">' + refreshBtn + ' Tracks:' +
       '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
       '<span class="btn" onclick="clearTracks()">CLR</span>' +
       '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
