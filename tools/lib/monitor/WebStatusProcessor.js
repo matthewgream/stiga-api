@@ -6,6 +6,37 @@
 // status box (top-left, unaffected by map pan/zoom) shows the headline robot state; hovering
 // either pin reveals a detail popup. The browser polls /api/state; this processor keeps that
 // state fresh by decoding the live MQTT stream; the shared RequestPoller drives the requests.
+//
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Client-side URL query parameters (kiosk-mode knobs — all optional, sensible defaults)
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+//
+// Layout
+//   boxStatus               lt | rt | lb | rb | no       Status-box position (default lt). 'no' hides it.
+//   boxNotify               lt | rt | lb | rb | no       Notifications-box position (default lb). 'no' hides it.
+//
+// Map
+//   mapPosition             <lat>,<lon>,<zoom>           Lock the map view. Disables auto-fit-to-bounds.
+//                                                        Example: mapPosition=59.6624,12.9952,19
+//   mapControls             on | off                     'off' = disableDefaultUI (no zoom/fullscreen/etc.).
+//
+// Tracks (breadcrumb trail)
+//   tracks                  on | off                     Force initial tracks state (default off).
+//   tracksClr               0 | 1 | 2 | 3 | off          Decay limit: keep at most max(N,1) most-recent
+//                                                        distinct mowing zones. 0 = kill prior on zone change,
+//                                                        'off' = keep all (no decay). Default 0.
+//                                                        Cycle button in the status box steps through
+//                                                        0 → 1 → 2 → 3 → ∞ → 0.
+//
+// Status-box content
+//   statusBatterySparkline  on | off                     Hide the inline battery SVG (default on).
+//   statusTracksControls    on | off                     Hide the entire Tracks line (default on).
+//
+// Example kiosk URL:
+//   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=2&statusBatterySparkline=off
+//
+// More knobs will be added here over time; structure new ones the same way (URL_CONFIG entry +
+// a single usage site) so each option stays small and removable.
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const express = require('express');
@@ -32,6 +63,7 @@ class WebStatusProcessor {
         this.port = options.port || DEFAULT_PORT;
         this.username = options.username;
         this.password = options.password;
+        this.basicAuth = this._parseBasicAuth(options.auth);
         this.perimeters = undefined;
         this.notifications = [];
         this.cloudServer = undefined;
@@ -83,6 +115,7 @@ class WebStatusProcessor {
 
         const app = express();
         app.disable('x-powered-by');
+        if (this.basicAuth) app.use((req, res, next) => this._basicAuthMiddleware(req, res, next));
         app.get('/', (req, res) => res.type('html').send(this._renderPage()));
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state }));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
@@ -112,6 +145,32 @@ class WebStatusProcessor {
     }
 
     //
+
+    // Accepts "user:pass" (full credentials) or "pass" (password only — any username accepted).
+    // Returns undefined when no protection is requested, so the middleware is never installed.
+    _parseBasicAuth(spec) {
+        if (!spec) return undefined;
+        const colon = spec.indexOf(':');
+        if (colon === -1) return { user: undefined, pass: spec };
+        return { user: spec.slice(0, colon), pass: spec.slice(colon + 1) };
+    }
+
+    _basicAuthMiddleware(req, res, next) {
+        const header = req.headers.authorization || '';
+        if (header.startsWith('Basic ')) {
+            const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+            const split = decoded.indexOf(':');
+            const user = split === -1 ? decoded : decoded.slice(0, split);
+            const pass = split === -1 ? '' : decoded.slice(split + 1);
+            const userOk = this.basicAuth.user === undefined || user === this.basicAuth.user;
+            if (userOk && pass === this.basicAuth.pass) {
+                next();
+                return;
+            }
+        }
+        res.setHeader('WWW-Authenticate', 'Basic realm="Stiga Webstatus", charset="UTF-8"');
+        res.status(401).type('text/plain').send('Authentication required');
+    }
 
     _handleMessage(topic, message) {
         try {
@@ -325,8 +384,8 @@ class WebStatusProcessor {
 </head>
 <body>
 <div id="map"></div>
-<div id="statusbox"><div class="muted">connecting…</div></div>
-<div id="notifbox" class="empty"></div>
+<div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
+<div id="notifbox" class="pos-lb empty"></div>
 <script>var CONFIG = ${config};</script>
 <script>${CLIENT_JS}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
@@ -341,7 +400,12 @@ class WebStatusProcessor {
 const PAGE_CSS = `
 html,body{margin:0;height:100%}
 #map{height:100%;width:100%;background:#222}
-#statusbox{position:absolute;top:12px;left:12px;z-index:5;background:rgba(255,255,255,.96);
+.pos-lt{top:12px;left:12px;right:auto;bottom:auto}
+.pos-rt{top:12px;right:12px;left:auto;bottom:auto}
+.pos-lb{bottom:12px;left:12px;right:auto;top:auto}
+.pos-rb{bottom:12px;right:12px;left:auto;top:auto}
+.pos-no{display:none !important}
+#statusbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:9px 13px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:13px/1.45 system-ui,Segoe UI,Arial,sans-serif;min-width:200px;color:#202124}
 #statusbox h1{font-size:13px;margin:0 0 6px;display:flex;align-items:center}
@@ -359,7 +423,7 @@ html,body{margin:0;height:100%}
 #statusbox .tracks{margin-top:6px;font-size:11px;color:#80868b}
 #statusbox .btn{cursor:pointer;border:1px solid #c4c7c5;border-radius:3px;padding:0 6px;margin-left:4px;color:#202124;user-select:none}
 #statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
-#notifbox{position:absolute;bottom:12px;left:12px;z-index:5;background:rgba(255,255,255,.96);
+#notifbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:560px;color:#202124}
 #notifbox.empty{display:none}
@@ -396,6 +460,55 @@ var zonePolys = {}, zoneNames = {};
 var tracksOn = false, crumbs = [], crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
 var batteryHistory = [], lastBatteryStatusTime = null;
+
+// kiosk-mode URL config — query params let us position/disable boxes, lock the map,
+// preset the tracks toggle and decay limit, and trim status-box contents. All optional.
+//   boxStatus, boxNotify   lt|rt|lb|rb|no   (default: lt for status, lb for notify)
+//   mapPosition            lat,lon,zoom     (locks map view)
+//   mapControls            on|off           (off = disableDefaultUI)
+//   tracks                 on|off           (force tracks state; default off)
+//   tracksClr              0|1|2|3|off      (decay limit; 0=kill prior on transition, off=keep all)
+//   statusBatterySparkline on|off           (default on)
+//   statusTracksControls   on|off           (default on)
+var URL_CONFIG = (function(){
+  var p = new URLSearchParams(window.location.search);
+  return {
+    boxStatus: p.get('boxStatus'),
+    boxNotify: p.get('boxNotify'),
+    mapPosition: p.get('mapPosition'),
+    mapControls: p.get('mapControls'),
+    tracks: p.get('tracks'),
+    tracksClr: p.get('tracksClr'),
+    statusBatterySparkline: p.get('statusBatterySparkline'),
+    statusTracksControls: p.get('statusTracksControls')
+  };
+})();
+
+// tracksClr cycle: 0 -> 1 -> 2 -> 3 -> off (Infinity) -> 0. The value is "at most N most-recent
+// distinct zones kept"; N=0 means kill prior tracks on zone change (1 zone visible).
+var TRACKS_CLR_CYCLE = [0, 1, 2, 3, Number.POSITIVE_INFINITY];
+var tracksClr = 0;
+(function(){
+  var v = URL_CONFIG.tracksClr;
+  if(v === null || v === undefined) return;
+  if(v === 'off' || v === 'inf' || v === '∞') { tracksClr = Number.POSITIVE_INFINITY; return; }
+  var n = Number.parseInt(v, 10);
+  if(!Number.isNaN(n) && n >= 0) tracksClr = n;
+})();
+if(URL_CONFIG.tracks === 'on') tracksOn = true;
+else if(URL_CONFIG.tracks === 'off') tracksOn = false;
+
+function applyBoxPosition(id, defaultClass, override){
+  var el = document.getElementById(id);
+  if(!el) return;
+  ['pos-lt','pos-rt','pos-lb','pos-rb','pos-no'].forEach(function(c){ el.classList.remove(c); });
+  var cls = defaultClass;
+  if(override === 'lt' || override === 'rt' || override === 'lb' || override === 'rb') cls = 'pos-' + override;
+  else if(override === 'no') cls = 'pos-no';
+  el.classList.add(cls);
+}
+applyBoxPosition('statusbox', 'pos-lt', URL_CONFIG.boxStatus);
+applyBoxPosition('notifbox', 'pos-lb', URL_CONFIG.boxNotify);
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
 var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
 
@@ -411,10 +524,22 @@ function ago(iso){
 
 function initMap(){
   var base = { lat: CONFIG.baseLat, lng: CONFIG.baseLng };
-  map = new google.maps.Map(document.getElementById('map'), {
-    center: base, zoom: 18, mapTypeId: 'satellite', tilt: 0,
+  var center = base, zoom = 18, locked = false;
+  if(URL_CONFIG.mapPosition){
+    var parts = URL_CONFIG.mapPosition.split(',').map(function(s){ return Number.parseFloat(s); });
+    if(parts.length >= 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1])){
+      center = { lat: parts[0], lng: parts[1] };
+      if(parts.length >= 3 && !Number.isNaN(parts[2])) zoom = parts[2];
+      locked = true;
+    }
+  }
+  var mapOpts = {
+    center: center, zoom: zoom, mapTypeId: 'satellite', tilt: 0,
     mapId: 'robot_position_map', gestureHandling: 'greedy', streetViewControl: false
-  });
+  };
+  if(URL_CONFIG.mapControls === 'off') mapOpts.disableDefaultUI = true;
+  map = new google.maps.Map(document.getElementById('map'), mapOpts);
+  if(locked){ userMoved = true; didFit = true; } // suppress auto-fit when caller fixed the view
   infoWindow = new google.maps.InfoWindow();
   map.addListener('dragstart', function(){ userMoved = true; });
 
@@ -566,21 +691,62 @@ function recordCrumb(){
   if(r.updatedPosition === lastCrumbTime) return;
   lastCrumbTime = r.updatedPosition;
   var color = crumbColor(r);
+  var zone = (r.mowing && !r.docked && r.mowing.zone !== null && r.mowing.zone !== undefined) ? String(r.mowing.zone) : null;
   var prev = crumbs[crumbs.length - 1];
-  var pt = { lat: r.latitude, lng: r.longitude, color: color };
+  var pt = { lat: r.latitude, lng: r.longitude, color: color, zone: zone };
   crumbs.push(pt);
-  if(prev)
-    crumbSegments.push(new google.maps.Polyline({
+  if(prev){
+    var seg = new google.maps.Polyline({
       path: [{ lat: prev.lat, lng: prev.lng }, { lat: pt.lat, lng: pt.lng }],
       strokeColor: color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3, map: map
-    }));
+    });
+    seg.crumbZone = zone;
+    crumbSegments.push(seg);
+  }
+  applyTracksClr();
 }
-function toggleTracks(){
-  tracksOn = !tracksOn;
-  crumbSegments.forEach(function(s){ s.setMap(tracksOn ? map : null); });
-  if(tracksOn){ lastCrumbTime = null; recordCrumb(); }
+
+// Enforce the decay limit: keep at most max(tracksClr,1) most-recent distinct zones.
+// Segments tagged with a zone outside the keep-set are removed from the map and dropped.
+// Unzoned segments (recorded while the robot wasn't mowing) are always kept.
+function applyTracksClr(){
+  if(tracksClr === Number.POSITIVE_INFINITY) return;
+  var maxZones = Math.max(tracksClr, 1);
+  var seen = {}, zoneOrder = [];
+  for(var i = crumbs.length - 1; i >= 0; i--){
+    var z = crumbs[i].zone;
+    if(!z) continue;
+    if(seen[z]) continue;
+    seen[z] = true;
+    zoneOrder.push(z);
+    if(zoneOrder.length >= maxZones) break;
+  }
+  var keepSet = {};
+  zoneOrder.forEach(function(z){ keepSet[z] = true; });
+  crumbSegments = crumbSegments.filter(function(s){
+    if(!s.crumbZone) return true;
+    if(keepSet[s.crumbZone]) return true;
+    s.setMap(null);
+    return false;
+  });
+}
+
+// cycle the decay limit through the canonical values; called from the [#N] button in the
+// status box. Re-applies immediately so segments drop or remain as appropriate.
+function cycleTracksClr(){
+  var idx = TRACKS_CLR_CYCLE.indexOf(tracksClr);
+  tracksClr = TRACKS_CLR_CYCLE[(idx + 1) % TRACKS_CLR_CYCLE.length];
+  applyTracksClr();
   renderStatusBox();
 }
+window.cycleTracksClr = cycleTracksClr;
+function setTracks(on){
+  if(tracksOn === on) return;
+  tracksOn = on;
+  crumbSegments.forEach(function(s){ s.setMap(tracksOn ? map : null); });
+  if(tracksOn){ lastCrumbTime = null; recordCrumb(); }
+}
+function toggleTracks(){ setTracks(!tracksOn); renderStatusBox(); }
 function clearTracks(){
   crumbs = [];
   lastCrumbTime = null;
@@ -684,16 +850,22 @@ function renderStatusBox(){
   var op = fmt(r.statusType);
   if(r.statusText) op += ' · ' + r.statusText;
   var batt = r.battery ? (r.battery.charge + '%') : '-';
-  var spark = batterySparkSVG();
+  var spark = URL_CONFIG.statusBatterySparkline === 'off' ? '' : batterySparkSVG();
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
   var nextMowStr = formatNextMow(nextScheduledMow());
   var nextMowRow = nextMowStr ? '<div class="nextmow">' + esc(nextMowStr) + '</div>' : '';
   var link = linkState();
   var linkTag = '<span class="linktag ' + link.cls + '">' + esc(link.label) + '</span>';
-  var trk = '<div class="tracks">Tracks:' +
-    '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
-    '<span class="btn" onclick="clearTracks()">CLR</span></div>';
+  var trk = '';
+  if(URL_CONFIG.statusTracksControls !== 'off'){
+    var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
+    trk = '<div class="tracks">Tracks:' +
+      '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
+      '<span class="btn" onclick="clearTracks()">CLR</span>' +
+      '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
+    '</div>';
+  }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot' + linkTag + '</h1>' +
     row('State', place) + row('Status', op) + row('Battery', batt) + spark + row('Mowing', mow) + nextMowRow +

@@ -129,9 +129,10 @@ class StigaMonitor {
             const port = typeof this.config.webstatus === 'number' ? this.config.webstatus : this.config.webstatus_port;
             const apiKey = this.config.apikey ?? mapsApiKey;
             if (!apiKey) throw new Error('stiga-monitor: --webstatus requires a Google Maps API key; provide --apikey=KEY or set mapsApiKey in stiga-config.js');
-            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password });
+            const auth = this.config.webstatus_auth;
+            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth });
             this.processors.push(webstatus);
-            this.displayLocal.updateStatus('webstatus', `port:${port}`);
+            this.displayLocal.updateStatus('webstatus', `port:${port}${auth ? ' auth' : ''}`);
         }
 
         await this.connectionManager.connect();
@@ -159,13 +160,15 @@ Usage:
 Operating Modes:
   --connect                    Connect to running instance (client mode)
   --background                 Run without display (server mode)
+  --help                       Show this help and exit
 
 Processor Options:
   --monitor                    Enable monitor mode
   --capture[=database]         Enable capture mode (default: capture.db)
   --listen[=filename]          Enable listen mode (default: listen.log)
   --intercept[=port]           Enable intercept mode (default: 8083)
-  --webstatus[=port]           Enable real-time status web page (default: 3001)
+  --webstatus[=port[/creds]]   Enable real-time status web page (default port: 3001).
+                               creds = user:pass (full basic-auth) or pass (any user)
 
 Configuration:
   --directory=dir              Data directory (default: '/opt/stiga-api/data')
@@ -182,6 +185,8 @@ Monitor Timing Options:
 Examples:
   stiga-monitor --monitor --capture=capture.db --listen=listen.log --intercept --background
   stiga-monitor --webstatus --apikey=YOUR_GOOGLE_MAPS_KEY
+  stiga-monitor --webstatus=3001/admin:secret --apikey=YOUR_GOOGLE_MAPS_KEY
+  stiga-monitor --webstatus=3001/secret --apikey=YOUR_GOOGLE_MAPS_KEY
   stiga-monitor --monitor --timing-levels-undocked=status:10s,version:20m,settings:5m
   stiga-monitor --connect
 `);
@@ -202,7 +207,16 @@ function parseArgs() {
                     config.intercept = value ? Number.parseInt(value) : true;
                     break;
                 case 'webstatus':
-                    config.webstatus = value ? Number.parseInt(value) : true;
+                    if (value) {
+                        // accept --webstatus=PORT, --webstatus=PORT/user:pass, --webstatus=PORT/pass, --webstatus=/user:pass
+                        const slash = value.indexOf('/');
+                        const portPart = slash === -1 ? value : value.slice(0, slash);
+                        const credsPart = slash === -1 ? '' : value.slice(slash + 1);
+                        config.webstatus = portPart ? Number.parseInt(portPart) : true;
+                        if (credsPart) config.webstatus_auth = credsPart;
+                    } else {
+                        config.webstatus = true;
+                    }
                     break;
                 case 'apikey':
                     config.apikey = value;
@@ -240,6 +254,10 @@ function parseArgs() {
                     break;
                 case 'timing-levels-undocked':
                     config.timing_levels_undocked = value;
+                    break;
+                case 'help':
+                    displayHelp();
+                    process.exit(0);
                     break;
                 default:
                     console.error(`Unknown option: --${key}`);
