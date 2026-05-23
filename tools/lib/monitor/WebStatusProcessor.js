@@ -564,7 +564,12 @@ class WebStatusProcessor {
 <div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
 <div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
-<script>var CONFIG = ${config}; var INITIAL_CRUMBS = ${JSON.stringify(initialCrumbs)};</script>
+<script>
+var CONFIG = ${config};
+var INITIAL_CRUMBS = ${JSON.stringify(initialCrumbs)};
+var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state })};
+var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
+</script>
 <script>${CLIENT_JS}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
 </body>
@@ -652,6 +657,12 @@ var zonePolys = {}, zoneNames = {};
 var tracksOn = true, crumbs = [], crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
 var batteryHistory = [], lastBatteryStatusTime = null;
+
+// Hydrate from the snapshot baked into the page so the boxes show real data from first paint
+// instead of "connecting…". The first /api/state poll will replace this with fresher values,
+// but even a stale snapshot is a consistent and dated view (the "Xs ago" age tells the user).
+if(typeof INITIAL_STATE !== 'undefined' && INITIAL_STATE) state = INITIAL_STATE;
+if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFICATIONS)) notifications = INITIAL_NOTIFICATIONS;
 
 // kiosk-mode URL config — query params let us position/disable boxes, lock the map,
 // preset the tracks toggle and decay limit, and trim status-box contents. All optional.
@@ -792,6 +803,14 @@ if(window.ResizeObserver){
   });
 }
 window.addEventListener('resize', applyStackedNotifyPosition);
+
+// Initial render from the baked-in snapshot. Function declarations are hoisted so we can call
+// them here even though they're defined further down. Runs synchronously at script parse time,
+// before the Google Maps script loads — so the user never sees "connecting…" if the server
+// already had state to share.
+if(state) { renderStatusBox(); renderCommandBox(); }
+if(notifications.length > 0) renderNotifBox();
+
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
 var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
 
