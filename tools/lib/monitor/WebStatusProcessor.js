@@ -34,6 +34,14 @@
 //                                                        'off' = keep all (no decay). Default 0.
 //                                                        Cycle button in the status box steps through
 //                                                        0 → 1 → 2 → 3 → ∞ → 0.
+//                                                        Also drives the one-shot history baked into the
+//                                                        page at connect time: by default the server sends
+//                                                        crumbs from the CURRENT zone only (matching the
+//                                                        official app's behaviour); ?tracksClr=N extends to
+//                                                        N zones; ?tracksClr=off sends the entire cache.
+//                                                        Server-side caching is always on; --persist on
+//                                                        stiga-monitor opts into cross-restart persistence
+//                                                        (default off, 14 days).
 //
 // Status-box content
 //   statusBatterySparkline  on | off                     Show inline battery SVG (default off).
@@ -50,6 +58,8 @@
 // a single usage site) so each option stays small and removable.
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+const fs = require('node:fs');
+const path = require('node:path');
 const express = require('express');
 
 const { StigaAPIUtilities, StigaAPIElements: elements, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPINotifications } = require('../../../api/StigaAPI');
@@ -59,6 +69,10 @@ const DEFAULT_PORT = 3001;
 const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
 const NOTIF_POLL_MS_UNDOCKED = 60_000; // notifications poll interval when robot is active
 const NOTIF_POLL_MS_DOCKED = 300_000; // notifications poll interval when robot is parked
+const CRUMB_PERSIST_INTERVAL_MS = 60_000; // flush cached crumbs to disk every minute when persistence is enabled
+const CRUMB_DEFAULT_INITIAL_ZONES = 1; // semantic default — cover the current (most-recent) mowing zone only
+const CRUMB_PERSIST_DEFAULT_DIR = '/dev/shm';
+const CRUMB_PERSIST_DEFAULT_DAYS = 14;
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -80,6 +94,15 @@ class WebStatusProcessor {
         this.cloudServer = undefined;
         this.notifTimer = undefined;
         this.poller = options.poller;
+
+        // crumb cache: always on (in-memory). Persistence to disk is opt-in via --persist; when
+        // enabled the cache survives restarts and is pruned to persistDays of history.
+        this.persistEnabled = Boolean(options.persist);
+        this.persistDir = typeof options.persist === 'string' && options.persist ? options.persist : CRUMB_PERSIST_DEFAULT_DIR;
+        this.persistDays = options.persistDays || CRUMB_PERSIST_DEFAULT_DAYS;
+        this.crumbCache = []; // [{ lat, lng, t (epoch ms), zone, color }]
+        this.crumbPersistTimer = undefined;
+        this.crumbDirty = false;
 
         this.state = {
             base: {
@@ -127,7 +150,7 @@ class WebStatusProcessor {
         const app = express();
         app.disable('x-powered-by');
         if (this.basicAuth) app.use((req, res, next) => this._basicAuthMiddleware(req, res, next));
-        app.get('/', (req, res) => res.type('html').send(this._renderPage()));
+        app.get('/', (req, res) => res.type('html').send(this._renderPage(req)));
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state }));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
         app.get('/api/notifications', (req, res) => res.json(this.notifications));
@@ -139,6 +162,12 @@ class WebStatusProcessor {
         });
 
         this.poller?.acquire();
+
+        this._loadPersistedCrumbs();
+        if (this.persistEnabled) {
+            this.crumbPersistTimer = setInterval(() => this._persistCrumbs(), CRUMB_PERSIST_INTERVAL_MS);
+            this.logger(`WebStatus: crumb persistence ON (dir=${this.persistDir}, retention=${this.persistDays}d)`);
+        }
 
         this._loadPerimeters()
             .then(() => this._startNotificationPoll())
@@ -153,6 +182,11 @@ class WebStatusProcessor {
             clearTimeout(this.notifTimer);
             this.notifTimer = undefined;
         }
+        if (this.crumbPersistTimer) {
+            clearInterval(this.crumbPersistTimer);
+            this.crumbPersistTimer = undefined;
+        }
+        this._persistCrumbs();
         if (this.server) await new Promise((resolve) => this.server.close(resolve));
         this.logger('WebStatus stopped');
     }
@@ -293,6 +327,7 @@ class WebStatusProcessor {
         r.offsetCompass = position.offsetCompass;
         r.orientationCompass = position.orientationCompass;
         r.updatedPosition = new Date().toISOString();
+        this._recordServerCrumb(position.latitude, position.longitude);
     }
 
     // Compact the schedule down to just what the client needs to compute "next mow": a flag
@@ -314,6 +349,63 @@ class WebStatusProcessor {
         }
         this.state.robot.schedule = { enabled: schedule.enabled, blocks };
         this.state.robot.updatedSchedule = new Date().toISOString();
+    }
+
+    // mirror of the client crumbColor mapping — kept in sync so cached crumbs render the same
+    // colours as live ones recorded by the browser. Pure function of the current robot state.
+    _serverCrumbColor() {
+        const r = this.state.robot;
+        if (!r) return '#ffffff';
+        if (/error|fault|stuck|blocked|fail|trapped/i.test(r.statusText || '')) return '#ea4335';
+        const t = (r.statusType || '').toUpperCase();
+        if (t === 'ERROR' || t === 'BLOCKED' || t === 'LID_OPEN') return '#ea4335';
+        if (t === 'MOWING' || t === 'CUTTING_BORDER') return '#34a853';
+        if (t === 'GOING_HOME' || t === 'NAVIGATING_TO_AREA' || t === 'REACHING_FIRST_POINT' || t === 'PLANNING_ONGOING') return '#ffffff';
+        return '#fbbc04';
+    }
+
+    _recordServerCrumb(lat, lng) {
+        const r = this.state.robot;
+        const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? String(r.mowing.zone) : undefined;
+        this.crumbCache.push({ lat, lng, t: Date.now(), zone, color: this._serverCrumbColor() });
+        this._pruneCrumbs();
+        this.crumbDirty = true;
+    }
+
+    _pruneCrumbs() {
+        const cutoff = Date.now() - this.persistDays * 24 * 60 * 60 * 1000;
+        while (this.crumbCache.length > 0 && this.crumbCache[0].t < cutoff) this.crumbCache.shift();
+    }
+
+    _persistFilePath() {
+        const mac = String(this.state.robot.mac || 'unknown').replaceAll(':', '');
+        return path.join(this.persistDir, `stiga-crumbs-${mac}.json`);
+    }
+
+    _persistCrumbs() {
+        if (!this.persistEnabled || !this.crumbDirty) return;
+        try {
+            const file = this._persistFilePath();
+            fs.writeFileSync(file, JSON.stringify({ version: 1, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, crumbs: this.crumbCache }));
+            this.crumbDirty = false;
+        } catch (e) {
+            this.logger(`WebStatus: crumb persist failed: ${e.message}`);
+        }
+    }
+
+    _loadPersistedCrumbs() {
+        if (!this.persistEnabled) return;
+        try {
+            const text = fs.readFileSync(this._persistFilePath(), 'utf8');
+            const data = JSON.parse(text);
+            if (Array.isArray(data?.crumbs)) {
+                this.crumbCache = data.crumbs;
+                this._pruneCrumbs();
+                this.logger(`WebStatus: loaded ${this.crumbCache.length} persisted crumbs from ${this._persistFilePath()}`);
+            }
+        } catch (e) {
+            if (e.code !== 'ENOENT') this.logger(`WebStatus: crumb load failed: ${e.message}`);
+        }
     }
 
     _handleBaseStatus(decoded) {
@@ -419,7 +511,40 @@ class WebStatusProcessor {
 
     //
 
-    _renderPage() {
+    // One-shot crumb delivery: at request time we slice the cached crumbs to the zone window
+    // implied by ?tracksClr=N (default 1 — the CURRENT zone only). Time-based windowing was
+    // intentionally dropped: the robot sleeps/charges between mowing sessions, so wall-clock
+    // history is mostly empty space, while "current zone" tracks the activity we actually care
+    // about. ?tracksClr=off delivers the entire cache (useful with --persist for diagnostics).
+    // One-shot only: a page reload is required to change the window; live updates extend from
+    // the last cached point.
+    _renderPage(req) {
+        const q = req?.query || {};
+        const tcRaw = q.tracksClr;
+        const tcOff = tcRaw === 'off' || tcRaw === 'inf' || tcRaw === '∞';
+        let maxZones = CRUMB_DEFAULT_INITIAL_ZONES;
+        if (tcRaw !== undefined && tcRaw !== null && tcRaw !== '' && !tcOff) {
+            const tc = Number.parseInt(tcRaw, 10);
+            if (Number.isFinite(tc) && tc >= 0) maxZones = Math.max(tc, 1);
+        }
+        // walk newest-first counting distinct zones; stop at the boundary into the (maxZones+1)th
+        // zone. Unzoned crumbs (going-home, transitions) within that window are included.
+        let zoneCutoff = Number.NEGATIVE_INFINITY;
+        if (!tcOff) {
+            const seenZones = new Set();
+            for (let i = this.crumbCache.length - 1; i >= 0; i--) {
+                const z = this.crumbCache[i].zone;
+                if (z === undefined || z === null) continue;
+                if (!seenZones.has(z)) {
+                    if (seenZones.size >= maxZones) {
+                        zoneCutoff = this.crumbCache[i].t;
+                        break;
+                    }
+                    seenZones.add(z);
+                }
+            }
+        }
+        const initialCrumbs = this.crumbCache.filter((c) => c.t > zoneCutoff);
         const config = JSON.stringify({
             baseLat: this.location.latitude,
             baseLng: this.location.longitude,
@@ -439,7 +564,7 @@ class WebStatusProcessor {
 <div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
 <div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
-<script>var CONFIG = ${config};</script>
+<script>var CONFIG = ${config}; var INITIAL_CRUMBS = ${JSON.stringify(initialCrumbs)};</script>
 <script>${CLIENT_JS}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
 </body>
@@ -534,7 +659,7 @@ var batteryHistory = [], lastBatteryStatusTime = null;
 //   mapPosition            lat,lon,zoom     (locks map view)
 //   mapControls            on|off           (off = disableDefaultUI)
 //   tracks                 on|off           (force tracks state; default on)
-//   tracksClr              0|1|2|3|off      (decay limit; 0=kill prior on transition, off=keep all)
+//   tracksClr              0|1|2|3|off      (decay limit; 0=kill prior on transition, off=keep all; also drives one-shot history window — default = current zone only)
 //   statusBatterySparkline on|off           (default off)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
@@ -710,10 +835,35 @@ function initMap(){
   robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin });
   attachHover(robotMarker, 'robot');
 
+  hydrateInitialCrumbs();
+
   refresh();
   setInterval(refresh, CONFIG.pollMs);
   refreshNotifications();
   setInterval(refreshNotifications, CONFIG.notifPollMs);
+}
+
+// One-shot crumb hydration. The server bakes a window of cached crumbs into the page as
+// INITIAL_CRUMBS; here we replay them into the crumbs[] array and rebuild the matching
+// polyline segments so the live recordCrumb() path naturally extends from the last point.
+function hydrateInitialCrumbs(){
+  if(typeof INITIAL_CRUMBS === 'undefined' || !Array.isArray(INITIAL_CRUMBS) || INITIAL_CRUMBS.length === 0) return;
+  for(var i = 0; i < INITIAL_CRUMBS.length; i++){
+    var c = INITIAL_CRUMBS[i];
+    crumbs.push({ lat: c.lat, lng: c.lng, color: c.color, zone: c.zone });
+    if(i > 0){
+      var prev = INITIAL_CRUMBS[i-1];
+      var seg = new google.maps.Polyline({
+        path: [{ lat: prev.lat, lng: prev.lng }, { lat: c.lat, lng: c.lng }],
+        strokeColor: c.color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3,
+        map: tracksOn ? map : null
+      });
+      seg.crumbZone = c.zone;
+      crumbSegments.push(seg);
+    }
+  }
+  applyTracksClr();
+  console.log('WebStatus: hydrated ' + crumbs.length + ' cached crumbs');
 }
 window.initMap = initMap;
 window.toggleTracks = toggleTracks;
@@ -1201,14 +1351,22 @@ function refreshNotifications(){
 function renderNotifBox(){
   var box = document.getElementById('notifbox');
   if(!box) return;
-  var visible = notifications
-    .filter(function(n){ return !dismissed[n.uuid]; })
-    .slice()
-    .sort((a, b) => (b.createdAt ? new Date(b.createdAt).getTime() : 0) - (a.createdAt ? new Date(a.createdAt).getTime() : 0))
-    .slice(0, 3);
+  // Sort all notifications newest-first and assign 1-based ranks against the full list, so the
+  // header can express "showing items 2-3 of 5" — useful when dismissals shift the visible window.
+  var sorted = notifications.slice().sort(function(a, b){
+    return (b.createdAt ? new Date(b.createdAt).getTime() : 0) - (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+  });
+  var total = sorted.length;
+  var rankByUuid = {};
+  sorted.forEach(function(n, i){ rankByUuid[n.uuid] = i + 1; });
+  var visible = sorted.filter(function(n){ return !dismissed[n.uuid]; }).slice(0, 3);
   if(visible.length === 0){ box.classList.add('empty'); box.innerHTML = ''; return; }
   box.classList.remove('empty');
-  var html = '<h2>Notifications (' + visible.length + ')</h2>';
+  var ranks = visible.map(function(n){ return rankByUuid[n.uuid]; });
+  var firstRank = Math.min.apply(null, ranks);
+  var lastRank = Math.max.apply(null, ranks);
+  var rangeLabel = firstRank === lastRank ? String(firstRank) : firstRank + '-' + lastRank;
+  var html = '<h2>Notifications (' + rangeLabel + ' of ' + total + ')</h2>';
   for(var i = 0; i < visible.length; i++){
     var n = visible[i];
     var meta = [n.type, n.category].filter(Boolean).join(' · ');

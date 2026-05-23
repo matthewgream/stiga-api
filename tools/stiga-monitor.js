@@ -129,10 +129,10 @@ class StigaMonitor {
             const port = typeof this.config.webstatus === 'number' ? this.config.webstatus : this.config.webstatus_port;
             const apiKey = this.config.apikey ?? mapsApiKey;
             if (!apiKey) throw new Error('stiga-monitor: --webstatus requires a Google Maps API key; provide --apikey=KEY or set mapsApiKey in stiga-config.js');
-            const auth = this.config.webstatus_auth;
-            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth });
+            const { webstatus_auth: auth, persist, persistDays } = this.config;
+            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth, persist, persistDays });
             this.processors.push(webstatus);
-            this.displayLocal.updateStatus('webstatus', `port:${port}${auth ? ' auth' : ''}`);
+            this.displayLocal.updateStatus('webstatus', `port:${port}${auth ? ' auth' : ''}${persist ? ' persist' : ''}`);
         }
 
         await this.connectionManager.connect();
@@ -169,6 +169,9 @@ Processor Options:
   --intercept[=port]           Enable intercept mode (default: 8083)
   --webstatus[=port[/creds]]   Enable real-time status web page (default port: 3001).
                                creds = user:pass (full basic-auth) or pass (any user)
+  --persist[=dir]              Persist breadcrumb trail to disk across restarts.
+                               Default dir: /dev/shm. Implies --webstatus context.
+  --persist-days=N             Crumb retention in days (default 14, only with --persist).
 
 Configuration:
   --directory=dir              Data directory (default: '/opt/stiga-api/data')
@@ -187,6 +190,8 @@ Examples:
   stiga-monitor --webstatus --apikey=YOUR_GOOGLE_MAPS_KEY
   stiga-monitor --webstatus=3001/admin:secret --apikey=YOUR_GOOGLE_MAPS_KEY
   stiga-monitor --webstatus=3001/secret --apikey=YOUR_GOOGLE_MAPS_KEY
+  stiga-monitor --webstatus --apikey=KEY --persist --persist-days=30
+  stiga-monitor --webstatus --apikey=KEY --persist=/var/lib/stiga
   stiga-monitor --monitor --timing-levels-undocked=status:10s,version:20m,settings:5m
   stiga-monitor --connect
 `);
@@ -220,6 +225,12 @@ function parseArgs() {
                     break;
                 case 'apikey':
                     config.apikey = value;
+                    break;
+                case 'persist':
+                    config.persist = value || true; // true = enable with default dir; string = override dir
+                    break;
+                case 'persist-days':
+                    config.persistDays = Number.parseFloat(value);
                     break;
                 case 'listen':
                     config.listen = value || true;
