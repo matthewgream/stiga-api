@@ -10,11 +10,13 @@
 
 const express = require('express');
 
-const { StigaAPIUtilities, StigaAPIElements: elements, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters } = require('../../../api/StigaAPI');
+const { StigaAPIUtilities, StigaAPIElements: elements, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPINotifications } = require('../../../api/StigaAPI');
 const { protobufDecode, formatNetworkId } = StigaAPIUtilities;
 
 const DEFAULT_PORT = 3001;
-const POLL_MS = 3000; // browser -> server poll interval (local, cheap)
+const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
+const NOTIF_POLL_MS_UNDOCKED = 60_000; // notifications poll interval when robot is active
+const NOTIF_POLL_MS_DOCKED = 300_000; // notifications poll interval when robot is parked
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -31,7 +33,9 @@ class WebStatusProcessor {
         this.username = options.username;
         this.password = options.password;
         this.perimeters = undefined;
-        // status/version requests are driven by the shared RequestPoller
+        this.notifications = [];
+        this.cloudServer = undefined;
+        this.notifTimer = undefined;
         this.poller = options.poller;
 
         this.state = {
@@ -60,11 +64,13 @@ class WebStatusProcessor {
                 statusFlag: undefined,
                 battery: undefined,
                 mowing: undefined,
+                schedule: undefined,
                 location: undefined,
                 network: undefined,
                 version: undefined,
                 updatedStatus: undefined,
                 updatedPosition: undefined,
+                updatedSchedule: undefined,
                 updatedVersion: undefined,
             },
         };
@@ -80,6 +86,7 @@ class WebStatusProcessor {
         app.get('/', (req, res) => res.type('html').send(this._renderPage()));
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state }));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
+        app.get('/api/notifications', (req, res) => res.json(this.notifications));
         await new Promise((resolve, reject) => {
             this.server = app.listen(this.port, '0.0.0.0', () => resolve());
             this.server.on('error', reject);
@@ -87,13 +94,19 @@ class WebStatusProcessor {
 
         this.poller?.acquire();
 
-        this._loadPerimeters().catch((e) => this.logger(`WebStatus: perimeters unavailable (${e.message})`));
+        this._loadPerimeters()
+            .then(() => this._startNotificationPoll())
+            .catch((e) => this.logger(`WebStatus: cloud features unavailable (${e.message})`));
 
         this.logger(`WebStatus started on port ${this.port}`);
     }
 
     async stop() {
         this.poller?.release();
+        if (this.notifTimer) {
+            clearTimeout(this.notifTimer);
+            this.notifTimer = undefined;
+        }
         if (this.server) await new Promise((resolve) => this.server.close(resolve));
         this.logger('WebStatus stopped');
     }
@@ -119,6 +132,8 @@ class WebStatusProcessor {
             this.state.robot.updatedVersion = new Date().toISOString();
         } else if (topic.includes('/LOG/ROBOT_POSITION')) {
             this._handleRobotPosition(decoded);
+        } else if (topic.includes('/LOG/SCHEDULING_SETTINGS')) {
+            this._handleRobotSchedule(decoded);
         }
     }
 
@@ -145,7 +160,7 @@ class WebStatusProcessor {
         r.docked = elements.formatRobotStatusDocking(elements.decodeRobotStatusDocking(decoded[13])).startsWith('yes');
         if (decoded[17]) {
             const battery = elements.decodeRobotBatteryStatus(decoded[17]);
-            r.battery = { charge: battery.charge, capacity: battery.capacity };
+            r.battery = battery ? { charge: battery.charge, capacity: battery.capacity } : undefined;
         }
         if (decoded[18]) {
             const mowing = elements.decodeRobotMowingStatus(decoded[18]);
@@ -167,6 +182,27 @@ class WebStatusProcessor {
         r.offsetCompass = position.offsetCompass;
         r.orientationCompass = position.orientationCompass;
         r.updatedPosition = new Date().toISOString();
+    }
+
+    // Compact the schedule down to just what the client needs to compute "next mow": a flag
+    // for whether scheduling is on, and the list of weekly time blocks with their start time.
+    _handleRobotSchedule(decoded) {
+        const schedule = elements.decodeRobotScheduleSettings(decoded);
+        if (!schedule) return;
+        const blocks = [];
+        for (const day of schedule.days || []) {
+            for (const block of day.timeBlocks || []) {
+                blocks.push({
+                    dayIndex: day.dayIndex,
+                    dayName: day.dayName,
+                    startHour: block.startTime?.hour ?? Math.floor(block.startSlot / 2),
+                    startMinute: block.startTime?.minute ?? (block.startSlot % 2) * 30,
+                    displayTime: block.displayTime,
+                });
+            }
+        }
+        this.state.robot.schedule = { enabled: schedule.enabled, blocks };
+        this.state.robot.updatedSchedule = new Date().toISOString();
     }
 
     _handleBaseStatus(decoded) {
@@ -208,7 +244,9 @@ class WebStatusProcessor {
     }
 
     // fetch the garden perimeters from the Cloud (once, at startup). Uses the perimeter
-    // referencePosition as the RTK origin so zones and the robot share one frame.
+    // referencePosition as the RTK origin so zones and the robot share one frame. The
+    // authenticated cloud connection is cached on `this.cloudServer` for reuse by the
+    // notifications poll.
     async _loadPerimeters() {
         if (!this.username || !this.password) {
             this.logger('WebStatus: no credentials supplied — zones disabled');
@@ -218,6 +256,7 @@ class WebStatusProcessor {
         if (!(await auth.isValid())) throw new Error('authentication failed');
         const server = new StigaAPIConnectionServer(auth);
         if (!(await server.isConnected())) throw new Error('server connection failed');
+        this.cloudServer = server;
         const garage = new StigaAPIGarage(server);
         if (!(await garage.load())) throw new Error('garage load failed');
         const device = garage.getDevice(this.connection.getRobotMac()) || (garage.getDevices() || [])[0];
@@ -239,10 +278,43 @@ class WebStatusProcessor {
         this.logger(`WebStatus: loaded ${this.perimeters.zones.length} zones, ${this.perimeters.obstacles.length} obstacles`);
     }
 
+    // poll the cloud for notifications. Frequency is adaptive: a fast cadence while the
+    // robot is undocked (where messages tend to arrive), and a slow cadence while it is
+    // parked. Self-rescheduling so the interval is recomputed each tick from current state.
+    _startNotificationPoll() {
+        if (!this.cloudServer) return;
+        const tick = async () => {
+            try {
+                const notifications = new StigaAPINotifications(this.cloudServer);
+                if (await notifications.load()) {
+                    this.notifications = notifications.getAll().map((n) => ({
+                        uuid: n.getUuid(),
+                        title: n.getTitle(),
+                        body: n.getBody(),
+                        type: n.getType(),
+                        category: n.getCategory(),
+                        read: n.isRead(),
+                        createdAt: n.getCreatedAt()?.toISOString(),
+                    }));
+                }
+            } catch (e) {
+                this.logger(`WebStatus: notifications poll failed (${e.message})`);
+            }
+            const delay = this.state.robot.docked ? NOTIF_POLL_MS_DOCKED : NOTIF_POLL_MS_UNDOCKED;
+            this.notifTimer = setTimeout(tick, delay);
+        };
+        tick();
+    }
+
     //
 
     _renderPage() {
-        const config = JSON.stringify({ baseLat: this.location.latitude, baseLng: this.location.longitude, pollMs: POLL_MS });
+        const config = JSON.stringify({
+            baseLat: this.location.latitude,
+            baseLng: this.location.longitude,
+            pollMs: POLL_MS,
+            notifPollMs: NOTIF_POLL_MS_UNDOCKED,
+        });
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -254,6 +326,7 @@ class WebStatusProcessor {
 <body>
 <div id="map"></div>
 <div id="statusbox"><div class="muted">connecting…</div></div>
+<div id="notifbox" class="empty"></div>
 <script>var CONFIG = ${config};</script>
 <script>${CLIENT_JS}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
@@ -286,6 +359,31 @@ html,body{margin:0;height:100%}
 #statusbox .tracks{margin-top:6px;font-size:11px;color:#80868b}
 #statusbox .btn{cursor:pointer;border:1px solid #c4c7c5;border-radius:3px;padding:0 6px;margin-left:4px;color:#202124;user-select:none}
 #statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
+#notifbox{position:absolute;bottom:12px;left:12px;z-index:5;background:rgba(255,255,255,.96);
+  border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
+  font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:560px;color:#202124}
+#notifbox.empty{display:none}
+#notifbox h2{font-size:10px;margin:0 0 6px;color:#80868b;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+#notifbox .nrow{display:flex;gap:10px;align-items:flex-start;padding:4px 0}
+#notifbox .nrow + .nrow{border-top:1px solid #eee}
+#notifbox .nago{color:#80868b;flex:0 0 auto;font-size:11px;white-space:nowrap;padding-top:1px}
+#notifbox .ncol{flex:1 1 auto;min-width:0}
+#notifbox .nline{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#notifbox .nline strong{font-weight:600}
+#notifbox .nline .nsep{color:#9aa0a6;margin:0 4px}
+#notifbox .nbody{color:#5f6368}
+#notifbox .nrow:hover .nline{white-space:normal;overflow:visible;text-overflow:clip}
+#notifbox .nmeta{display:none;font-size:11px;color:#80868b;padding-top:3px;opacity:.85}
+#notifbox .nrow:hover .nmeta{display:block}
+#notifbox .ndismiss{cursor:pointer;color:#5f6368;padding:0 4px;user-select:none;font-size:14px;line-height:1}
+#notifbox .ndismiss:hover{color:#ea4335}
+#statusbox h1 .linktag{margin-left:auto;font-size:9px;padding:2px 8px;border-radius:10px;
+  font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:#fff;background:#9aa0a6}
+#statusbox h1 .linktag.online{background:#34a853}
+#statusbox h1 .linktag.stale{background:#fbbc04;color:#202124}
+#statusbox h1 .linktag.offline{background:#ea4335}
+#statusbox .spark{margin-top:4px;display:block}
+#statusbox .nextmow{margin-top:4px;color:#80868b;font-size:11px}
 `;
 
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
@@ -295,7 +393,9 @@ var map, infoWindow, baseMarker, robotMarker, robotPin;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
-var tracksOn = false, crumbs = [], trackLine = null, lastCrumbTime = null;
+var tracksOn = false, crumbs = [], crumbSegments = [], lastCrumbTime = null;
+var notifications = [], dismissed = {};
+var batteryHistory = [], lastBatteryStatusTime = null;
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
 var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
 
@@ -326,10 +426,10 @@ function initMap(){
   robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin.element });
   attachHover(robotMarker, 'robot');
 
-  trackLine = new google.maps.Polyline({ path: [], strokeColor: '#ffffff', strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3 });
-
   refresh();
   setInterval(refresh, CONFIG.pollMs);
+  refreshNotifications();
+  setInterval(refreshNotifications, CONFIG.notifPollMs);
 }
 window.initMap = initMap;
 window.toggleTracks = toggleTracks;
@@ -403,8 +503,7 @@ function highlightActiveZone(){
 
 function zoneLabel(zoneId){
   if(zoneId === null || zoneId === undefined) return '-';
-  var name = zoneNames[zoneId];
-  return name ? (name + ' (' + zoneId + ')') : ('Zone ' + zoneId);
+  return zoneNames[zoneId] ? (zoneNames[zoneId] + ' (' + zoneId + ')') : ('Zone ' + zoneId);
 }
 
 function refresh(){
@@ -428,6 +527,7 @@ function refresh(){
         }
       }
       recordCrumb();
+      recordBattery();
       renderStatusBox();
       highlightActiveZone();
       if(hovered) infoWindow.setContent(hovered === 'base' ? baseInfo() : robotInfo());
@@ -446,30 +546,135 @@ function robotColor(r){
 }
 
 // client-side breadcrumb trail — a point is appended on each fresh position report while
-// tracks are ON. Session-only: not persisted, lost on page refresh.
+// tracks are ON. Each segment is colored by the robot's status at the time the crumb was
+// laid down, so the trail visually shows what the robot was doing where. Session-only:
+// not persisted, lost on page refresh.
+function crumbColor(r){
+  if(!r) return '#ffffff';
+  if(r.statusText && /error|fault|stuck|blocked|fail|trapped/i.test(r.statusText)) return '#ea4335';
+  var t = (r.statusType || '').toUpperCase();
+  if(t === 'ERROR' || t === 'BLOCKED' || t === 'LID_OPEN') return '#ea4335';
+  if(t === 'MOWING' || t === 'CUTTING_BORDER') return '#34a853';
+  if(t === 'GOING_HOME' || t === 'NAVIGATING_TO_AREA' || t === 'REACHING_FIRST_POINT' || t === 'PLANNING_ONGOING') return '#ffffff';
+  return '#fbbc04'; // waiting, updating, calibrating, blades-calibrating, storing, startup, docked, charging, etc.
+}
+
 function recordCrumb(){
   if(!tracksOn || !state || !state.robot) return;
   var r = state.robot;
   if(typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return;
   if(r.updatedPosition === lastCrumbTime) return;
   lastCrumbTime = r.updatedPosition;
-  crumbs.push({ lat: r.latitude, lng: r.longitude });
-  trackLine.setPath(crumbs);
+  var color = crumbColor(r);
+  var prev = crumbs[crumbs.length - 1];
+  var pt = { lat: r.latitude, lng: r.longitude, color: color };
+  crumbs.push(pt);
+  if(prev)
+    crumbSegments.push(new google.maps.Polyline({
+      path: [{ lat: prev.lat, lng: prev.lng }, { lat: pt.lat, lng: pt.lng }],
+      strokeColor: color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3, map: map
+    }));
 }
 function toggleTracks(){
   tracksOn = !tracksOn;
-  trackLine.setMap(tracksOn ? map : null);
+  crumbSegments.forEach(function(s){ s.setMap(tracksOn ? map : null); });
   if(tracksOn){ lastCrumbTime = null; recordCrumb(); }
   renderStatusBox();
 }
 function clearTracks(){
   crumbs = [];
   lastCrumbTime = null;
-  trackLine.setPath([]);
+  crumbSegments.forEach(function(s){ s.setMap(null); });
+  crumbSegments = [];
   renderStatusBox();
 }
 
-function row(k,v){ return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>'; }
+// session-only battery history: one sample per fresh STATUS report. Capped at 240 samples
+// so the SVG stays small even after a long session.
+function recordBattery(){
+  if(!state || !state.robot || !state.robot.battery || !state.robot.updatedStatus) return;
+  if(state.robot.updatedStatus === lastBatteryStatusTime) return;
+  lastBatteryStatusTime = state.robot.updatedStatus;
+  batteryHistory.push({ t: new Date(state.robot.updatedStatus).getTime(), v: state.robot.battery.charge });
+  if(batteryHistory.length > 240) batteryHistory.shift();
+}
+
+function batterySparkSVG(){
+  if(batteryHistory.length < 2) return '';
+  var w = 110, h = 22, pad = 2;
+  var t0 = batteryHistory[0].t, tN = batteryHistory[batteryHistory.length - 1].t;
+  var span = Math.max(1, tN - t0);
+  var pts = batteryHistory.map(function(p){
+    return (pad + ((p.t - t0) / span) * (w - 2 * pad)).toFixed(1) + ',' + (pad + (1 - p.v / 100) * (h - 2 * pad)).toFixed(1);
+  }).join(' ');
+  var last = batteryHistory[batteryHistory.length - 1];
+  var first = batteryHistory[0];
+  var trend = last.v - first.v;
+  var color = trend > 0 ? '#34a853' : (trend < 0 ? '#fbbc04' : '#80868b');
+  var lastX = pad + (w - 2 * pad);
+  var lastY = pad + (1 - last.v / 100) * (h - 2 * pad);
+  return '<svg class="spark" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
+    '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round"/>' +
+    '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="1.8" fill="' + color + '"/>' +
+    '</svg>';
+}
+
+// compute the next scheduled start time, scanning forward up to 7 days from now.
+function nextScheduledMow(){
+  if(!state || !state.robot || !state.robot.schedule) return null;
+  var s = state.robot.schedule;
+  if(!s.enabled || !s.blocks || s.blocks.length === 0) return null;
+  var now = new Date();
+  var jsDay = now.getDay(); // 0=Sun..6=Sat
+  // convert JS day (Sun=0) to schedule day (Mon=0..Sun=6)
+  var todayScheduleIdx = (jsDay + 6) % 7;
+  var nowMin = now.getHours() * 60 + now.getMinutes();
+  for(var offset = 0; offset < 8; offset++){
+    var scheduleDay = (todayScheduleIdx + offset) % 7;
+    var bucket = s.blocks.filter(function(b){ return b.dayIndex === scheduleDay; }).sort(function(a, b){ return a.startHour * 60 + a.startMinute - (b.startHour * 60 + b.startMinute); });
+    for(var i = 0; i < bucket.length; i++){
+      var b = bucket[i];
+      var blockMin = b.startHour * 60 + b.startMinute;
+      if(offset === 0 && blockMin <= nowMin) continue;
+      var dt = new Date(now);
+      dt.setDate(dt.getDate() + offset);
+      dt.setHours(b.startHour, b.startMinute, 0, 0);
+      return { date: dt, day: b.dayName, displayTime: b.displayTime };
+    }
+  }
+  return null;
+}
+
+function formatNextMow(nm){
+  if(!nm) return null;
+  var deltaMin = Math.round((nm.date.getTime() - Date.now()) / 60_000);
+  var when;
+  if(deltaMin < 60) when = 'in ' + deltaMin + 'm';
+  else if(deltaMin < 24 * 60) when = 'in ' + Math.round(deltaMin / 60) + 'h';
+  else if(deltaMin < 7 * 24 * 60) when = nm.day.slice(0, 3) + ' ' + nm.displayTime.split('-')[0];
+  else when = 'next ' + nm.day;
+  return 'Next mow ' + when;
+}
+
+// MQTT link health, derived from the freshest update timestamp across both endpoints.
+// Returned as a {cls,label} pair so it can render inline in the status-box title row.
+function linkState(){
+  var ages = [];
+  if(state && state.robot){
+    if(state.robot.updatedStatus) ages.push(Date.now() - new Date(state.robot.updatedStatus).getTime());
+    if(state.robot.updatedPosition) ages.push(Date.now() - new Date(state.robot.updatedPosition).getTime());
+  }
+  if(state && state.base && state.base.updatedStatus) ages.push(Date.now() - new Date(state.base.updatedStatus).getTime());
+  if(ages.length === 0) return { cls: 'offline', label: 'connecting' };
+  var freshest = Math.min.apply(null, ages);
+  if(freshest < 60_000) return { cls: 'online', label: 'online' };
+  if(freshest < 180_000) return { cls: 'stale', label: 'stale ' + Math.round(freshest / 1000) + 's' };
+  return { cls: 'offline', label: 'offline ' + Math.round(freshest / 60_000) + 'm' };
+}
+
+function row(k,v){
+  return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
+}
 
 function renderStatusBox(){
   var box = document.getElementById('statusbox');
@@ -479,23 +684,27 @@ function renderStatusBox(){
   var op = fmt(r.statusType);
   if(r.statusText) op += ' · ' + r.statusText;
   var batt = r.battery ? (r.battery.charge + '%') : '-';
+  var spark = batterySparkSVG();
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
+  var nextMowStr = formatNextMow(nextScheduledMow());
+  var nextMowRow = nextMowStr ? '<div class="nextmow">' + esc(nextMowStr) + '</div>' : '';
+  var link = linkState();
+  var linkTag = '<span class="linktag ' + link.cls + '">' + esc(link.label) + '</span>';
   var trk = '<div class="tracks">Tracks:' +
     '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
     '<span class="btn" onclick="clearTracks()">CLR</span></div>';
   box.innerHTML =
-    '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot</h1>' +
-    row('State', place) + row('Status', op) + row('Battery', batt) + row('Mowing', mow) +
+    '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot' + linkTag + '</h1>' +
+    row('State', place) + row('Status', op) + row('Battery', batt) + spark + row('Mowing', mow) + nextMowRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
 }
 
 function table(rows){
   var h = '<table>';
-  for(var i = 0; i < rows.length; i++){
-    if(!rows[i]) continue;
-    h += '<tr><td class="k">' + esc(rows[i][0]) + '</td><td>' + esc(rows[i][1]) + '</td></tr>';
-  }
+  for(var i = 0; i < rows.length; i++)
+    if(rows[i])
+      h += '<tr><td class="k">' + esc(rows[i][0]) + '</td><td>' + esc(rows[i][1]) + '</td></tr>';
   return h + '</table>';
 }
 function netLine(n){
@@ -512,7 +721,9 @@ function rtkLine(l){
   if(typeof l.offsetDistance === 'number') s += ' · RTK ' + l.offsetDistance.toFixed(1) + ' cm';
   return s;
 }
-function verLine(v){ return v ? (fmt(v.firmware) + (v.build ? ' (build ' + v.build + ')' : '')) : '-'; }
+function verLine(v){
+  return v ? (fmt(v.firmware) + (v.build ? ' (build ' + v.build + ')' : '')) : '-';
+}
 
 function robotInfo(){
   if(!state) return '<div class="infobox">connecting…</div>';
@@ -530,8 +741,48 @@ function robotInfo(){
     ['Network', netLine(r.network)],
     ['Firmware', verLine(r.version)]
   ];
-  return '<div class="infobox"><h2>Robot</h2>' + table(rows) +
-    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div></div>';
+  return '<div class="infobox"><h2>Robot</h2>' + table(rows) + '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div></div>';
+}
+
+// notifications — polled on a slow cadence (60s by default) and rendered in a bottom-left
+// box. The server already has them in cached form; dismissal is client-only, so dismissed
+// items reappear on page refresh (acceptable — we have no cloud "mark read" path yet).
+function refreshNotifications(){
+  fetch('api/notifications', { cache: 'no-store' })
+    .then(function(r){ return r.json(); })
+    .then(function(list){ notifications = list || []; renderNotifBox(); })
+    .catch(function(){ /* keep last list */ });
+}
+
+function renderNotifBox(){
+  var box = document.getElementById('notifbox');
+  if(!box) return;
+  var visible = notifications
+    .filter(function(n){ return !dismissed[n.uuid]; })
+    .slice()
+    .sort((a, b) => (b.createdAt ? new Date(b.createdAt).getTime() : 0) - (a.createdAt ? new Date(a.createdAt).getTime() : 0))
+    .slice(0, 3);
+  if(visible.length === 0){ box.className = 'empty'; box.innerHTML = ''; return; }
+  box.className = '';
+  var html = '<h2>Notifications (' + visible.length + ')</h2>';
+  for(var i = 0; i < visible.length; i++){
+    var n = visible[i];
+    var meta = [n.type, n.category].filter(Boolean).join(' · ');
+    var body = n.body && n.body !== 'No body' ? n.body : '';
+    var bodyChunk = body ? '<span class="nsep">—</span><span class="nbody">' + esc(body) + '</span>' : '';
+    html += '<div class="nrow">' +
+      '<span class="ndismiss" data-uuid="' + esc(n.uuid) + '" title="dismiss">×</span>' +
+      '<span class="nago">' + esc(ago(n.createdAt)) + '</span>' +
+      '<div class="ncol">' + '<div class="nline"><strong>' + esc(n.title) + '</strong>' + bodyChunk + '</div>' + (meta ? '<div class="nmeta">' + esc(meta) + '</div>' : '') + '</div>' +
+    '</div>';
+  }
+  box.innerHTML = html;
+  var buttons = box.querySelectorAll('.ndismiss');
+  for(var j = 0; j < buttons.length; j++){
+    (function(el){
+      el.addEventListener('click', function(){ dismissed[el.getAttribute('data-uuid')] = true; renderNotifBox(); });
+    })(buttons[j]);
+  }
 }
 
 function baseInfo(){
@@ -548,8 +799,7 @@ function baseInfo(){
     ['Network', netLine(b.network)],
     ['Firmware', verLine(b.version)]
   ];
-  return '<div class="infobox"><h2>Base station</h2>' + table(rows) +
-    '<div class="muted">status ' + ago(b.updatedStatus) + '</div></div>';
+  return '<div class="infobox"><h2>Base station</h2>' + table(rows) + '<div class="muted">status ' + ago(b.updatedStatus) + '</div></div>';
 }
 `;
 
