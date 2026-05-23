@@ -28,7 +28,7 @@
 //   mapControls             on | off                     'off' = disableDefaultUI (no zoom/fullscreen/etc.).
 //
 // Tracks (breadcrumb trail)
-//   tracks                  on | off                     Force initial tracks state (default off).
+//   tracks                  on | off                     Force initial tracks state (default on).
 //   tracksClr               0 | 1 | 2 | 3 | off          Decay limit: keep at most max(N,1) most-recent
 //                                                        distinct mowing zones. 0 = kill prior on zone change,
 //                                                        'off' = keep all (no decay). Default 0.
@@ -36,8 +36,8 @@
 //                                                        0 → 1 → 2 → 3 → ∞ → 0.
 //
 // Status-box content
-//   statusBatterySparkline  on | off                     Hide the inline battery SVG (default on).
-//   statusTracksControls    on | off                     Hide the entire Tracks line (default on).
+//   statusBatterySparkline  on | off                     Show inline battery SVG (default off).
+//   statusTracksControls    on | off                     Show the Tracks line (default on).
 //
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=2&statusBatterySparkline=off
@@ -465,7 +465,7 @@ var map, infoWindow, baseMarker, robotMarker, robotPin;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
-var tracksOn = false, crumbs = [], crumbSegments = [], lastCrumbTime = null;
+var tracksOn = true, crumbs = [], crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
 var batteryHistory = [], lastBatteryStatusTime = null;
 
@@ -474,9 +474,9 @@ var batteryHistory = [], lastBatteryStatusTime = null;
 //   boxStatus, boxNotify   lt|rt|lb|rb|no   (default: lt for status, lb for notify)
 //   mapPosition            lat,lon,zoom     (locks map view)
 //   mapControls            on|off           (off = disableDefaultUI)
-//   tracks                 on|off           (force tracks state; default off)
+//   tracks                 on|off           (force tracks state; default on)
 //   tracksClr              0|1|2|3|off      (decay limit; 0=kill prior on transition, off=keep all)
-//   statusBatterySparkline on|off           (default on)
+//   statusBatterySparkline on|off           (default off)
 //   statusTracksControls   on|off           (default on)
 var URL_CONFIG = (function(){
   var p = new URLSearchParams(window.location.search);
@@ -966,7 +966,7 @@ function renderStatusBox(){
   var op = fmt(r.statusType);
   if(r.statusText) op += ' · ' + r.statusText;
   var batt = r.battery ? (r.battery.charge + '%') : '-';
-  var spark = URL_CONFIG.statusBatterySparkline === 'off' ? '' : batterySparkSVG();
+  var spark = URL_CONFIG.statusBatterySparkline === 'on' ? batterySparkSVG() : '';
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
   var nextMowStr = formatNextMow(nextScheduledMow());
