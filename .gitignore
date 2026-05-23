@@ -6,4 +6,5 @@ stiga-config.*.js
 .apikey
 tools/*.csv
 tools/*.json
+tools/stiga-monitor.*.service
 data/

@@ -60,6 +60,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const express = require('express');
 
 const { StigaAPIUtilities, StigaAPIElements: elements, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPINotifications } = require('../../../api/StigaAPI');
@@ -73,6 +74,14 @@ const CRUMB_PERSIST_INTERVAL_MS = 60_000; // flush cached crumbs to disk every m
 const CRUMB_DEFAULT_INITIAL_ZONES = 1; // semantic default — cover the current (most-recent) mowing zone only
 const CRUMB_PERSIST_DEFAULT_DIR = '/dev/shm';
 const CRUMB_PERSIST_DEFAULT_DAYS = 14;
+
+// zone-completion trail: a sparse record of "robot finished N% of zone X at time T". Recorded
+// only on transition out of a zone, and only when the percent meets a threshold to filter
+// aborted starts. Persisted separately from crumbs (much smaller, much longer retention).
+const ZONE_COMPLETION_THRESHOLD_PERCENT = 5; // ignore <5% departures (likely aborted attempts)
+const ZONE_COMPLETIONS_PER_ZONE_KEEP = 10; // server retains up to N per zone (on disk + memory)
+const ZONE_COMPLETIONS_PER_ZONE_SERVE = 5; // up to N per zone served to the client
+const ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS = 90; // longer retention than crumbs — they're tiny
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -103,6 +112,15 @@ class WebStatusProcessor {
         this.crumbCache = []; // [{ lat, lng, t (epoch ms), zone, color }]
         this.crumbPersistTimer = undefined;
         this.crumbDirty = false;
+
+        // zone-completion tracking — see ZONE_COMPLETION_* constants for retention/threshold.
+        // Hardcoded 90-day default (vs the configurable crumb retention) because the records
+        // are tiny and the value of a long trail (seasonal mowing history) outweighs the cost.
+        this.zoneCompletions = []; // chronological [{ zone: "5", percent: 87, t: 1716480000000 }]
+        this.zoneCompletionsDirty = false;
+        this._activeMowingZone = undefined; // last seen non-null zone (used for transition detection)
+        this._activeMowingPercent = 0;
+        this.zoneCompletionDays = options.zoneCompletionDays || ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS;
 
         this.state = {
             base: {
@@ -151,7 +169,7 @@ class WebStatusProcessor {
         app.disable('x-powered-by');
         if (this.basicAuth) app.use((req, res, next) => this._basicAuthMiddleware(req, res, next));
         app.get('/', (req, res) => res.type('html').send(this._renderPage(req)));
-        app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state }));
+        app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() }));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
         app.get('/api/notifications', (req, res) => res.json(this.notifications));
         app.post('/api/command/:name', (req, res) => this._handleCommandPost(req, res));
@@ -164,9 +182,13 @@ class WebStatusProcessor {
         this.poller?.acquire();
 
         this._loadPersistedCrumbs();
+        this._loadPersistedZoneCompletions();
         if (this.persistEnabled) {
-            this.crumbPersistTimer = setInterval(() => this._persistCrumbs(), CRUMB_PERSIST_INTERVAL_MS);
-            this.logger(`WebStatus: crumb persistence ON (dir=${this.persistDir}, retention=${this.persistDays}d)`);
+            this.crumbPersistTimer = setInterval(() => {
+                this._persistCrumbs();
+                this._persistZoneCompletions();
+            }, CRUMB_PERSIST_INTERVAL_MS);
+            this.logger(`WebStatus: persistence ON (dir=${this.persistDir}, crumbs=${this.persistDays}d, zones=${this.zoneCompletionDays}d)`);
         }
 
         this._loadPerimeters()
@@ -187,6 +209,7 @@ class WebStatusProcessor {
             this.crumbPersistTimer = undefined;
         }
         this._persistCrumbs();
+        this._persistZoneCompletions();
         if (this.server) await new Promise((resolve) => this.server.close(resolve));
         this.logger('WebStatus stopped');
     }
@@ -314,6 +337,101 @@ class WebStatusProcessor {
         if (decoded[19]) r.location = this._rtk(decoded[19]);
         if (decoded[20]) r.network = this._network(decoded[20]);
         r.updatedStatus = new Date().toISOString();
+        this._trackZoneCompletion();
+    }
+
+    // Detect "robot left zone X" transitions and record the % complete at departure. We track
+    // the active (zone, percent) on every status decode, and when the zone changes we attribute
+    // the previous percent to the previous zone — provided it meets the threshold (filters out
+    // aborted starts where the robot drove out and immediately came back).
+    _trackZoneCompletion() {
+        const r = this.state.robot;
+        const m = r.mowing;
+        const currentZone = m && !r.docked && m.zone !== undefined && m.zone !== null ? String(m.zone) : undefined;
+        const currentPercent = m && typeof m.zoneCompleted === 'number' ? m.zoneCompleted : 0;
+        const previousZone = this._activeMowingZone;
+        const previousPercent = this._activeMowingPercent;
+        if (currentZone !== previousZone) {
+            if (previousZone !== undefined && previousPercent >= ZONE_COMPLETION_THRESHOLD_PERCENT) {
+                this._appendZoneCompletion(previousZone, previousPercent);
+            }
+        }
+        if (currentZone === undefined) {
+            this._activeMowingZone = undefined;
+            this._activeMowingPercent = 0;
+        } else {
+            this._activeMowingZone = currentZone;
+            this._activeMowingPercent = currentPercent;
+        }
+    }
+
+    _appendZoneCompletion(zone, percent) {
+        this.zoneCompletions.push({ zone, percent: Math.round(percent), t: Date.now() });
+        this._pruneZoneCompletions();
+        this.zoneCompletionsDirty = true;
+        this.logger(`WebStatus: zone ${zone} completion ${Math.round(percent)}% recorded`);
+    }
+
+    // Two-axis prune: by absolute age (zoneCompletionDays) and per-zone count cap. The latter
+    // keeps any one zone's history from monopolising the cache if the robot oscillates there.
+    _pruneZoneCompletions() {
+        const cutoff = Date.now() - this.zoneCompletionDays * 24 * 60 * 60 * 1000;
+        this.zoneCompletions = this.zoneCompletions.filter((c) => c.t >= cutoff);
+        const perZone = new Map();
+        for (let i = this.zoneCompletions.length - 1; i >= 0; i--) {
+            const entry = this.zoneCompletions[i];
+            const count = (perZone.get(entry.zone) || 0) + 1;
+            perZone.set(entry.zone, count);
+            if (count > ZONE_COMPLETIONS_PER_ZONE_KEEP) entry._drop = true;
+        }
+        this.zoneCompletions = this.zoneCompletions.filter((c) => !c._drop);
+    }
+
+    // Serialise for the wire: per-zone cap of ZONE_COMPLETIONS_PER_ZONE_SERVE, sorted newest-first
+    // across all zones (so the client can render "most recent overall" as entry [0]).
+    _serializeZoneCompletions() {
+        const sorted = [...this.zoneCompletions].sort((a, b) => b.t - a.t);
+        const perZone = new Map();
+        const out = [];
+        for (const entry of sorted) {
+            const count = (perZone.get(entry.zone) || 0) + 1;
+            perZone.set(entry.zone, count);
+            if (count <= ZONE_COMPLETIONS_PER_ZONE_SERVE) out.push(entry);
+        }
+        return out;
+    }
+
+    _zoneCompletionsFilePath() {
+        const mac = String(this.state.robot.mac || 'unknown').replaceAll(':', '');
+        return path.join(this.persistDir, `stiga-zonecompletions-${mac}.json.gz`);
+    }
+
+    _persistZoneCompletions() {
+        if (!this.persistEnabled || !this.zoneCompletionsDirty) return;
+        try {
+            const json = JSON.stringify({ version: 1, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
+            fs.writeFileSync(this._zoneCompletionsFilePath(), zlib.gzipSync(json));
+            this.zoneCompletionsDirty = false;
+        } catch (e) {
+            this.logger(`WebStatus: zone-completions persist failed: ${e.message}`);
+        }
+    }
+
+    _loadPersistedZoneCompletions() {
+        if (!this.persistEnabled) return;
+        const file = this._zoneCompletionsFilePath();
+        if (!fs.existsSync(file)) return;
+        try {
+            const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
+            const data = JSON.parse(json);
+            if (Array.isArray(data?.completions)) {
+                this.zoneCompletions = data.completions;
+                this._pruneZoneCompletions();
+                this.logger(`WebStatus: loaded ${this.zoneCompletions.length} persisted zone completions from ${file}`);
+            }
+        } catch (e) {
+            this.logger(`WebStatus: zone-completions load failed: ${e.message}`);
+        }
     }
 
     _handleRobotPosition(decoded) {
@@ -367,7 +485,9 @@ class WebStatusProcessor {
     _recordServerCrumb(lat, lng) {
         const r = this.state.robot;
         const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? String(r.mowing.zone) : undefined;
-        this.crumbCache.push({ lat, lng, t: Date.now(), zone, color: this._serverCrumbColor() });
+        // 7 decimal places ≈ 1 cm precision — vastly more than the mower's repeatability —
+        // and saves ~20 bytes per crumb in serialised form vs. the ~17 digits JS produces.
+        this.crumbCache.push({ lat: Math.round(lat * 1e7) / 1e7, lng: Math.round(lng * 1e7) / 1e7, t: Date.now(), zone, color: this._serverCrumbColor() });
         this._pruneCrumbs();
         this.crumbDirty = true;
     }
@@ -379,14 +499,17 @@ class WebStatusProcessor {
 
     _persistFilePath() {
         const mac = String(this.state.robot.mac || 'unknown').replaceAll(':', '');
-        return path.join(this.persistDir, `stiga-crumbs-${mac}.json`);
+        return path.join(this.persistDir, `stiga-crumbs-${mac}.json.gz`);
     }
 
+    // Persist as gzipped JSON: keeps the format human-inspectable (gunzip + jq) while
+    // shrinking the file ~5–10×. The full file is rewritten each tick — fine at /dev/shm
+    // speeds and crumb cadence; revisit if the cache ever grows to many MB.
     _persistCrumbs() {
         if (!this.persistEnabled || !this.crumbDirty) return;
         try {
-            const file = this._persistFilePath();
-            fs.writeFileSync(file, JSON.stringify({ version: 1, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, crumbs: this.crumbCache }));
+            const json = JSON.stringify({ version: 2, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, crumbs: this.crumbCache });
+            fs.writeFileSync(this._persistFilePath(), zlib.gzipSync(json));
             this.crumbDirty = false;
         } catch (e) {
             this.logger(`WebStatus: crumb persist failed: ${e.message}`);
@@ -395,16 +518,29 @@ class WebStatusProcessor {
 
     _loadPersistedCrumbs() {
         if (!this.persistEnabled) return;
+        const gzPath = this._persistFilePath();
+        const legacyPath = gzPath.replace(/\.gz$/, ''); // v1 wrote plain JSON; read it once if it's still around
         try {
-            const text = fs.readFileSync(this._persistFilePath(), 'utf8');
-            const data = JSON.parse(text);
+            let json;
+            let source;
+            if (fs.existsSync(gzPath)) {
+                json = zlib.gunzipSync(fs.readFileSync(gzPath)).toString('utf8');
+                source = gzPath;
+            } else if (fs.existsSync(legacyPath)) {
+                json = fs.readFileSync(legacyPath, 'utf8');
+                source = legacyPath;
+            } else {
+                return;
+            }
+            const data = JSON.parse(json);
             if (Array.isArray(data?.crumbs)) {
                 this.crumbCache = data.crumbs;
                 this._pruneCrumbs();
-                this.logger(`WebStatus: loaded ${this.crumbCache.length} persisted crumbs from ${this._persistFilePath()}`);
+                this.crumbDirty = true; // mark dirty so the next tick rewrites in the new format
+                this.logger(`WebStatus: loaded ${this.crumbCache.length} persisted crumbs from ${source}`);
             }
         } catch (e) {
-            if (e.code !== 'ENOENT') this.logger(`WebStatus: crumb load failed: ${e.message}`);
+            this.logger(`WebStatus: crumb load failed: ${e.message}`);
         }
     }
 
@@ -564,10 +700,11 @@ class WebStatusProcessor {
 <div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
 <div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
+<div id="zonepanel"></div>
 <script>
 var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(initialCrumbs)};
-var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state })};
+var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() })};
 var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
 </script>
 <script>${CLIENT_JS}</script>
@@ -632,6 +769,19 @@ html,body{margin:0;height:100%}
 #statusbox h1 .linktag.offline{background:#ea4335}
 #statusbox .spark{margin-top:4px;display:block}
 #statusbox .nextmow{margin-top:4px;color:#80868b;font-size:11px}
+#statusbox .zonelast{font-size:11px;color:#5f6368;text-align:right;cursor:default;padding:1px 0;font-weight:500}
+#statusbox .zonelast:hover{color:#202124}
+#zonepanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
+  padding:9px 13px;box-shadow:0 2px 12px rgba(0,0,0,.35);
+  font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;color:#202124;display:none;min-width:240px;max-width:340px}
+#zonepanel.show{display:block}
+#zonepanel h2{font-size:11px;margin:0 0 7px;color:#80868b;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+#zonepanel table{border-collapse:collapse;width:100%}
+#zonepanel td{padding:2px 0;vertical-align:top;font-size:12px}
+#zonepanel td.zn{padding-right:12px;white-space:nowrap;font-weight:600}
+#zonepanel td.zp{padding-right:12px;white-space:nowrap;text-align:right;color:#137333;font-variant-numeric:tabular-nums}
+#zonepanel td.zt{color:#80868b;white-space:nowrap;text-align:right;font-size:11px}
+#zonepanel .zsep td{border-top:1px solid #eee;padding-top:5px}
 #cmdbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;color:#202124;
@@ -1202,6 +1352,71 @@ function row(k,v){
   return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
 }
 
+// Floating panel showing the per-zone completion trail, opened on hover of the latest-zone
+// line in the status box. Positioned beside the status box; closes when the pointer leaves
+// either the trigger line or the panel itself.
+var zonePanelCloseTimer = null;
+function attachZonePanelHover(){
+  var box = document.getElementById('statusbox');
+  var trigger = box && box.querySelector('.zonelast');
+  if(!trigger) return;
+  trigger.addEventListener('mouseenter', showZonePanel);
+  trigger.addEventListener('mouseleave', scheduleZonePanelClose);
+  var panel = document.getElementById('zonepanel');
+  if(panel && !panel.dataset.bound){
+    panel.dataset.bound = '1';
+    panel.addEventListener('mouseenter', function(){ if(zonePanelCloseTimer){ clearTimeout(zonePanelCloseTimer); zonePanelCloseTimer = null; } });
+    panel.addEventListener('mouseleave', scheduleZonePanelClose);
+  }
+}
+function showZonePanel(){
+  var panel = document.getElementById('zonepanel');
+  var box = document.getElementById('statusbox');
+  if(!panel || !box || !state || !Array.isArray(state.zoneCompletions) || state.zoneCompletions.length === 0) return;
+  if(zonePanelCloseTimer){ clearTimeout(zonePanelCloseTimer); zonePanelCloseTimer = null; }
+  // Group by zone, newest-first within each group; zones themselves ordered by most-recent entry.
+  var byZone = {}, zoneOrder = [];
+  state.zoneCompletions.forEach(function(c){
+    if(!byZone[c.zone]){ byZone[c.zone] = []; zoneOrder.push(c.zone); }
+    byZone[c.zone].push(c);
+  });
+  var html = '<h2>Zone completions</h2><table>';
+  for(var i = 0; i < zoneOrder.length; i++){
+    var z = zoneOrder[i];
+    var entries = byZone[z];
+    for(var j = 0; j < entries.length; j++){
+      var e = entries[j];
+      html += '<tr' + (j === 0 && i > 0 ? ' class="zsep"' : (j > 0 ? '' : (i === 0 ? '' : ''))) + '>' +
+        '<td class="zn">' + (j === 0 ? esc(zoneLabel(z)) : '') + '</td>' +
+        '<td class="zp">' + esc(e.percent) + '%</td>' +
+        '<td class="zt">' + esc(ago(new Date(e.t).toISOString())) + '</td>' +
+      '</tr>';
+    }
+  }
+  html += '</table>';
+  panel.innerHTML = html;
+  panel.classList.add('show');
+  // Position next to the status box (to its right if there's space, otherwise below).
+  var br = box.getBoundingClientRect();
+  var pr = panel.getBoundingClientRect();
+  var gap = 8;
+  if(br.right + gap + pr.width <= window.innerWidth){
+    panel.style.left = (br.right + gap) + 'px';
+    panel.style.top = br.top + 'px';
+  } else {
+    panel.style.left = br.left + 'px';
+    panel.style.top = (br.bottom + gap) + 'px';
+  }
+}
+function scheduleZonePanelClose(){
+  if(zonePanelCloseTimer) clearTimeout(zonePanelCloseTimer);
+  zonePanelCloseTimer = setTimeout(function(){
+    var panel = document.getElementById('zonepanel');
+    if(panel) panel.classList.remove('show');
+    zonePanelCloseTimer = null;
+  }, 250);
+}
+
 // Active-control panel. Hidden unless URL_CONFIG.commands === 'on'. Start/Stop is shown as
 // the contextually-appropriate verb based on the live robot status; Home is always present.
 // Commands POST to /api/command/:name and the local server publishes via MQTT.
@@ -1293,6 +1508,12 @@ function renderStatusBox(){
   var spark = URL_CONFIG.statusBatterySparkline === 'on' ? batterySparkSVG() : '';
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
+  var zoneLastRow = '';
+  var zc = state.zoneCompletions;
+  if(Array.isArray(zc) && zc.length > 0){
+    var latest = zc[0];
+    zoneLastRow = '<div class="zonelast" data-zonepanel="1">' + esc(zoneLabel(latest.zone)) + ' - ' + esc(latest.percent) + '% · ' + esc(ago(new Date(latest.t).toISOString())) + '</div>';
+  }
   var nextMowStr = formatNextMow(nextScheduledMow());
   var nextMowRow = nextMowStr ? '<div class="nextmow">' + esc(nextMowStr) + '</div>' : '';
   var link = linkState();
@@ -1309,8 +1530,9 @@ function renderStatusBox(){
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot' + linkTag + '</h1>' +
-    row('State', place) + row('Status', op) + row('Battery', batt) + spark + row('Mowing', mow) + nextMowRow +
+    row('State', place) + row('Status', op) + row('Battery', batt) + spark + row('Mowing', mow) + zoneLastRow + nextMowRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
+  attachZonePanelHover();
 }
 
 function table(rows){
