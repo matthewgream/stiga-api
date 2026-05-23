@@ -27,6 +27,12 @@ Installation check:
   [OK]   base status: op=STANDBY
 
 
+*** OPEN ISSUES ***
+
+Do not know how to obtain/update: (a) zone settings, (b) temporary obstacles, (c) zone links, (d) zone 
+management commands, (e) obstacle parameters.
+
+
 *** UPDATE (22 MAY 2026) ***
 
 Corrected the display of RTK offset in status and position messages.

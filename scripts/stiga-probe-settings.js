@@ -18,6 +18,7 @@ const { username, password } = StigaAPIConfig.load();
     const device = body?.data?.find((d) => d.type === 'Device') ?? body?.data?.[0];
     const settings = device?.attributes?.settings;
 
+    console.log('device keys:', Object.keys(device ?? {}).join(', '));
     console.log('device attribute keys:', Object.keys(device?.attributes ?? {}).join(', '));
     console.log('\nsettings is:', Array.isArray(settings) ? `array[${settings.length}]` : typeof settings);
     const s = Array.isArray(settings) ? settings[0] : settings;
