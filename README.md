@@ -39,6 +39,8 @@ Installation check:
 
 Do not know how to obtain/update: (a) zone settings, (b) temporary obstacles, (c) zone links, (d) zone management commands, (e) obstacle parameters.
 
+The following is a set of rolling updates, each new entry may update/obsolete something older. Needs to be cleaned and tidied.
+
 ---
 
 ## Update (23 May 2026)
