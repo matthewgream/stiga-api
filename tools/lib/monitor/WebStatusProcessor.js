@@ -18,8 +18,13 @@
 //                                                             reads as "status" — pun intended). 'no' hides it.
 //
 // Map
-//   mapPosition             <lat>,<lon>,<zoom>           Lock the map view. Disables auto-fit-to-bounds.
+//   mapPosition             <lat>,<lon>[,<zoom>]         Absolute view. Disables auto-fit.
 //                                                        Example: mapPosition=59.6624,12.9952,19
+//                           <dLat>,<dLon>[,<zoom>]       Offset from the zones bounding-box centre (which the
+//                                                        client also console.logs at startup so you can copy it).
+//                                                        Units required on at least one part: 'm' or 'cm'.
+//                                                        Examples: mapPosition=+5m,-5m  mapPosition=+23cm,0m,19
+//                           (omitted)                    Default: fit to zones bounding box once perimeters arrive.
 //   mapControls             on | off                     'off' = disableDefaultUI (no zoom/fullscreen/etc.).
 //
 // Tracks (breadcrumb trail)
@@ -407,7 +412,7 @@ html,body{margin:0;height:100%}
 .pos-lb{bottom:12px;left:12px;right:auto;top:auto}
 .pos-rb{bottom:12px;right:12px;left:auto;top:auto}
 .pos-no{display:none !important}
-.pos-st{right:auto;bottom:auto} /* stacked under status box; top/left/width set by JS */
+.pos-st{right:auto;bottom:auto;box-sizing:border-box} /* stacked under status box; top/left/width set by JS — border-box so the width set in JS includes the notif-box padding */
 #statusbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:9px 13px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:13px/1.45 system-ui,Segoe UI,Arial,sans-serif;min-width:200px;color:#202124}
@@ -487,6 +492,59 @@ var URL_CONFIG = (function(){
   };
 })();
 
+// mapPosition supports two forms:
+//   absolute: "lat,lon[,zoom]" e.g. "59.6624,12.9952,19"
+//   offset:   "<dLatM>,<dLonM>[,zoom]" with m/cm unit on at least one of the first two parts,
+//             e.g. "+5m,-5m" or "+23cm,0m". Offsets are applied relative to the bounding-box
+//             centre of all zones, computed once the perimeters arrive.
+function parseUnitToMeters(s){
+  var m = (typeof s === 'string') ? s.match(/^([+-]?\\d+(?:\\.\\d+)?)(m|cm)$/i) : null;
+  if(!m) return null;
+  var v = Number.parseFloat(m[1]);
+  return m[2].toLowerCase() === 'cm' ? v / 100 : v;
+}
+function parseMapPositionSpec(spec){
+  if(!spec) return null;
+  var parts = spec.split(',').map(function(s){ return s.trim(); });
+  if(parts.length < 2) return null;
+  var hasUnit = /(m|cm)$/i.test(parts[0]) || /(m|cm)$/i.test(parts[1]);
+  var zoom;
+  if(parts.length >= 3){ var z = Number.parseFloat(parts[2]); if(!Number.isNaN(z)) zoom = z; }
+  if(hasUnit){
+    var latM = parseUnitToMeters(parts[0]);
+    var lonM = parseUnitToMeters(parts[1]);
+    if(latM === null || lonM === null) return null;
+    return { offset: { latM: latM, lonM: lonM }, zoom: zoom, raw: spec };
+  }
+  var lat = Number.parseFloat(parts[0]);
+  var lon = Number.parseFloat(parts[1]);
+  if(Number.isNaN(lat) || Number.isNaN(lon)) return null;
+  return { abs: { lat: lat, lng: lon }, zoom: zoom, raw: spec };
+}
+function applyOffsetFromCenter(center, latM, lonM){
+  var dLat = latM / 111_320;
+  var dLon = lonM / (111_320 * Math.cos(center.lat * Math.PI / 180));
+  return { lat: center.lat + dLat, lng: center.lng + dLon };
+}
+function computeZonesBoundsCenter(zones){
+  if(!zones || zones.length === 0) return null;
+  var minLat = Number.POSITIVE_INFINITY, maxLat = Number.NEGATIVE_INFINITY;
+  var minLon = Number.POSITIVE_INFINITY, maxLon = Number.NEGATIVE_INFINITY;
+  for(var i = 0; i < zones.length; i++){
+    var path = zones[i].path || [];
+    for(var j = 0; j < path.length; j++){
+      var pt = path[j];
+      if(pt.latitude < minLat) minLat = pt.latitude;
+      if(pt.latitude > maxLat) maxLat = pt.latitude;
+      if(pt.longitude < minLon) minLon = pt.longitude;
+      if(pt.longitude > maxLon) maxLon = pt.longitude;
+    }
+  }
+  return Number.isFinite(minLat) ? { lat: (minLat + maxLat) / 2, lng: (minLon + maxLon) / 2 } : null;
+}
+var MAP_POSITION = parseMapPositionSpec(URL_CONFIG.mapPosition);
+var ZONES_CENTRE = null; // populated when perimeters arrive; used as the offset reference
+
 // tracksClr cycle: 0 -> 1 -> 2 -> 3 -> off (Infinity) -> 0. The value is "at most N most-recent
 // distinct zones kept"; N=0 means kill prior tracks on zone change (1 zone visible).
 var TRACKS_CLR_CYCLE = [0, 1, 2, 3, Number.POSITIVE_INFINITY];
@@ -551,13 +609,13 @@ function ago(iso){
 function initMap(){
   var base = { lat: CONFIG.baseLat, lng: CONFIG.baseLng };
   var center = base, zoom = 18, locked = false;
-  if(URL_CONFIG.mapPosition){
-    var parts = URL_CONFIG.mapPosition.split(',').map(function(s){ return Number.parseFloat(s); });
-    if(parts.length >= 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1])){
-      center = { lat: parts[0], lng: parts[1] };
-      if(parts.length >= 3 && !Number.isNaN(parts[2])) zoom = parts[2];
-      locked = true;
-    }
+  if(MAP_POSITION && MAP_POSITION.abs){
+    center = { lat: MAP_POSITION.abs.lat, lng: MAP_POSITION.abs.lng };
+    if(MAP_POSITION.zoom !== undefined) zoom = MAP_POSITION.zoom;
+    locked = true;
+  } else if(MAP_POSITION && MAP_POSITION.offset){
+    // offset mode — wait for perimeters to resolve the reference centre; lock the view now
+    locked = true;
   }
   var mapOpts = {
     center: center, zoom: zoom, mapTypeId: 'satellite', tilt: 0,
@@ -568,13 +626,14 @@ function initMap(){
   if(locked){ userMoved = true; didFit = true; } // suppress auto-fit when caller fixed the view
   infoWindow = new google.maps.InfoWindow();
   map.addListener('dragstart', function(){ userMoved = true; });
+  map.addListener('idle', logMapPositionFromCurrentView);
 
-  var basePin = new google.maps.marker.PinElement({ background:'#1a73e8', borderColor:'#ffffff', glyphColor:'#ffffff', glyph:'B' });
-  baseMarker = new google.maps.marker.AdvancedMarkerElement({ map: map, position: base, title: 'Base station', content: basePin.element });
+  var basePin = new google.maps.marker.PinElement({ background:'#1a73e8', borderColor:'#ffffff', glyphColor:'#ffffff', glyphText:'B' });
+  baseMarker = new google.maps.marker.AdvancedMarkerElement({ map: map, position: base, title: 'Base station', content: basePin });
   attachHover(baseMarker, 'base');
 
-  robotPin = new google.maps.marker.PinElement({ background:'#34a853', borderColor:'#ffffff', glyphColor:'#ffffff', glyph:'R' });
-  robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin.element });
+  robotPin = new google.maps.marker.PinElement({ background:'#34a853', borderColor:'#ffffff', glyphColor:'#ffffff', glyphText:'R' });
+  robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin });
   attachHover(robotMarker, 'robot');
 
   refresh();
@@ -625,9 +684,40 @@ function loadPerimeters(){
         makePolygon(o.path, '#ea4335', 0.20, 3, 2);
       });
       highlightActiveZone();
-      if(any && !userMoved){ didFit = true; map.fitBounds(bounds, 60); }
+      ZONES_CENTRE = computeZonesBoundsCenter(p.zones || []);
+      if(ZONES_CENTRE) console.log('WebStatus: zones centre = ' + ZONES_CENTRE.lat.toFixed(7) + ', ' + ZONES_CENTRE.lng.toFixed(7) + ' (use as mapPosition reference)');
+      if(MAP_POSITION && MAP_POSITION.offset && ZONES_CENTRE){
+        var target = applyOffsetFromCenter(ZONES_CENTRE, MAP_POSITION.offset.latM, MAP_POSITION.offset.lonM);
+        map.setCenter(target);
+        if(MAP_POSITION.zoom !== undefined) map.setZoom(MAP_POSITION.zoom);
+        console.log('WebStatus: mapPosition offset ' + MAP_POSITION.raw + ' -> ' + target.lat.toFixed(7) + ', ' + target.lng.toFixed(7));
+      } else if(any && !userMoved){
+        didFit = true;
+        map.fitBounds(bounds, 60);
+      }
     })
     .catch(function(){ perimetersLoading = false; });
+}
+
+// Print the current map view as a ready-to-paste mapPosition= spec whenever the user finishes
+// dragging or zooming. Workflow: drag the map to the desired view, then copy the last line
+// printed (e.g. mapPosition=+5.20m,-1.80m,19) into the URL or stiga-monitor invocation.
+var lastLoggedMapSpec = null;
+function logMapPositionFromCurrentView(){
+  if(!ZONES_CENTRE || !map) return;
+  var c = map.getCenter();
+  if(!c) return;
+  var dLatM = (c.lat() - ZONES_CENTRE.lat) * 111_320;
+  var dLonM = (c.lng() - ZONES_CENTRE.lng) * 111_320 * Math.cos(ZONES_CENTRE.lat * Math.PI / 180);
+  function fmt(v){
+    var sign = v >= 0 ? '+' : '-';
+    var abs = Math.abs(v);
+    return abs < 1 ? sign + Math.round(abs * 100) + 'cm' : sign + abs.toFixed(2) + 'm';
+  }
+  var spec = 'mapPosition=' + fmt(dLatM) + ',' + fmt(dLonM) + ',' + map.getZoom();
+  if(spec === lastLoggedMapSpec) return;
+  lastLoggedMapSpec = spec;
+  console.log('WebStatus: current view = ' + spec);
 }
 
 function makePolygon(path, color, fillOpacity, weight, zIndex){
@@ -960,8 +1050,8 @@ function renderNotifBox(){
     .slice()
     .sort((a, b) => (b.createdAt ? new Date(b.createdAt).getTime() : 0) - (a.createdAt ? new Date(a.createdAt).getTime() : 0))
     .slice(0, 3);
-  if(visible.length === 0){ box.className = 'empty'; box.innerHTML = ''; return; }
-  box.className = '';
+  if(visible.length === 0){ box.classList.add('empty'); box.innerHTML = ''; return; }
+  box.classList.remove('empty');
   var html = '<h2>Notifications (' + visible.length + ')</h2>';
   for(var i = 0; i < visible.length; i++){
     var n = visible[i];
@@ -981,6 +1071,7 @@ function renderNotifBox(){
       el.addEventListener('click', function(){ dismissed[el.getAttribute('data-uuid')] = true; renderNotifBox(); });
     })(buttons[j]);
   }
+  applyStackedNotifyPosition();
 }
 
 function baseInfo(){
