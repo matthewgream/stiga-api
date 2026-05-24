@@ -1688,15 +1688,18 @@ function verLine(v){
 function robotInfo(){
   if(!state) return '<div class="infobox">connecting…</div>';
   var r = state.robot;
+  // Combined Location: offset-from-base + orientation, e.g. "1.7m at 242°, oriented 338°".
+  // Each half degrades independently when its source is missing.
+  var fromBase = (typeof r.offsetDistanceMetres === 'number') ? (r.offsetDistanceMetres.toFixed(1) + 'm at ' + Math.round(r.offsetCompass) + '°') : null;
+  var heading = (typeof r.orientationCompass === 'number') ? ('oriented ' + Math.round(r.orientationCompass) + '°') : null;
+  var location = [fromBase, heading].filter(Boolean).join(', ') || '-';
   var rows = [
-    ['Operation', fmt(r.statusMessage || r.statusType) + (r.statusText ? ' · ' + r.statusText : '')],
+    ['Status', fmt(r.statusMessage || r.statusType) + (r.statusText ? ' · ' + r.statusText : '')],
     ['Validity', fmt(r.statusValid) + ' · ' + fmt(r.statusFlag)],
     ['Docked', r.docked === undefined ? '-' : (r.docked ? 'yes' : 'no')],
     ['Battery', r.battery ? (r.battery.charge + '% · ' + r.battery.capacity + ' mAh') : '-'],
-    r.mowing ? ['Mowing', zoneLabel(r.mowing.zone) + ' at ' + fmt(r.mowing.zoneCompleted,0) + '%, garden ' + fmt(r.mowing.gardenCompleted,0) + '%'] : null,
-    ['Location', (typeof r.latitude === 'number') ? (r.latitude.toFixed(7) + ', ' + r.longitude.toFixed(7)) : 'no fix yet'],
-    ['From base', (typeof r.offsetDistanceMetres === 'number') ? (r.offsetDistanceMetres.toFixed(1) + ' m at ' + Math.round(r.offsetCompass) + '°') : '-'],
-    ['Heading', (typeof r.orientationCompass === 'number') ? (Math.round(r.orientationCompass) + '°') : '-'],
+    ['Position', (typeof r.latitude === 'number') ? (r.latitude.toFixed(7) + ', ' + r.longitude.toFixed(7)) : 'no fix yet'],
+    ['Location', location],
     ['GNSS/RTK', rtkLine(r.location)],
     ['Network', netLine(r.network)],
     ['Firmware', verLine(r.version)]
@@ -1759,11 +1762,10 @@ function baseInfo(){
   var b = state.base;
   var st = b.status || {};
   var rows = [
-    ['Position', b.latitude.toFixed(7) + ', ' + b.longitude.toFixed(7)],
     ['Status', fmt(st.type)],
     ['Detail', fmt(st.value) + ' / ' + fmt(st.detail)],
     ['Flag', fmt(st.flag)],
-    ['LED', fmt(st.led)],
+    ['Position', b.latitude.toFixed(7) + ', ' + b.longitude.toFixed(7)],
     ['GNSS/RTK', rtkLine(b.location)],
     ['Network', netLine(b.network)],
     ['Firmware', verLine(b.version)]

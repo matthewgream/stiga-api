@@ -188,10 +188,10 @@ class MonitorProcessor {
         if (location) {
             // decoded[19]/[8] is GNSS/RTK quality, not a position — show satellites/coverage,
             // not a lat/lon. The robot's actual location is the separate 'Position:' line.
-            data.locationPosition = `${location.satellites} satellites`;
-            if (location.coverage) data.locationPosition += ` [${['GOOD', 'POOR', 'BAD', 'WORSE'][location.coverage]}]`;
-            data.locationOffset = `RTK offset ${location.offsetDistance.toFixed(1)} cm`;
-            if (location.rtkQuality !== undefined) data.locationOffset += ` (quality ${(location.rtkQuality * 100).toFixed(2)}%)`;
+            data.gnssDetail = `${location.satellites} satellites`;
+            if (location.coverage) data.gnssDetail += ` [${['GOOD', 'POOR', 'BAD', 'WORSE'][location.coverage]}]`;
+            data.gnssRtk = `RTK offset ${location.offsetDistance.toFixed(1)} cm`;
+            if (location.rtkQuality !== undefined) data.gnssRtk += ` (quality ${(location.rtkQuality * 100).toFixed(2)}%)`;
         }
     }
 
