@@ -614,14 +614,24 @@ class WebStatusProcessor {
         this.perimeters = {
             referencePosition: ref,
             zones: perimeters.getZones().map((zone) => ({ id: zone.getId(), name: zone.getName(), area: zone.getArea(), path: zone.getPath() })),
+            closedZones: perimeters.getClosedZones().map((zone) => ({ id: zone.getId(), name: zone.getName(), area: zone.getArea(), path: zone.getPath() })),
             obstacles: perimeters.getObstacles().map((obstacle) => ({ id: obstacle.getId(), area: obstacle.getArea(), path: obstacle.getPath() })),
+            tempObstacles: perimeters.getTempObstacles().map((obstacle) => ({ id: obstacle.getId(), area: obstacle.getArea(), path: obstacle.getPath() })),
+            connectPaths: perimeters.getConnectPaths().map((p) => ({ id: p.getId(), fromZone: p.getFromZone(), toZone: p.getToZone(), path: p.getPath() })),
+            dockingPaths: perimeters.getDockingPaths().map((p) => ({ id: p.getId(), fromZone: p.getFromZone(), toZone: p.getToZone(), path: p.getPath() })),
+            pickupPoints: perimeters.getPickupPoints(),
         };
         if (ref?.latitude && ref?.longitude) {
             this.location = ref;
             this.state.base.latitude = ref.latitude;
             this.state.base.longitude = ref.longitude;
         }
-        this.logger(`WebStatus: loaded ${this.perimeters.zones.length} zones, ${this.perimeters.obstacles.length} obstacles`);
+        this.logger(
+            `WebStatus: loaded ${this.perimeters.zones.length} zones (+${this.perimeters.closedZones.length} closed), ` +
+                `${this.perimeters.obstacles.length} obstacles (+${this.perimeters.tempObstacles.length} temp), ` +
+                `${this.perimeters.connectPaths.length} connect-paths, ${this.perimeters.dockingPaths.length} docking-paths, ` +
+                `${this.perimeters.pickupPoints.length} pickup-points`
+        );
     }
 
     // poll the cloud for notifications. Frequency is adaptive: a fast cadence while the
@@ -817,7 +827,7 @@ var map, infoWindow, baseMarker, robotMarker, robotPin;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
-var tracksOn = true, crumbs = [], crumbSegments = [], lastCrumbTime = null;
+var tracksOn = true, tracksVisible = true, crumbs = [], crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
 var batteryHistory = [], lastBatteryStatusTime = null;
 
@@ -1061,7 +1071,7 @@ function hydrateInitialCrumbs(){
       var seg = new google.maps.Polyline({
         path: [{ lat: prev.lat, lng: prev.lng }, { lat: c.lat, lng: c.lng }],
         strokeColor: c.color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3,
-        map: tracksOn ? map : null
+        map: (tracksOn && tracksVisible) ? map : null
       });
       seg.crumbZone = c.zone;
       crumbSegments.push(seg);
@@ -1073,6 +1083,7 @@ function hydrateInitialCrumbs(){
 window.initMap = initMap;
 window.toggleTracks = toggleTracks;
 window.clearTracks = clearTracks;
+window.toggleTracksVisible = toggleTracksVisible;
 
 function attachHover(marker, kind){
   var node = marker.content;
@@ -1109,8 +1120,54 @@ function loadPerimeters(){
           zoneNames[z.id] = z.name;
         }
       });
+      // Closed zones — same colour rotation as live zones but much lighter fill, signalling
+      // "defined but currently disabled in the app". Cycle continues from where live zones end.
+      (p.closedZones || []).forEach(function(z, i){
+        var color = ZONE_COLORS[(p.zones.length + i) % ZONE_COLORS.length];
+        makePolygon(z.path, color, 0.05, 2, 1);
+      });
       (p.obstacles || []).forEach(function(o){
         makePolygon(o.path, '#ea4335', 0.20, 3, 2);
+      });
+      // Temporary obstacles — same shape treatment as permanent obstacles but a brighter red
+      // with stronger fill, since they're transient and the user should notice them.
+      (p.tempObstacles || []).forEach(function(o){
+        makePolygon(o.path, '#ff3b30', 0.32, 3, 2);
+      });
+      // Inter-zone connector paths — drawn beneath everything else as a wider grey "road"
+      // (9px). The robot follows these routes, so the bright 3px track polylines sit on top
+      // as a "car trail" with a generous grey halo peeking out on either side. Where there's
+      // no track yet, the full grey path shows through.
+      (p.connectPaths || []).forEach(function(pp){
+        if(!pp.path || pp.path.length < 2) return;
+        new google.maps.Polyline({
+          path: pp.path.map(function(pt){ return { lat: pt.latitude, lng: pt.longitude }; }),
+          strokeColor: '#9aa0a6', strokeOpacity: 0.55, strokeWeight: 9,
+          clickable: false, zIndex: 0, map: map
+        });
+      });
+      // Docking paths — same road metaphor but in the base-pin blue, so the visual relationship
+      // between "this is where the robot approaches its base" is obvious. Slightly higher opacity.
+      (p.dockingPaths || []).forEach(function(pp){
+        if(!pp.path || pp.path.length < 2) return;
+        new google.maps.Polyline({
+          path: pp.path.map(function(pt){ return { lat: pt.latitude, lng: pt.longitude }; }),
+          strokeColor: '#1a73e8', strokeOpacity: 0.65, strokeWeight: 9,
+          clickable: false, zIndex: 0, map: map
+        });
+      });
+      // Pickup points — small red circles. We don't have sample data yet so the element shape
+      // is speculative: prefer explicit {latitude, longitude}; fall back to {x, y} if present.
+      (p.pickupPoints || []).forEach(function(pt){
+        var lat = pt.latitude ?? pt.lat ?? pt.y;
+        var lng = pt.longitude ?? pt.lng ?? pt.x;
+        if(typeof lat !== 'number' || typeof lng !== 'number') return;
+        new google.maps.Circle({
+          center: { lat: lat, lng: lng }, radius: 0.4,
+          fillColor: '#ea4335', fillOpacity: 0.85,
+          strokeColor: '#ea4335', strokeOpacity: 1, strokeWeight: 2,
+          clickable: false, zIndex: 4, map: map
+        });
       });
       highlightActiveZone();
       ZONES_CENTRE = computeZonesBoundsCenter(p.zones || []);
@@ -1244,7 +1301,8 @@ function recordCrumb(){
   if(prev){
     var seg = new google.maps.Polyline({
       path: [{ lat: prev.lat, lng: prev.lng }, { lat: pt.lat, lng: pt.lng }],
-      strokeColor: color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3, map: map
+      strokeColor: color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3,
+      map: tracksVisible ? map : null
     });
     seg.crumbZone = zone;
     crumbSegments.push(seg);
@@ -1286,13 +1344,27 @@ function cycleTracksClr(){
   renderStatusBox();
 }
 window.cycleTracksClr = cycleTracksClr;
+// Segments are on the map only when BOTH recording is on AND visibility is on. Visibility is a
+// purely UI concern (lets the user peek under tracks at zones/paths/obstacles without losing the
+// crumb data); recording continues regardless.
+function applyTracksMap(){
+  var show = tracksOn && tracksVisible;
+  crumbSegments.forEach(function(s){ s.setMap(show ? map : null); });
+}
 function setTracks(on){
   if(tracksOn === on) return;
   tracksOn = on;
-  crumbSegments.forEach(function(s){ s.setMap(tracksOn ? map : null); });
+  applyTracksMap();
   if(tracksOn){ lastCrumbTime = null; recordCrumb(); }
 }
 function toggleTracks(){ setTracks(!tracksOn); renderStatusBox(); }
+function setTracksVisible(on){
+  if(tracksVisible === on) return;
+  tracksVisible = on;
+  applyTracksMap();
+  renderStatusBox();
+}
+function toggleTracksVisible(){ setTracksVisible(!tracksVisible); }
 function clearTracks(){
   crumbs = [];
   lastCrumbTime = null;
@@ -1646,8 +1718,10 @@ function renderStatusBox(){
   if(URL_CONFIG.statusTracksControls !== 'off'){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
     var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-fetch perimeters and notifications">' + (refreshBusy ? '↻…' : '↻') + '</span>';
+    var visBtn = '<span class="btn" onclick="toggleTracksVisible()" title="temporarily hide/show tracks (recording continues)">' + (tracksVisible ? 'HIDE' : 'SHOW') + '</span>';
     trk = '<div class="tracks">' + refreshBtn + ' Tracks:' +
       '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
+      visBtn +
       '<span class="btn" onclick="clearTracks()">CLR</span>' +
       '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
     '</div>';

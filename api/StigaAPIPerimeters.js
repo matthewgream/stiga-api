@@ -59,7 +59,16 @@ function _decodePerimeterGeometry(perimeterData) {
         });
         return map;
     };
-    return { zones: byId(decoded[1]), obstacles: byId(decoded[3]) };
+    // Paths (decoded[2]) are inter-zone connector routes — open polylines (not polygons), with
+    // [6]/[7] holding source/target zone ids. We surface them as a separate collection so the
+    // UI can render them differently (e.g. muted grey lines, not filled shapes).
+    const paths = (Array.isArray(decoded[2]) ? decoded[2] : []).map((entry) => ({
+        id: entry[1],
+        fromZone: entry[6],
+        toZone: entry[7],
+        path: toPath(entry),
+    }));
+    return { zones: byId(decoded[1]), obstacles: byId(decoded[3]), paths };
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -102,6 +111,33 @@ class StigaAPIPerimeter {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+// Open polyline connector between two zones. Not driven by cloud preview metadata — paths only
+// exist in the data_points geometry blob, so we build them straight from the decoded entries.
+class StigaAPIPath {
+    constructor(data, index) {
+        this.data = data;
+        this.index = index;
+    }
+    getId() {
+        return this.data?.id ?? this.index + 1;
+    }
+    getFromZone() {
+        return this.data?.fromZone;
+    }
+    getToZone() {
+        return this.data?.toZone;
+    }
+    getPath() {
+        return this.data?.path ?? [];
+    }
+    toString() {
+        return formatStruct({ id: this.getId(), from: this.getFromZone(), to: this.getToZone(), points: this.getPath().length }, 'path');
+    }
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 class StigaAPIPerimeters extends StigaAPIComponent {
     constructor(serverConnection, device, options = {}) {
         super(options);
@@ -109,7 +145,12 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         this.device = device;
         this.perimeterData = undefined;
         this.zones = [];
-        this.obstacles = [];
+        this.closedZones = []; // zones that were defined but are currently closed in the app
+        this.obstacles = []; // permanent obstacles
+        this.tempObstacles = []; // temporary obstacles (auto-expiring)
+        this.connectPaths = []; // inter-zone connector polylines
+        this.dockingPaths = []; // approach polylines into the docking station
+        this.pickupPoints = []; // singular pickup point locations (geometry layout TBD when sample data appears)
     }
 
     async load() {
@@ -151,16 +192,56 @@ class StigaAPIPerimeters extends StigaAPIComponent {
                 }
                 return perimeter;
             });
+        // The geometry blob's field 1 (zones) and field 3 (obstacles) hold BOTH the regular and
+        // the "special" variants — closedZones live alongside zones, tempObstacles alongside
+        // obstacles, distinguished only by their ID in the preview metadata. We just look each
+        // ID up in the shared geometry map regardless of category.
         this.zones = build(preview?.zones?.elements, 'zones');
+        this.closedZones = build(preview?.closedZones?.elements, 'zones');
         this.obstacles = build(preview?.obstacles?.elements, 'obstacles');
+        this.tempObstacles = build(preview?.tempObstacles?.elements, 'obstacles');
+
+        // Paths: geometry field 2 carries both connect and docking polylines mixed together.
+        // Split by preview membership so the UI can render them differently.
+        const connectIds = new Set((preview?.connectPaths?.elements ?? []).map((e) => e.id));
+        const dockingIds = new Set((preview?.dockingPaths?.elements ?? []).map((e) => e.id));
+        const allPaths = (geometry.paths ?? []).map((entry, i) => new StigaAPIPath(entry, i));
+        this.connectPaths = allPaths.filter((p) => connectIds.has(p.getId()));
+        this.dockingPaths = allPaths.filter((p) => dockingIds.has(p.getId()));
+
+        // Pickup points: preview metadata available, but geometry-blob layout not yet reverse
+        // engineered (no sample data with non-empty pickupPoints). Leave the collection empty
+        // for now so consumers can see them when they appear — the preview shape per element
+        // is unknown beyond {id, …}; revisit once we encounter a garden that has them.
+        this.pickupPoints = [];
     }
 
     getZones() {
         return this.zones;
     }
 
+    getClosedZones() {
+        return this.closedZones;
+    }
+
     getObstacles() {
         return this.obstacles;
+    }
+
+    getTempObstacles() {
+        return this.tempObstacles;
+    }
+
+    getConnectPaths() {
+        return this.connectPaths;
+    }
+
+    getDockingPaths() {
+        return this.dockingPaths;
+    }
+
+    getPickupPoints() {
+        return this.pickupPoints;
     }
 
     getTotalArea() {
@@ -207,16 +288,6 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         const preview = this.perimeterData?.attributes?.preview;
         const pos = preview?.referencePosition;
         return pos?.lat && pos?.lng ? { latitude: pos.lat, longitude: pos.lng } : undefined;
-    }
-
-    getConnectPaths() {
-        const preview = this.perimeterData?.attributes?.preview;
-        return preview?.connectPaths || undefined;
-    }
-
-    getDockingPaths() {
-        const preview = this.perimeterData?.attributes?.preview;
-        return preview?.dockingPaths || undefined;
     }
 
     toString() {
