@@ -4,7 +4,7 @@
 
 ---
 
-## Quick start
+## Start
 
 1. Install NodeJS (e.g. as per [nodesource](https://nodesource.com/products/distributions)).
 2. Clone this repo (`git clone https://github.com/matthewgream/stiga-api`).
@@ -32,6 +32,24 @@ Installation check:
   [OK]   base subscribe: 4 topics
   [OK]   base status: op=STANDBY
 ```
+
+---
+
+## Usage
+
+Once installed, the `tools/stiga-command.js` gives operational insights and control. Try it.
+
+I recommend installing `tools/stiga-monitor.js` as a systemd service according to `tools/stiga-monitor.service`, which provides a background running CLI console 
+(use `tools/stiga-monitor.js --connect` to connect to it as a client, then disconnect when not needed) and the Web frontend (port 3001 by default), plus 
+message `capture` for later analysis (using `tools\stiga-analyse.js`), maybe after at least 4 weeks of operation. By default, the Web front end retains data in
+memory, but can persist (`--persist`) if you'd prefer to retain it across restarts (it defaults to `/dev/shm`, so you will need to adjust to a local file
+system). `capture` defaults to a local file system.
+
+With `analyse`, you can evaluate (a) mobile and gnss/rtk connectivity heatmaps across the garden; (b) battery charge and consumption profiles; and
+(c) garden completion analysis. More details below.
+
+For `webstatus` as run by `tools/stiga-monitor.js`, you might want to parameritise the URL, including enabling commands and configuring the map position and
+zoom level, and bookmark it.
 
 ---
 
