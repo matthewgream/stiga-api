@@ -64,7 +64,7 @@ const zlib = require('node:zlib');
 const express = require('express');
 
 const { StigaAPIUtilities, StigaAPIElements: elements, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPINotifications } = require('../../../api/StigaAPI');
-const { protobufDecode, formatNetworkId } = StigaAPIUtilities;
+const { protobufDecode, stringToBytes, formatNetworkId } = StigaAPIUtilities;
 
 const DEFAULT_PORT = 3001;
 const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
@@ -462,7 +462,10 @@ class WebStatusProcessor {
     // Compact the schedule down to just what the client needs to compute "next mow": a flag
     // for whether scheduling is on, and the list of weekly time blocks with their start time.
     _handleRobotSchedule(decoded) {
-        const schedule = elements.decodeRobotScheduleSettings(decoded);
+        // Field 2 carries the packed per-day timeblocks as a bytes blob — protobufDecode
+        // surfaces it as a string by default, so we must re-byte it before decode walks it.
+        // Same shim MonitorProcessor uses; without it the decoder returns an empty schedule.
+        const schedule = elements.decodeRobotScheduleSettings({ ...decoded, 2: stringToBytes(decoded[2] || '') });
         if (schedule) {
             const blocks = [];
             for (const day of schedule.days || [])
@@ -472,6 +475,7 @@ class WebStatusProcessor {
                         dayName: day.dayName,
                         startHour: block.startTime?.hour ?? Math.floor(block.startSlot / 2),
                         startMinute: block.startTime?.minute ?? (block.startSlot % 2) * 30,
+                        durationMinutes: block.durationMinutes,
                         displayTime: block.displayTime,
                     });
             this.state.robot.schedule = { enabled: schedule.enabled, blocks };
@@ -702,6 +706,7 @@ class WebStatusProcessor {
 <div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
 <div id="zonepanel"></div>
+<div id="schedpanel"></div>
 <script>
 var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t > zoneCutoff))};
@@ -769,13 +774,20 @@ html,body{margin:0;height:100%}
 #statusbox h1 .linktag.stale{background:#fbbc04;color:#202124}
 #statusbox h1 .linktag.offline{background:#ea4335}
 #statusbox .spark{margin-top:4px;display:block}
-#statusbox .nextmow{margin-top:4px;color:#80868b;font-size:11px}
 #statusbox .zonelast{font-size:11px;color:#5f6368;text-align:right;cursor:default;padding:1px 0;font-weight:500}
 #statusbox .zonelast:hover{color:#202124}
-#zonepanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
-  padding:9px 13px;box-shadow:0 2px 12px rgba(0,0,0,.35);
-  font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;color:#202124;display:none;min-width:240px;max-width:340px}
-#zonepanel.show{display:block}
+#zonepanel,#schedpanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
+  padding:9px 13px;box-shadow:0 2px 12px rgba(0,0,0,.35);box-sizing:border-box;
+  font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;color:#202124;display:none}
+#zonepanel.show,#schedpanel.show{display:block}
+#schedpanel h2{font-size:11px;margin:0 0 7px;color:#80868b;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+#schedpanel table{border-collapse:collapse;width:100%}
+#schedpanel td{padding:2px 0;vertical-align:top;font-size:12px}
+#schedpanel td.swhen{padding-right:12px;white-space:nowrap;font-weight:600}
+#schedpanel td.stime{padding-right:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+#schedpanel td.sdur{color:#80868b;white-space:nowrap;text-align:right;font-size:11px}
+#schedpanel .now{color:#137333}
+#statusbox .sched-trigger{cursor:default}
 #zonepanel h2{font-size:11px;margin:0 0 7px;color:#80868b;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 #zonepanel table{border-collapse:collapse;width:100%}
 #zonepanel td{padding:2px 0;vertical-align:top;font-size:12px}
@@ -1319,19 +1331,24 @@ function batterySparkSVG(){
     '</svg>';
 }
 
-// compute the next scheduled start time, scanning forward up to 7 days from now.
-function nextScheduledMow(){
-  if(!state || !state.robot || !state.robot.schedule) return null;
+// Walk the schedule forward from "now" and return up to maxEntries upcoming sessions, oldest
+// first. Each entry: { date, dayName, displayTime, startTime, durationMinutes, daysAway }.
+// Empty array if scheduling is disabled or has no blocks.
+function upcomingScheduledSessions(maxEntries){
+  var max = maxEntries || 5;
+  if(!state || !state.robot || !state.robot.schedule) return [];
   var s = state.robot.schedule;
-  if(!s.enabled || !s.blocks || s.blocks.length === 0) return null;
+  if(!s.enabled || !s.blocks || s.blocks.length === 0) return [];
   var now = new Date();
-  var jsDay = now.getDay(); // 0=Sun..6=Sat
-  // convert JS day (Sun=0) to schedule day (Mon=0..Sun=6)
-  var todayScheduleIdx = (jsDay + 6) % 7;
+  // JS day-of-week (Sun=0..Sat=6) -> schedule day index (Mon=0..Sun=6)
+  var todayScheduleIdx = (now.getDay() + 6) % 7;
   var nowMin = now.getHours() * 60 + now.getMinutes();
-  for(var offset = 0; offset < 8; offset++){
+  var out = [];
+  for(var offset = 0; offset < 8 && out.length < max; offset++){
     var scheduleDay = (todayScheduleIdx + offset) % 7;
-    var bucket = s.blocks.filter(function(b){ return b.dayIndex === scheduleDay; }).sort(function(a, b){ return a.startHour * 60 + a.startMinute - (b.startHour * 60 + b.startMinute); });
+    var bucket = s.blocks
+      .filter(function(b){ return b.dayIndex === scheduleDay; })
+      .sort(function(a, b){ return a.startHour * 60 + a.startMinute - (b.startHour * 60 + b.startMinute); });
     for(var i = 0; i < bucket.length; i++){
       var b = bucket[i];
       var blockMin = b.startHour * 60 + b.startMinute;
@@ -1339,21 +1356,43 @@ function nextScheduledMow(){
       var dt = new Date(now);
       dt.setDate(dt.getDate() + offset);
       dt.setHours(b.startHour, b.startMinute, 0, 0);
-      return { date: dt, day: b.dayName, displayTime: b.displayTime };
+      out.push({
+        date: dt,
+        dayName: b.dayName,
+        displayTime: b.displayTime,
+        startTime: (b.displayTime || '').split('-')[0],
+        durationMinutes: b.durationMinutes,
+        daysAway: offset
+      });
+      if(out.length >= max) break;
     }
   }
-  return null;
+  return out;
 }
 
-function formatNextMow(nm){
-  if(!nm) return null;
-  var deltaMin = Math.round((nm.date.getTime() - Date.now()) / 60_000);
-  var when;
-  if(deltaMin < 60) when = 'in ' + deltaMin + 'm';
-  else if(deltaMin < 24 * 60) when = 'in ' + Math.round(deltaMin / 60) + 'h';
-  else if(deltaMin < 7 * 24 * 60) when = nm.day.slice(0, 3) + ' ' + nm.displayTime.split('-')[0];
-  else when = 'next ' + nm.day;
-  return 'Next mow ' + when;
+function fmtScheduleDuration(mins){
+  if(mins === null || mins === undefined) return '';
+  if(mins < 60) return mins + 'm';
+  var h = Math.floor(mins / 60);
+  var m = mins % 60;
+  return m === 0 ? (h + 'h') : (h + 'h' + m + 'm');
+}
+
+function scheduleWhenLabel(daysAway, dayName){
+  if(daysAway === 0) return 'Today';
+  if(daysAway === 1) return 'Tomorrow';
+  return dayName;
+}
+
+// One-line status row text: "Inactive", "Active (no sessions)", or "Today at 09:00 for 2h0m".
+function formatScheduleSummary(){
+  if(!state || !state.robot || !state.robot.schedule) return '-';
+  var s = state.robot.schedule;
+  if(!s.enabled) return 'Inactive';
+  var sessions = upcomingScheduledSessions(1);
+  if(sessions.length === 0) return 'Active (no sessions)';
+  var n = sessions[0];
+  return scheduleWhenLabel(n.daysAway, n.dayName) + ' at ' + n.startTime + ' for ' + fmtScheduleDuration(n.durationMinutes);
 }
 
 // MQTT link health, derived from the freshest update timestamp across both endpoints.
@@ -1379,6 +1418,23 @@ function row(k,v){
 // Floating panel showing the per-zone completion trail, opened on hover of the latest-zone
 // line in the status box. Positioned beside the status box; closes when the pointer leaves
 // either the trigger line or the panel itself.
+// Shared positioner for hover panels (zone, schedule, …): match the status-box width and place
+// the panel to its right if there's room, otherwise stacked directly underneath. Width is set
+// in border-box mode so the panel's padding sits inside that width (matches statusbox visually).
+function positionHoverPanel(panel, box){
+  var br = box.getBoundingClientRect();
+  panel.style.width = br.width + 'px';
+  var pr = panel.getBoundingClientRect();
+  var gap = 8;
+  if(br.right + gap + pr.width <= window.innerWidth){
+    panel.style.left = (br.right + gap) + 'px';
+    panel.style.top = br.top + 'px';
+  } else {
+    panel.style.left = br.left + 'px';
+    panel.style.top = (br.bottom + gap) + 'px';
+  }
+}
+
 var zonePanelCloseTimer = null;
 function attachZonePanelHover(){
   var box = document.getElementById('statusbox');
@@ -1420,17 +1476,7 @@ function showZonePanel(){
   html += '</table>';
   panel.innerHTML = html;
   panel.classList.add('show');
-  // Position next to the status box (to its right if there's space, otherwise below).
-  var br = box.getBoundingClientRect();
-  var pr = panel.getBoundingClientRect();
-  var gap = 8;
-  if(br.right + gap + pr.width <= window.innerWidth){
-    panel.style.left = (br.right + gap) + 'px';
-    panel.style.top = br.top + 'px';
-  } else {
-    panel.style.left = br.left + 'px';
-    panel.style.top = (br.bottom + gap) + 'px';
-  }
+  positionHoverPanel(panel, box);
 }
 function scheduleZonePanelClose(){
   if(zonePanelCloseTimer) clearTimeout(zonePanelCloseTimer);
@@ -1438,6 +1484,56 @@ function scheduleZonePanelClose(){
     var panel = document.getElementById('zonepanel');
     if(panel) panel.classList.remove('show');
     zonePanelCloseTimer = null;
+  }, 250);
+}
+
+// Schedule panel — same hover pattern as the zone panel. Lists the upcoming 5 sessions next
+// to / under the status box. Only attaches when scheduling is enabled (no point hovering an
+// "Inactive" line — nothing to show).
+var schedPanelCloseTimer = null;
+function attachSchedPanelHover(){
+  var box = document.getElementById('statusbox');
+  var trigger = box && box.querySelector('.sched-trigger');
+  if(!trigger) return;
+  if(!state || !state.robot || !state.robot.schedule || !state.robot.schedule.enabled) return;
+  trigger.style.cursor = 'help';
+  trigger.addEventListener('mouseenter', showSchedPanel);
+  trigger.addEventListener('mouseleave', scheduleSchedPanelClose);
+  var panel = document.getElementById('schedpanel');
+  if(panel && !panel.dataset.bound){
+    panel.dataset.bound = '1';
+    panel.addEventListener('mouseenter', function(){ if(schedPanelCloseTimer){ clearTimeout(schedPanelCloseTimer); schedPanelCloseTimer = null; } });
+    panel.addEventListener('mouseleave', scheduleSchedPanelClose);
+  }
+}
+function showSchedPanel(){
+  var panel = document.getElementById('schedpanel');
+  var box = document.getElementById('statusbox');
+  if(!panel || !box) return;
+  var sessions = upcomingScheduledSessions(5);
+  if(sessions.length === 0) return;
+  if(schedPanelCloseTimer){ clearTimeout(schedPanelCloseTimer); schedPanelCloseTimer = null; }
+  var html = '<h2>Upcoming schedule</h2><table>';
+  for(var i = 0; i < sessions.length; i++){
+    var s = sessions[i];
+    var when = scheduleWhenLabel(s.daysAway, s.dayName);
+    html += '<tr' + (i === 0 ? ' class="now"' : '') + '>' +
+      '<td class="swhen">' + esc(when) + '</td>' +
+      '<td class="stime">' + esc(s.displayTime) + '</td>' +
+      '<td class="sdur">' + esc(fmtScheduleDuration(s.durationMinutes)) + '</td>' +
+    '</tr>';
+  }
+  html += '</table>';
+  panel.innerHTML = html;
+  panel.classList.add('show');
+  positionHoverPanel(panel, box);
+}
+function scheduleSchedPanelClose(){
+  if(schedPanelCloseTimer) clearTimeout(schedPanelCloseTimer);
+  schedPanelCloseTimer = setTimeout(function(){
+    var panel = document.getElementById('schedpanel');
+    if(panel) panel.classList.remove('show');
+    schedPanelCloseTimer = null;
   }, 250);
 }
 
@@ -1534,6 +1630,8 @@ function renderStatusBox(){
   if(r.statusText) op += ' · ' + soften(r.statusText);
   var batt = r.battery ? (r.battery.charge + '%') : '-';
   var spark = URL_CONFIG.statusBatterySparkline === 'on' ? batterySparkSVG() : '';
+  var sched = formatScheduleSummary();
+  var schedRow = '<div class="row"><span class="k">Schedule</span><span class="v sched-trigger" data-schedpanel="1">' + esc(sched) + '</span></div>';
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
   var zoneLastRow = '';
@@ -1542,8 +1640,6 @@ function renderStatusBox(){
     var latest = zc[0];
     zoneLastRow = '<div class="zonelast" data-zonepanel="1">' + esc(zoneLabel(latest.zone)) + ' - ' + esc(latest.percent) + '% · ' + esc(ago(new Date(latest.t).toISOString())) + '</div>';
   }
-  var nextMowStr = formatNextMow(nextScheduledMow());
-  var nextMowRow = nextMowStr ? '<div class="nextmow">' + esc(nextMowStr) + '</div>' : '';
   var link = linkState();
   var linkTag = '<span class="linktag ' + link.cls + '">' + esc(link.label) + '</span>';
   var trk = '';
@@ -1558,9 +1654,10 @@ function renderStatusBox(){
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot' + linkTag + '</h1>' +
-    row('State', place) + row('Status', op) + row('Battery', batt) + spark + row('Mowing', mow) + zoneLastRow + nextMowRow +
+    row('State', place) + row('Status', op) + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + zoneLastRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
   attachZonePanelHover();
+  attachSchedPanelHover();
 }
 
 function table(rows){

@@ -76,7 +76,9 @@ function formatNetworkId(id) {
 
 function formatMinutesNicely(mins) {
     if (mins < 60) return `${mins}m`;
-    return `${Math.floor(mins / 60)}h${mins % 60}m`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m === 0 ? `${h}h` : `${h}h${m}m`;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
