@@ -68,12 +68,12 @@ const { protobufDecode, formatNetworkId } = StigaAPIUtilities;
 
 const DEFAULT_PORT = 3001;
 const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
-const NOTIF_POLL_MS_UNDOCKED = 60_000; // notifications poll interval when robot is active
-const NOTIF_POLL_MS_DOCKED = 300_000; // notifications poll interval when robot is parked
-const CRUMB_PERSIST_INTERVAL_MS = 60_000; // flush cached crumbs to disk every minute when persistence is enabled
+const NOTIF_POLL_MS_UNDOCKED = 60 * 1000; // notifications poll interval when robot is active
+const NOTIF_POLL_MS_DOCKED = 5 * 60 * 1000; // notifications poll interval when robot is parked
+const PERSIST_DEFAULT_DIR = '/dev/shm';
+const PERSIST_INTERVAL_MS = 60 * 1000; // flush cached crumbs to disk every minute when persistence is enabled
+const PERSIST_DEFAULT_DAYS = 14;
 const CRUMB_DEFAULT_INITIAL_ZONES = 1; // semantic default — cover the current (most-recent) mowing zone only
-const CRUMB_PERSIST_DEFAULT_DIR = '/dev/shm';
-const CRUMB_PERSIST_DEFAULT_DAYS = 14;
 
 // zone-completion trail: a sparse record of "robot finished N% of zone X at time T". Recorded
 // only on transition out of a zone, and only when the percent meets a threshold to filter
@@ -82,6 +82,7 @@ const ZONE_COMPLETION_THRESHOLD_PERCENT = 5; // ignore <5% departures (likely ab
 const ZONE_COMPLETIONS_PER_ZONE_KEEP = 10; // server retains up to N per zone (on disk + memory)
 const ZONE_COMPLETIONS_PER_ZONE_SERVE = 5; // up to N per zone served to the client
 const ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS = 90; // longer retention than crumbs — they're tiny
+const ZONE_COMPLETION_DEDUPE_WINDOW_MS = 60 * 60 * 1000; // merge same-zone records within 1h: treat as one session
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -101,26 +102,26 @@ class WebStatusProcessor {
         this.perimeters = undefined;
         this.notifications = [];
         this.cloudServer = undefined;
-        this.notifTimer = undefined;
+        this.notificationsTimer = undefined;
         this.poller = options.poller;
 
         // crumb cache: always on (in-memory). Persistence to disk is opt-in via --persist; when
         // enabled the cache survives restarts and is pruned to persistDays of history.
         this.persistEnabled = Boolean(options.persist);
-        this.persistDir = typeof options.persist === 'string' && options.persist ? options.persist : CRUMB_PERSIST_DEFAULT_DIR;
-        this.persistDays = options.persistDays || CRUMB_PERSIST_DEFAULT_DAYS;
-        this.crumbCache = []; // [{ lat, lng, t (epoch ms), zone, color }]
-        this.crumbPersistTimer = undefined;
-        this.crumbDirty = false;
+        this.persistDir = typeof options.persist === 'string' && options.persist ? options.persist : PERSIST_DEFAULT_DIR;
+        this.persistDays = options.persistDays || PERSIST_DEFAULT_DAYS;
+        this.persistanceTimer = undefined;
+        this.crumbs = []; // [{ lat, lng, t (epoch ms), zone, color }]
+        this.crumbsDirty = false;
 
         // zone-completion tracking — see ZONE_COMPLETION_* constants for retention/threshold.
         // Hardcoded 90-day default (vs the configurable crumb retention) because the records
         // are tiny and the value of a long trail (seasonal mowing history) outweighs the cost.
         this.zoneCompletions = []; // chronological [{ zone: "5", percent: 87, t: 1716480000000 }]
         this.zoneCompletionsDirty = false;
+        this.zoneCompletionDays = options.zoneCompletionDays || ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS;
         this._activeMowingZone = undefined; // last seen non-null zone (used for transition detection)
         this._activeMowingPercent = 0;
-        this.zoneCompletionDays = options.zoneCompletionDays || ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS;
 
         this.state = {
             base: {
@@ -132,7 +133,6 @@ class WebStatusProcessor {
                 network: undefined,
                 version: undefined,
                 updatedStatus: undefined,
-                updatedVersion: undefined,
             },
             robot: {
                 mac: options.robotMac,
@@ -143,6 +143,7 @@ class WebStatusProcessor {
                 orientationCompass: undefined,
                 docked: undefined,
                 statusType: undefined,
+                statusMessage: undefined,
                 statusText: undefined,
                 statusValid: undefined,
                 statusFlag: undefined,
@@ -155,7 +156,6 @@ class WebStatusProcessor {
                 updatedStatus: undefined,
                 updatedPosition: undefined,
                 updatedSchedule: undefined,
-                updatedVersion: undefined,
             },
         };
     }
@@ -181,13 +181,13 @@ class WebStatusProcessor {
 
         this.poller?.acquire();
 
-        this._loadPersistedCrumbs();
-        this._loadPersistedZoneCompletions();
         if (this.persistEnabled) {
-            this.crumbPersistTimer = setInterval(() => {
-                this._persistCrumbs();
-                this._persistZoneCompletions();
-            }, CRUMB_PERSIST_INTERVAL_MS);
+            this._loadCrumbs();
+            this._loadZoneCompletions();
+            this.persistanceTimer = setInterval(() => {
+                this._saveCrumbs();
+                this._saveZoneCompletions();
+            }, PERSIST_INTERVAL_MS);
             this.logger(`WebStatus: persistence ON (dir=${this.persistDir}, crumbs=${this.persistDays}d, zones=${this.zoneCompletionDays}d)`);
         }
 
@@ -200,16 +200,18 @@ class WebStatusProcessor {
 
     async stop() {
         this.poller?.release();
-        if (this.notifTimer) {
-            clearTimeout(this.notifTimer);
-            this.notifTimer = undefined;
+        if (this.notificationsTimer) {
+            clearTimeout(this.notificationsTimer);
+            this.notificationsTimer = undefined;
         }
-        if (this.crumbPersistTimer) {
-            clearInterval(this.crumbPersistTimer);
-            this.crumbPersistTimer = undefined;
+        if (this.persistanceTimer) {
+            clearInterval(this.persistanceTimer);
+            this.persistanceTimer = undefined;
         }
-        this._persistCrumbs();
-        this._persistZoneCompletions();
+        if (this.persistEnabled) {
+            this._saveCrumbs();
+            this._saveZoneCompletions();
+        }
         if (this.server) await new Promise((resolve) => this.server.close(resolve));
         this.logger('WebStatus stopped');
     }
@@ -232,8 +234,7 @@ class WebStatusProcessor {
             const split = decoded.indexOf(':');
             const user = split === -1 ? decoded : decoded.slice(0, split);
             const pass = split === -1 ? '' : decoded.slice(split + 1);
-            const userOk = this.basicAuth.user === undefined || user === this.basicAuth.user;
-            if (userOk && pass === this.basicAuth.pass) {
+            if ((this.basicAuth.user === undefined || user === this.basicAuth.user) && pass === this.basicAuth.pass) {
                 next();
                 return;
             }
@@ -257,9 +258,7 @@ class WebStatusProcessor {
             return;
         }
         try {
-            const topic = `${this.connection.getRobotMac()}/CMD_ROBOT`;
-            const payload = elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS[id]);
-            this.connection.publish(topic, payload, { qos: 2 });
+            this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS[id]), { qos: 2 });
             this.logger(`WebStatus: command ${id} dispatched`);
             res.json({ ok: true, command: id });
         } catch (e) {
@@ -273,7 +272,7 @@ class WebStatusProcessor {
         try {
             this.perimeters = undefined;
             await this._loadPerimeters();
-            if (this.notifTimer) clearTimeout(this.notifTimer);
+            if (this.notificationsTimer) clearTimeout(this.notificationsTimer);
             this._startNotificationPoll();
             res.json({ ok: true });
         } catch (e) {
@@ -293,26 +292,16 @@ class WebStatusProcessor {
 
     _handleRobotMessage(topic, decoded) {
         if (topic.endsWith('ACK')) return;
-        if (topic.includes('/LOG/STATUS')) {
-            this._handleRobotStatus(decoded);
-        } else if (topic.includes('/LOG/VERSION')) {
-            this.state.robot.version = this._version(decoded);
-            this.state.robot.updatedVersion = new Date().toISOString();
-        } else if (topic.includes('/LOG/ROBOT_POSITION')) {
-            this._handleRobotPosition(decoded);
-        } else if (topic.includes('/LOG/SCHEDULING_SETTINGS')) {
-            this._handleRobotSchedule(decoded);
-        }
+        if (topic.includes('/LOG/STATUS')) this._handleRobotStatus(decoded);
+        else if (topic.includes('/LOG/VERSION')) this.state.robot.version = this._version(decoded);
+        else if (topic.includes('/LOG/ROBOT_POSITION')) this._handleRobotPosition(decoded);
+        else if (topic.includes('/LOG/SCHEDULING_SETTINGS')) this._handleRobotSchedule(decoded);
     }
 
     _handleBaseMessage(topic, decoded) {
         if (topic.endsWith('ACK')) return;
-        if (topic.includes('/LOG/STATUS')) {
-            this._handleBaseStatus(decoded);
-        } else if (topic.includes('/LOG/VERSION')) {
-            this.state.base.version = this._version(decoded);
-            this.state.base.updatedVersion = new Date().toISOString();
-        }
+        if (topic.includes('/LOG/STATUS')) this._handleBaseStatus(decoded);
+        else if (topic.includes('/LOG/VERSION')) this.state.base.version = this._version(decoded);
     }
 
     //
@@ -320,8 +309,15 @@ class WebStatusProcessor {
     _handleRobotStatus(decoded) {
         const r = this.state.robot;
         r.statusType = elements.formatRobotStatusType(elements.decodeRobotStatusType(decoded[3]));
+        const errorObj = elements.decodeRobotStatusError(decoded[4]);
+        // When the parent type is ERROR and we have a known (code1,code2) → "GPS searching" /
+        // "Navigation initialising" / etc., the app shows the message *in place of* the ERROR
+        // label. We surface it as statusMessage so the UI can prefer it without losing the raw
+        // statusType (which color logic, isRobotActive, etc. still key off). When the message
+        // takes over we suppress the error from statusText so it isn't shown twice.
+        r.statusMessage = r.statusType === 'ERROR' && errorObj?.message ? errorObj.message : undefined;
         const info = elements.formatRobotStatusInfo(elements.decodeRobotStatusInfo(decoded[10])).replaceAll('-', '');
-        const error = elements.formatRobotStatusError(elements.decodeRobotStatusError(decoded[4])).replaceAll('-', '');
+        const error = r.statusMessage ? '' : elements.formatRobotStatusError(errorObj).replaceAll('-', '');
         r.statusText = [info, error].filter(Boolean).join(', ');
         r.statusValid = elements.formatRobotStatusValid(elements.decodeRobotStatusValid(decoded[1]));
         r.statusFlag = elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]));
@@ -337,39 +333,51 @@ class WebStatusProcessor {
         if (decoded[19]) r.location = this._rtk(decoded[19]);
         if (decoded[20]) r.network = this._network(decoded[20]);
         r.updatedStatus = new Date().toISOString();
-        this._trackZoneCompletion();
+        this._trackZoneCompletions();
     }
 
     // Detect "robot left zone X" transitions and record the % complete at departure. We track
     // the active (zone, percent) on every status decode, and when the zone changes we attribute
     // the previous percent to the previous zone — provided it meets the threshold (filters out
     // aborted starts where the robot drove out and immediately came back).
-    _trackZoneCompletion() {
+    _trackZoneCompletions() {
         const r = this.state.robot;
         const m = r.mowing;
         const currentZone = m && !r.docked && m.zone !== undefined && m.zone !== null ? String(m.zone) : undefined;
         const currentPercent = m && typeof m.zoneCompleted === 'number' ? m.zoneCompleted : 0;
         const previousZone = this._activeMowingZone;
         const previousPercent = this._activeMowingPercent;
-        if (currentZone !== previousZone) {
-            if (previousZone !== undefined && previousPercent >= ZONE_COMPLETION_THRESHOLD_PERCENT) {
-                this._appendZoneCompletion(previousZone, previousPercent);
-            }
-        }
-        if (currentZone === undefined) {
-            this._activeMowingZone = undefined;
-            this._activeMowingPercent = 0;
-        } else {
-            this._activeMowingZone = currentZone;
-            this._activeMowingPercent = currentPercent;
-        }
+        if (currentZone !== previousZone && previousZone !== undefined && previousPercent >= ZONE_COMPLETION_THRESHOLD_PERCENT) this._appendZoneCompletions(previousZone, previousPercent);
+        this._activeMowingZone = currentZone;
+        this._activeMowingPercent = currentZone ? currentPercent : 0;
     }
 
-    _appendZoneCompletion(zone, percent) {
-        this.zoneCompletions.push({ zone, percent: Math.round(percent), t: Date.now() });
+    _appendZoneCompletions(zone, percent) {
+        const rounded = Math.round(percent);
+        // De-dupe transient oscillations: if the most recent record for this zone is within the
+        // dedupe window, treat the new event as a continuation of the same session and update
+        // it in-place (bumping percent to whichever is higher, refreshing the timestamp). This
+        // stops a stuck/retried robot from filling the log with identical entries.
+        let recent;
+        for (let i = this.zoneCompletions.length - 1; i >= 0; i--) {
+            if (this.zoneCompletions[i].zone === zone) {
+                recent = this.zoneCompletions[i];
+                break;
+            }
+        }
+        if (recent && Date.now() - recent.t < ZONE_COMPLETION_DEDUPE_WINDOW_MS) {
+            const merged = Math.max(recent.percent, rounded);
+            if (merged !== recent.percent || Date.now() - recent.t > 30_000) {
+                recent.percent = merged;
+                recent.t = Date.now();
+                this.zoneCompletionsDirty = true;
+            }
+            return;
+        }
+        this.zoneCompletions.push({ zone, percent: rounded, t: Date.now() });
         this._pruneZoneCompletions();
         this.zoneCompletionsDirty = true;
-        this.logger(`WebStatus: zone ${zone} completion ${Math.round(percent)}% recorded`);
+        this.logger(`WebStatus: zone ${zone} completion ${rounded}% recorded`);
     }
 
     // Two-axis prune: by absolute age (zoneCompletionDays) and per-zone count cap. The latter
@@ -378,22 +386,26 @@ class WebStatusProcessor {
         const cutoff = Date.now() - this.zoneCompletionDays * 24 * 60 * 60 * 1000;
         this.zoneCompletions = this.zoneCompletions.filter((c) => c.t >= cutoff);
         const perZone = new Map();
+        let pruned = false;
         for (let i = this.zoneCompletions.length - 1; i >= 0; i--) {
             const entry = this.zoneCompletions[i];
             const count = (perZone.get(entry.zone) || 0) + 1;
             perZone.set(entry.zone, count);
-            if (count > ZONE_COMPLETIONS_PER_ZONE_KEEP) entry._drop = true;
+            if (count > ZONE_COMPLETIONS_PER_ZONE_KEEP) {
+                entry._drop = true;
+                pruned = true;
+            }
         }
         this.zoneCompletions = this.zoneCompletions.filter((c) => !c._drop);
+        return pruned;
     }
 
     // Serialise for the wire: per-zone cap of ZONE_COMPLETIONS_PER_ZONE_SERVE, sorted newest-first
     // across all zones (so the client can render "most recent overall" as entry [0]).
     _serializeZoneCompletions() {
-        const sorted = [...this.zoneCompletions].sort((a, b) => b.t - a.t);
-        const perZone = new Map();
         const out = [];
-        for (const entry of sorted) {
+        const perZone = new Map();
+        for (const entry of [...this.zoneCompletions].sort((a, b) => b.t - a.t)) {
             const count = (perZone.get(entry.zone) || 0) + 1;
             perZone.set(entry.zone, count);
             if (count <= ZONE_COMPLETIONS_PER_ZONE_SERVE) out.push(entry);
@@ -401,37 +413,36 @@ class WebStatusProcessor {
         return out;
     }
 
-    _zoneCompletionsFilePath() {
+    _filenameZoneCompletions() {
         const mac = String(this.state.robot.mac || 'unknown').replaceAll(':', '');
         return path.join(this.persistDir, `stiga-zonecompletions-${mac}.json.gz`);
     }
 
-    _persistZoneCompletions() {
-        if (!this.persistEnabled || !this.zoneCompletionsDirty) return;
-        try {
-            const json = JSON.stringify({ version: 1, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
-            fs.writeFileSync(this._zoneCompletionsFilePath(), zlib.gzipSync(json));
-            this.zoneCompletionsDirty = false;
-        } catch (e) {
-            this.logger(`WebStatus: zone-completions persist failed: ${e.message}`);
-        }
+    _saveZoneCompletions() {
+        if (this.zoneCompletionsDirty)
+            try {
+                const json = JSON.stringify({ version: 1, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
+                fs.writeFileSync(this._filenameZoneCompletions(), zlib.gzipSync(json));
+                this.zoneCompletionsDirty = false;
+            } catch (e) {
+                this.logger(`WebStatus: zone-completions save failed: ${e.message}`);
+            }
     }
 
-    _loadPersistedZoneCompletions() {
-        if (!this.persistEnabled) return;
-        const file = this._zoneCompletionsFilePath();
-        if (!fs.existsSync(file)) return;
-        try {
-            const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
-            const data = JSON.parse(json);
-            if (Array.isArray(data?.completions)) {
-                this.zoneCompletions = data.completions;
-                this._pruneZoneCompletions();
-                this.logger(`WebStatus: loaded ${this.zoneCompletions.length} persisted zone completions from ${file}`);
+    _loadZoneCompletions() {
+        const file = this._filenameZoneCompletions();
+        if (fs.existsSync(file))
+            try {
+                const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
+                const data = JSON.parse(json);
+                if (Array.isArray(data?.completions)) {
+                    this.zoneCompletions = data.completions;
+                    this.zoneCompletionsDirty = this._pruneZoneCompletions();
+                    this.logger(`WebStatus: zone-completions load ${this.zoneCompletions.length} from ${file}`);
+                }
+            } catch (e) {
+                this.logger(`WebStatus: zone-completions load failed: ${e.message}`);
             }
-        } catch (e) {
-            this.logger(`WebStatus: zone-completions load failed: ${e.message}`);
-        }
     }
 
     _handleRobotPosition(decoded) {
@@ -445,28 +456,27 @@ class WebStatusProcessor {
         r.offsetCompass = position.offsetCompass;
         r.orientationCompass = position.orientationCompass;
         r.updatedPosition = new Date().toISOString();
-        this._recordServerCrumb(position.latitude, position.longitude);
+        this._trackCrumbs(position.latitude, position.longitude);
     }
 
     // Compact the schedule down to just what the client needs to compute "next mow": a flag
     // for whether scheduling is on, and the list of weekly time blocks with their start time.
     _handleRobotSchedule(decoded) {
         const schedule = elements.decodeRobotScheduleSettings(decoded);
-        if (!schedule) return;
-        const blocks = [];
-        for (const day of schedule.days || []) {
-            for (const block of day.timeBlocks || []) {
-                blocks.push({
-                    dayIndex: day.dayIndex,
-                    dayName: day.dayName,
-                    startHour: block.startTime?.hour ?? Math.floor(block.startSlot / 2),
-                    startMinute: block.startTime?.minute ?? (block.startSlot % 2) * 30,
-                    displayTime: block.displayTime,
-                });
-            }
+        if (schedule) {
+            const blocks = [];
+            for (const day of schedule.days || [])
+                for (const block of day.timeBlocks || [])
+                    blocks.push({
+                        dayIndex: day.dayIndex,
+                        dayName: day.dayName,
+                        startHour: block.startTime?.hour ?? Math.floor(block.startSlot / 2),
+                        startMinute: block.startTime?.minute ?? (block.startSlot % 2) * 30,
+                        displayTime: block.displayTime,
+                    });
+            this.state.robot.schedule = { enabled: schedule.enabled, blocks };
+            this.state.robot.updatedSchedule = new Date().toISOString();
         }
-        this.state.robot.schedule = { enabled: schedule.enabled, blocks };
-        this.state.robot.updatedSchedule = new Date().toISOString();
     }
 
     // mirror of the client crumbColor mapping — kept in sync so cached crumbs render the same
@@ -482,22 +492,27 @@ class WebStatusProcessor {
         return '#fbbc04';
     }
 
-    _recordServerCrumb(lat, lng) {
+    _trackCrumbs(lat, lng) {
         const r = this.state.robot;
         const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? String(r.mowing.zone) : undefined;
         // 7 decimal places ≈ 1 cm precision — vastly more than the mower's repeatability —
         // and saves ~20 bytes per crumb in serialised form vs. the ~17 digits JS produces.
-        this.crumbCache.push({ lat: Math.round(lat * 1e7) / 1e7, lng: Math.round(lng * 1e7) / 1e7, t: Date.now(), zone, color: this._serverCrumbColor() });
+        this.crumbs.push({ lat: Math.round(lat * 1e7) / 1e7, lng: Math.round(lng * 1e7) / 1e7, t: Date.now(), zone, color: this._serverCrumbColor() });
         this._pruneCrumbs();
-        this.crumbDirty = true;
+        this.crumbsDirty = true;
     }
 
     _pruneCrumbs() {
         const cutoff = Date.now() - this.persistDays * 24 * 60 * 60 * 1000;
-        while (this.crumbCache.length > 0 && this.crumbCache[0].t < cutoff) this.crumbCache.shift();
+        let pruned = false;
+        while (this.crumbs.length > 0 && this.crumbs[0].t < cutoff) {
+            this.crumbs.shift();
+            pruned = true;
+        }
+        return pruned;
     }
 
-    _persistFilePath() {
+    _filenameCrumbs() {
         const mac = String(this.state.robot.mac || 'unknown').replaceAll(':', '');
         return path.join(this.persistDir, `stiga-crumbs-${mac}.json.gz`);
     }
@@ -505,43 +520,31 @@ class WebStatusProcessor {
     // Persist as gzipped JSON: keeps the format human-inspectable (gunzip + jq) while
     // shrinking the file ~5–10×. The full file is rewritten each tick — fine at /dev/shm
     // speeds and crumb cadence; revisit if the cache ever grows to many MB.
-    _persistCrumbs() {
-        if (!this.persistEnabled || !this.crumbDirty) return;
-        try {
-            const json = JSON.stringify({ version: 2, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, crumbs: this.crumbCache });
-            fs.writeFileSync(this._persistFilePath(), zlib.gzipSync(json));
-            this.crumbDirty = false;
-        } catch (e) {
-            this.logger(`WebStatus: crumb persist failed: ${e.message}`);
-        }
+    _saveCrumbs() {
+        if (this.crumbsDirty)
+            try {
+                const json = JSON.stringify({ version: 2, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, crumbs: this.crumbs });
+                fs.writeFileSync(this._filenameCrumbs(), zlib.gzipSync(json));
+                this.crumbsDirty = false;
+            } catch (e) {
+                this.logger(`WebStatus: crumbs save failed: ${e.message}`);
+            }
     }
 
-    _loadPersistedCrumbs() {
-        if (!this.persistEnabled) return;
-        const gzPath = this._persistFilePath();
-        const legacyPath = gzPath.replace(/\.gz$/, ''); // v1 wrote plain JSON; read it once if it's still around
-        try {
-            let json;
-            let source;
-            if (fs.existsSync(gzPath)) {
-                json = zlib.gunzipSync(fs.readFileSync(gzPath)).toString('utf8');
-                source = gzPath;
-            } else if (fs.existsSync(legacyPath)) {
-                json = fs.readFileSync(legacyPath, 'utf8');
-                source = legacyPath;
-            } else {
-                return;
+    _loadCrumbs() {
+        const file = this._filenameCrumbs();
+        if (fs.existsSync(file))
+            try {
+                const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
+                const data = JSON.parse(json);
+                if (Array.isArray(data?.crumbs)) {
+                    this.crumbs = data.crumbs;
+                    this.crumbsDirty = this._pruneCrumbs();
+                    this.logger(`WebStatus: crumbs load ${this.crumbs.length} from ${file}`);
+                }
+            } catch (e) {
+                this.logger(`WebStatus: crumbs load failed: ${e.message}`);
             }
-            const data = JSON.parse(json);
-            if (Array.isArray(data?.crumbs)) {
-                this.crumbCache = data.crumbs;
-                this._pruneCrumbs();
-                this.crumbDirty = true; // mark dirty so the next tick rewrites in the new format
-                this.logger(`WebStatus: loaded ${this.crumbCache.length} persisted crumbs from ${source}`);
-            }
-        } catch (e) {
-            this.logger(`WebStatus: crumb load failed: ${e.message}`);
-        }
     }
 
     _handleBaseStatus(decoded) {
@@ -621,28 +624,27 @@ class WebStatusProcessor {
     // robot is undocked (where messages tend to arrive), and a slow cadence while it is
     // parked. Self-rescheduling so the interval is recomputed each tick from current state.
     _startNotificationPoll() {
-        if (!this.cloudServer) return;
-        const tick = async () => {
-            try {
-                const notifications = new StigaAPINotifications(this.cloudServer);
-                if (await notifications.load()) {
-                    this.notifications = notifications.getAll().map((n) => ({
-                        uuid: n.getUuid(),
-                        title: n.getTitle(),
-                        body: n.getBody(),
-                        type: n.getType(),
-                        category: n.getCategory(),
-                        read: n.isRead(),
-                        createdAt: n.getCreatedAt()?.toISOString(),
-                    }));
+        if (this.cloudServer) {
+            const tick = async () => {
+                try {
+                    const notifications = new StigaAPINotifications(this.cloudServer);
+                    if (await notifications.load())
+                        this.notifications = notifications.getAll().map((n) => ({
+                            uuid: n.getUuid(),
+                            title: n.getTitle(),
+                            body: n.getBody(),
+                            type: n.getType(),
+                            category: n.getCategory(),
+                            read: n.isRead(),
+                            createdAt: n.getCreatedAt()?.toISOString(),
+                        }));
+                } catch (e) {
+                    this.logger(`WebStatus: notifications poll failed (${e.message})`);
                 }
-            } catch (e) {
-                this.logger(`WebStatus: notifications poll failed (${e.message})`);
-            }
-            const delay = this.state.robot.docked ? NOTIF_POLL_MS_DOCKED : NOTIF_POLL_MS_UNDOCKED;
-            this.notifTimer = setTimeout(tick, delay);
-        };
-        tick();
+                this.notificationsTimer = setTimeout(tick, this.state.robot.docked ? NOTIF_POLL_MS_DOCKED : NOTIF_POLL_MS_UNDOCKED);
+            };
+            tick();
+        }
     }
 
     //
@@ -668,19 +670,18 @@ class WebStatusProcessor {
         let zoneCutoff = Number.NEGATIVE_INFINITY;
         if (!tcOff) {
             const seenZones = new Set();
-            for (let i = this.crumbCache.length - 1; i >= 0; i--) {
-                const z = this.crumbCache[i].zone;
+            for (let i = this.crumbs.length - 1; i >= 0; i--) {
+                const z = this.crumbs[i].zone;
                 if (z === undefined || z === null) continue;
                 if (!seenZones.has(z)) {
                     if (seenZones.size >= maxZones) {
-                        zoneCutoff = this.crumbCache[i].t;
+                        zoneCutoff = this.crumbs[i].t;
                         break;
                     }
                     seenZones.add(z);
                 }
             }
         }
-        const initialCrumbs = this.crumbCache.filter((c) => c.t > zoneCutoff);
         const config = JSON.stringify({
             baseLat: this.location.latitude,
             baseLng: this.location.longitude,
@@ -703,7 +704,7 @@ class WebStatusProcessor {
 <div id="zonepanel"></div>
 <script>
 var CONFIG = ${config};
-var INITIAL_CRUMBS = ${JSON.stringify(initialCrumbs)};
+var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t > zoneCutoff))};
 var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() })};
 var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
 </script>
@@ -966,6 +967,29 @@ var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
 
 function esc(s){ var d = document.createElement('div'); d.textContent = (s === null || s === undefined) ? '' : String(s); return d.innerHTML; }
 function fmt(v,dash){ return (v === null || v === undefined || v === '') ? (dash === undefined ? '-' : dash) : v; }
+// Soften DISPLAY-only enum strings: NAVIGATING_TO_AREA -> "Navigating to area",
+// GPS_SEARCHING -> "GPS searching". The raw enums stay in r.statusType / r.statusMessage etc.
+// on the wire so automation/scripts can parse them. Two preserve-lists (inlined so the
+// function is safe to call from the early initial-render path before module-level vars are
+// assigned — function declarations are hoisted but var assignments aren't):
+//   KEEP_UPPER  — whole-token critical labels that stay all caps (ERROR).
+//   ACRONYMS    — sub-tokens (between underscores) that keep their capitalisation when
+//                 softened, so "GPS_SEARCHING" -> "GPS searching" not "Gps searching".
+// Applied narrowly at known enum-rendering sites only (status box header).
+function soften(s){
+  if(s === null || s === undefined) return s;
+  var KEEP_UPPER = { ERROR: 1 };
+  var ACRONYMS = { GPS: 1, RTK: 1, GNSS: 1, MQTT: 1, RSSI: 1, LED: 1, MAC: 1, API: 1 };
+  return String(s).replace(/[A-Z][A-Z0-9_]*/g, function(m){
+    if(KEEP_UPPER[m]) return m;
+    var parts = m.split('_').map(function(part, i){
+      if(ACRONYMS[part]) return part;
+      var lower = part.toLowerCase();
+      return i === 0 ? (lower.charAt(0).toUpperCase() + lower.slice(1)) : lower;
+    });
+    return parts.join(' ');
+  });
+}
 function ago(iso){
   if(!iso) return 'never';
   var s = Math.round((Date.now() - new Date(iso).getTime())/1000);
@@ -1502,8 +1526,12 @@ function renderStatusBox(){
   if(!state){ box.innerHTML = '<div class="muted">connecting…</div>'; return; }
   var r = state.robot;
   var place = r.docked === true ? 'Docked' : (r.docked === false ? 'Out' : '-');
-  var op = fmt(r.statusType);
-  if(r.statusText) op += ' · ' + r.statusText;
+  // Prefer the human override (e.g. "GPS_SEARCHING", "STUCK") when present, else fall back
+  // to the raw statusType — both are enum-style so soften() handles them uniformly (and the
+  // SOFTEN_ACRONYMS list ensures GPS/RTK/etc keep their caps). Raw type stays in r.statusType
+  // for color and active-state logic to key off unchanged.
+  var op = fmt(soften(r.statusMessage || r.statusType));
+  if(r.statusText) op += ' · ' + soften(r.statusText);
   var batt = r.battery ? (r.battery.charge + '%') : '-';
   var spark = URL_CONFIG.statusBatterySparkline === 'on' ? batterySparkSVG() : '';
   var mow = '-';
@@ -1564,7 +1592,7 @@ function robotInfo(){
   if(!state) return '<div class="infobox">connecting…</div>';
   var r = state.robot;
   var rows = [
-    ['Operation', fmt(r.statusType) + (r.statusText ? ' · ' + r.statusText : '')],
+    ['Operation', fmt(r.statusMessage || r.statusType) + (r.statusText ? ' · ' + r.statusText : '')],
     ['Validity', fmt(r.statusValid) + ' · ' + fmt(r.statusFlag)],
     ['Docked', r.docked === undefined ? '-' : (r.docked ? 'yes' : 'no')],
     ['Battery', r.battery ? (r.battery.charge + '% · ' + r.battery.capacity + ' mAh') : '-'],

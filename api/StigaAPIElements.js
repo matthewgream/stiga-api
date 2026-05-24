@@ -293,22 +293,38 @@ function formatRobotStatusType(statusType) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// 2, 18 and then 2, 20 when leaving dock
-// 2, 22 when blocked/lidsensor
-// 2, 20 when out of perimeter
-// 2, 22 when stuck/trapped
-// 2, 18 -> reference station initiating
+// Human-readable mapping for the (code1, code2) tuple that the robot emits as field 4 of its
+// status protobuf. These are NOT always errors in the user-facing sense — the official app
+// surfaces them as transient state ("GPS searching", "Navigation initialising", …) even when
+// the parent status type is ERROR (255). When we have a mapping we prefer that string; when we
+// don't we fall back to the raw codes so research can continue.
+//
+// Historical observations (not all confirmed; some may be context-dependent):
+//   2,18  leaving dock / reference station initiating
+//   2,20  out of perimeter
+//   2,22  blocked / lid sensor / stuck / trapped
+const ROBOT_STATUS_ERROR_MESSAGES = {
+    // Confirmed against the official app. Stored in ENUM_STYLE so the on-the-wire shape
+    // matches ROBOT_STATUS_TYPES / ROBOT_STATUS_INFO_CODES — the webstatus UI softens these
+    // for display (preserving known acronyms like GPS). The accompanying StatusInfo code
+    // (e.g. TRAPPED, LID_SENSOR) gives the specific cause and is shown alongside as the
+    // status detail.
+    '2,18': 'NAVIGATION_INITIALISING',
+    '2,20': 'GPS_SEARCHING',
+    '2,22': 'STUCK',
+};
 
 function decodeRobotStatusError(decoded) {
-    return decoded
-        ? upgradeRobotStatusError({
-              code1: decoded[1],
-              code2: decoded[2],
-          })
-        : undefined;
+    if (!decoded) return undefined;
+    const code1 = decoded[1];
+    const code2 = decoded[2];
+    const message = ROBOT_STATUS_ERROR_MESSAGES[`${code1},${code2}`];
+    return upgradeRobotStatusError({ code1, code2, message });
 }
 function formatRobotStatusError(statusError) {
-    return formatStruct(statusError, 'statusError');
+    if (!statusError) return '-';
+    if (statusError.message) return statusError.message;
+    return formatStruct({ code1: statusError.code1, code2: statusError.code2 }, 'statusError');
 }
 function upgradeRobotStatusError(statusError) {
     statusError.toString = () => formatRobotStatusError(statusError);
@@ -346,6 +362,14 @@ function decodeRobotStatusInfo(decoded, allowUndefined = false) {
         : undefined;
 }
 function formatRobotStatusInfo(statusInfo) {
+    // Always return a string — callers do `.replaceAll('-', '')`. Empty -> '-' matches the
+    // formatStruct(undefined) behaviour the previous version of this function relied on.
+    if (!statusInfo) return '-';
+    // When the primary code resolved to a known label (e.g. TRAPPED, LID_SENSOR) we just show
+    // that — the trailing code2/code3/code4 fields are diagnostic noise the app doesn't surface.
+    // Only fall back to the full struct dump if the code is the UNKNOWN(0xNN) sentinel, so we
+    // can still see the raw fields when reverse engineering a new condition.
+    if (statusInfo.code && !statusInfo.code.startsWith('UNKNOWN(')) return statusInfo.code;
     return formatStruct(statusInfo, 'statusInfo', { code: { nokey: true } });
 }
 function upgradeRobotStatusInfo(statusInfo) {

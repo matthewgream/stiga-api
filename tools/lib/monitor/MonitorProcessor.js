@@ -83,12 +83,17 @@ class MonitorProcessor {
     }
 
     _updateRobotStatus(decoded) {
+        const rawType = elements.formatRobotStatusType(elements.decodeRobotStatusType(decoded[3]));
+        const errorObj = elements.decodeRobotStatusError(decoded[4]);
+        // When an ERROR carries a known (code1,code2) it's actually a transient state in
+        // disguise (e.g. "GPS searching") — surface that as the operation label instead.
+        const message = rawType === 'ERROR' && errorObj?.message ? errorObj.message : undefined;
         const updates = {
-            statusType: elements.formatRobotStatusType(elements.decodeRobotStatusType(decoded[3])),
+            statusType: message || rawType,
             statusText: '',
         };
         const statusInfo = elements.formatRobotStatusInfo(elements.decodeRobotStatusInfo(decoded[10])).replaceAll('-', '');
-        const statusError = elements.formatRobotStatusError(elements.decodeRobotStatusError(decoded[4])).replaceAll('-', '');
+        const statusError = message ? '' : elements.formatRobotStatusError(errorObj).replaceAll('-', '');
         // eslint-disable-next-line sonarjs/no-nested-conditional
         updates.statusText = statusInfo || statusError ? `${statusInfo}${statusInfo && statusError ? ', ' : ''}${statusError}` : '-';
         updates.statusFlag = `(valid ${elements.formatRobotStatusValid(elements.decodeRobotStatusValid(decoded[1]))}, flag ${elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]))})`;
