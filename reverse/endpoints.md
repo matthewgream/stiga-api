@@ -187,14 +187,14 @@ Both return the same shape:
   - `PCI` (Physical Cell ID, 0-503) — the over-the-air identifier the UE uses for handover. `130` here.
   Together these pinpoint exactly which sector of which Telenor eNB the SIM last attached to — useful for tower-level diagnostics.
 - `serviceProfile = "STIGA_PACK1_CSP_TELIA"` — Stiga's connectivity pack #1 on Telia roaming through Telenor.
-- `bytesIn`/`bytesOut` are **monotonically increasing counters** — between two probes ~4h apart they jumped from `1967751→2987535` (≈1MB) and `2759273→4314781` (≈1.5MB). Could be useful for monitoring data usage drift.
+- `bytesIn`/`bytesOut` are counters that **increase between probes** — between two ~4h apart they jumped `1967751→2987535` (≈1MB) and `2759273→4314781` (≈1.5MB). **Reset cycle is unknown** — almost certainly not lifetime (a recent OTA firmware download would have pushed totals into double-digit MB, but we see only ~7 MB total after 398 days). Probably resets monthly on a billing/pack-pack anniversary, or on each device reboot — needs sampling over a longer window to confirm. Useful for monitoring data usage *drift* regardless of the cycle.
 
 **Mandatory params**
 - `/api/sim` without query → `400 "Should have required property: sim_imsi"`.
 - `/api/sims/<uuid>` (plural) → `404`.
 
 **Potential uses**
-- Monitor monthly data usage by sampling `bytesIn`/`bytesOut` over time (great for capacity/Stiga-charging visibility).
+- Monitor data usage by sampling `bytesIn`/`bytesOut` over time (great for capacity/Stiga-charging visibility once the reset cycle is determined).
 - Detect connectivity-pack expiry / state changes (`sim_status`).
 - Verify the SIM is "alive" before suspecting MQTT problems.
 
