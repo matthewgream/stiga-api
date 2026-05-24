@@ -142,6 +142,64 @@ scripts/stiga-probe-endpoint.js /api/bases mac_address=FCE8C072EC62
 
 ---
 
+## `/api/sim` and `/api/sim/<uuid>`
+
+**Note the singular** — `/api/sims/<uuid>` returns 404. Both variants exist:
+
+- `/api/sim?sim_imsi=<IMSI>` — lookup by IMSI (the 15-digit `sim_id` from the response below)
+- `/api/sim/<uuid>` — lookup by SIM UUID (the `sim_uuid` exposed in `/api/garage` data)
+
+Both return the same shape:
+
+```json
+{
+  "type": "sims",
+  "attributes": {
+    "uuid":       "e777e8bf-…",
+    "sim_id":     "123456784012077",
+    "last_info": {
+      "imei":           "1234567826617838",
+      "iccid":          "12345678000783004560",
+      "state":          "T",
+      "bytesIn":        2987535,
+      "bytesOut":       4314781,
+      "country":        "",
+      "lastUsed":       "2026-05-24T06:57:59.000Z",
+      "lastCellId":     "240-08-11050-33833247-130",
+      "serviceProfile": "STIGA_PACK1_CSP_TELIA"
+    },
+    "sim_status": "active",
+    "created_at": "2025-04-21T10:43:19.974Z",
+    "updated_at": "2026-05-24T03:11:11.561Z"
+  }
+}
+```
+
+**Field notes**
+- `sim_id` is the **IMSI** despite the generic name. 15 digits, MCC prefix (`901` = global mobile-satellite or IoT range, depending on the operator).
+- `iccid` is the physical SIM card serial.
+- `imei` is the modem identifier (matches the `EG912UGLAAR03A09M08…` modem version shown by the robot).
+- `last_info.state = "T"` — meaning unclear (likely `T`erminated/`T`ransmitting/`T`est? observed value while SIM is `sim_status: "active"`).
+- `lastCellId` decodes as `MCC-MNC-TAC-ECI-PCI`:
+  - `240-08` = Sweden/Telenor (matches `Telenor (24008)` in robot network status).
+  - `TAC` (Tracking Area Code) — the LTE serving region. `11050` here.
+  - `ECI` (E-UTRAN Cell Identifier, 28-bit) — split as `(eNodeB ID << 8) | Cell ID`. For `33833247`: eNodeB = `132160`, cell-within-eNB = `95`.
+  - `PCI` (Physical Cell ID, 0-503) — the over-the-air identifier the UE uses for handover. `130` here.
+  Together these pinpoint exactly which sector of which Telenor eNB the SIM last attached to — useful for tower-level diagnostics.
+- `serviceProfile = "STIGA_PACK1_CSP_TELIA"` — Stiga's connectivity pack #1 on Telia roaming through Telenor.
+- `bytesIn`/`bytesOut` are **monotonically increasing counters** — between two probes ~4h apart they jumped from `1967751→2987535` (≈1MB) and `2759273→4314781` (≈1.5MB). Could be useful for monitoring data usage drift.
+
+**Mandatory params**
+- `/api/sim` without query → `400 "Should have required property: sim_imsi"`.
+- `/api/sims/<uuid>` (plural) → `404`.
+
+**Potential uses**
+- Monitor monthly data usage by sampling `bytesIn`/`bytesOut` over time (great for capacity/Stiga-charging visibility).
+- Detect connectivity-pack expiry / state changes (`sim_status`).
+- Verify the SIM is "alive" before suspecting MQTT problems.
+
+---
+
 ## Notes on schema oddities
 
 - **JSON-API type strings vary**: `worksessions`, `mainantenances` (typo), `maintenanceactions`. Don't pluralise programmatically — copy the literal.
@@ -155,8 +213,8 @@ scripts/stiga-probe-endpoint.js /api/bases mac_address=FCE8C072EC62
 
 These weren't checked but the naming suggests they exist (from app strings / API style):
 
-- `/api/worksessions/<uuid>` — single session with `worksession_details` populated.
+- `/api/worksessions/<uuid>` — single session with `worksession_details` populated. (Probed: always empty, no expansion variant unlocks it.)
 - `/api/devices/<uuid>` — direct device fetch (versus garage).
 - `/api/stores` / `/api/buyers` — referenced from garage relationships.
-- `/api/sims/<uuid>` — connectivity-pack info.
+- `~~/api/sims/<uuid>~~` — actually the singular `/api/sim/<uuid>` (covered above).
 - `POST /api/maintenances` — write a maintenance record (the catalogue suggests this is settable).
