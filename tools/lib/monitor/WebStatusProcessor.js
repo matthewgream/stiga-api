@@ -1070,7 +1070,7 @@ function hydrateInitialCrumbs(){
       var prev = INITIAL_CRUMBS[i-1];
       var seg = new google.maps.Polyline({
         path: [{ lat: prev.lat, lng: prev.lng }, { lat: c.lat, lng: c.lng }],
-        strokeColor: c.color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3,
+        strokeColor: c.color, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
         map: (tracksOn && tracksVisible) ? map : null
       });
       seg.crumbZone = c.zone;
@@ -1110,9 +1110,13 @@ function loadPerimeters(){
       perimetersDrawn = true;
       var bounds = new google.maps.LatLngBounds();
       var any = false;
+      // Layer order (bottom → top): satellite base → crumb tracks (z=1, semi-transparent so
+       // vegetation still shows) → connector + docking paths (z=2) → zone boundaries (z=3) →
+       // obstacles + temp obstacles (z=4) → pickup points (z=5). Perimeter data always sits
+       // above the tracks so zone/obstacle borders are never obscured by a dense crumb trail.
       (p.zones || []).forEach(function(z, i){
         var color = ZONE_COLORS[i % ZONE_COLORS.length];
-        var poly = makePolygon(z.path, color, 0.12, 4, 1);
+        var poly = makePolygon(z.path, color, 0.12, 4, 3);
         if(poly){
           poly.getPath().forEach(function(ll){ bounds.extend(ll); });
           any = true;
@@ -1124,40 +1128,39 @@ function loadPerimeters(){
       // "defined but currently disabled in the app". Cycle continues from where live zones end.
       (p.closedZones || []).forEach(function(z, i){
         var color = ZONE_COLORS[(p.zones.length + i) % ZONE_COLORS.length];
-        makePolygon(z.path, color, 0.05, 2, 1);
+        makePolygon(z.path, color, 0.05, 2, 3);
       });
       (p.obstacles || []).forEach(function(o){
-        makePolygon(o.path, '#ea4335', 0.20, 3, 2);
+        makePolygon(o.path, '#ea4335', 0.20, 3, 4);
       });
       // Temporary obstacles — same shape treatment as permanent obstacles but a brighter red
       // with stronger fill, since they're transient and the user should notice them.
       (p.tempObstacles || []).forEach(function(o){
-        makePolygon(o.path, '#ff3b30', 0.32, 3, 2);
+        makePolygon(o.path, '#ff3b30', 0.32, 3, 4);
       });
-      // Inter-zone connector paths — drawn beneath everything else as a wider grey "road"
-      // (9px). The robot follows these routes, so the bright 3px track polylines sit on top
-      // as a "car trail" with a generous grey halo peeking out on either side. Where there's
-      // no track yet, the full grey path shows through.
+      // Inter-zone connector paths — drawn ABOVE tracks now, as a thinner grey line. With
+      // tracks made semi-transparent below, the bright crumb colours still show through the
+      // path's reduced opacity, so you can see both "where the route goes" and "where the
+      // robot has been" simultaneously.
       (p.connectPaths || []).forEach(function(pp){
         if(!pp.path || pp.path.length < 2) return;
         new google.maps.Polyline({
           path: pp.path.map(function(pt){ return { lat: pt.latitude, lng: pt.longitude }; }),
-          strokeColor: '#9aa0a6', strokeOpacity: 0.55, strokeWeight: 9,
-          clickable: false, zIndex: 0, map: map
+          strokeColor: '#9aa0a6', strokeOpacity: 0.40, strokeWeight: 7,
+          clickable: false, zIndex: 2, map: map
         });
       });
-      // Docking paths — same road metaphor but in the base-pin blue, so the visual relationship
-      // between "this is where the robot approaches its base" is obvious. Slightly higher opacity.
+      // Docking paths — same treatment in base-pin blue. Slightly higher opacity since blue is
+      // less dominant visually than the grey at the same opacity.
       (p.dockingPaths || []).forEach(function(pp){
         if(!pp.path || pp.path.length < 2) return;
         new google.maps.Polyline({
           path: pp.path.map(function(pt){ return { lat: pt.latitude, lng: pt.longitude }; }),
-          strokeColor: '#1a73e8', strokeOpacity: 0.65, strokeWeight: 9,
-          clickable: false, zIndex: 0, map: map
+          strokeColor: '#1a73e8', strokeOpacity: 0.50, strokeWeight: 7,
+          clickable: false, zIndex: 2, map: map
         });
       });
-      // Pickup points — small red circles. We don't have sample data yet so the element shape
-      // is speculative: prefer explicit {latitude, longitude}; fall back to {x, y} if present.
+      // Pickup points — small red circles, top of the stack so they're never hidden.
       (p.pickupPoints || []).forEach(function(pt){
         var lat = pt.latitude ?? pt.lat ?? pt.y;
         var lng = pt.longitude ?? pt.lng ?? pt.x;
@@ -1166,7 +1169,7 @@ function loadPerimeters(){
           center: { lat: lat, lng: lng }, radius: 0.4,
           fillColor: '#ea4335', fillOpacity: 0.85,
           strokeColor: '#ea4335', strokeOpacity: 1, strokeWeight: 2,
-          clickable: false, zIndex: 4, map: map
+          clickable: false, zIndex: 5, map: map
         });
       });
       highlightActiveZone();
@@ -1301,7 +1304,7 @@ function recordCrumb(){
   if(prev){
     var seg = new google.maps.Polyline({
       path: [{ lat: prev.lat, lng: prev.lng }, { lat: pt.lat, lng: pt.lng }],
-      strokeColor: color, strokeOpacity: 0.95, strokeWeight: 3, clickable: false, zIndex: 3,
+      strokeColor: color, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
       map: tracksVisible ? map : null
     });
     seg.crumbZone = zone;
@@ -1456,11 +1459,46 @@ function scheduleWhenLabel(daysAway, dayName){
   return dayName;
 }
 
-// One-line status row text: "Inactive", "Active (no sessions)", or "Today at 09:00 for 2h0m".
+// If "now" falls inside one of today's scheduled blocks, return its end time + remaining
+// minutes; otherwise null. Used by formatScheduleSummary to show "Now to HH:MM · …" while
+// a session is in progress instead of jumping ahead to the next-after-this one.
+function currentScheduledSession(){
+  if(!state || !state.robot || !state.robot.schedule) return null;
+  var s = state.robot.schedule;
+  if(!s.enabled || !s.blocks || s.blocks.length === 0) return null;
+  var now = new Date();
+  var todayIdx = (now.getDay() + 6) % 7;
+  var nowMin = now.getHours() * 60 + now.getMinutes();
+  for(var i = 0; i < s.blocks.length; i++){
+    var b = s.blocks[i];
+    if(b.dayIndex !== todayIdx) continue;
+    var startMin = b.startHour * 60 + b.startMinute;
+    var endMin = startMin + (b.durationMinutes || 0);
+    if(nowMin >= startMin && nowMin < endMin){
+      var endHour = Math.floor(endMin / 60);
+      var endMinute = endMin % 60;
+      var endDate = new Date(now);
+      endDate.setHours(endHour, endMinute, 0, 0);
+      return {
+        endTime: endHour + ':' + String(endMinute).padStart(2, '0'),
+        remainingMin: Math.max(0, Math.round((endDate.getTime() - now.getTime()) / 60000))
+      };
+    }
+  }
+  return null;
+}
+
+// One-line status row text. States:
+//   "Inactive"                                — schedule disabled
+//   "Active (no sessions)"                    — enabled but no blocks defined
+//   "Until 11:00 (1h5m)"                      — currently inside a scheduled block
+//   "Today at 09:00 for 2h0m" / "Tomorrow …"  — before the next block
 function formatScheduleSummary(){
   if(!state || !state.robot || !state.robot.schedule) return '-';
   var s = state.robot.schedule;
   if(!s.enabled) return 'Inactive';
+  var current = currentScheduledSession();
+  if(current) return 'Until ' + current.endTime + ' (' + fmtScheduleDuration(current.remainingMin) + ')';
   var sessions = upcomingScheduledSessions(1);
   if(sessions.length === 0) return 'Active (no sessions)';
   var n = sessions[0];
