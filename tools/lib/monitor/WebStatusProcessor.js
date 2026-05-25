@@ -499,9 +499,15 @@ class WebStatusProcessor {
     _trackCrumbs(lat, lng) {
         const r = this.state.robot;
         const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? String(r.mowing.zone) : undefined;
+        const color = this._serverCrumbColor();
+        // For red ("alarm") crumbs we also capture a short text describing what was wrong, so
+        // the client can dedupe and surface a fault trail on demand. Older persisted crumbs
+        // (pre this change) simply have no `err` field — backwards compatible: the client
+        // treats undefined as "no detail" and skips those entries in the alarm panel.
+        const err = color === '#ea4335' ? [r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || undefined : undefined;
         // 7 decimal places ≈ 1 cm precision — vastly more than the mower's repeatability —
         // and saves ~20 bytes per crumb in serialised form vs. the ~17 digits JS produces.
-        this.crumbs.push({ lat: Math.round(lat * 1e7) / 1e7, lng: Math.round(lng * 1e7) / 1e7, t: Date.now(), zone, color: this._serverCrumbColor() });
+        this.crumbs.push({ lat: Math.round(lat * 1e7) / 1e7, lng: Math.round(lng * 1e7) / 1e7, t: Date.now(), zone, color, err });
         this._pruneCrumbs();
         this.crumbsDirty = true;
     }
@@ -717,6 +723,7 @@ class WebStatusProcessor {
 <div id="notifbox" class="pos-st empty"></div>
 <div id="zonepanel"></div>
 <div id="schedpanel"></div>
+<div id="alarmpanel"></div>
 <script>
 var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t > zoneCutoff))};
@@ -786,10 +793,16 @@ html,body{margin:0;height:100%}
 #statusbox .spark{margin-top:4px;display:block}
 #statusbox .zonelast{font-size:11px;color:#5f6368;text-align:right;cursor:default;padding:1px 0;font-weight:500}
 #statusbox .zonelast:hover{color:#202124}
-#zonepanel,#schedpanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
+#zonepanel,#schedpanel,#alarmpanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
   padding:9px 13px;box-shadow:0 2px 12px rgba(0,0,0,.35);box-sizing:border-box;
   font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;color:#202124;display:none}
-#zonepanel.show,#schedpanel.show{display:block}
+#zonepanel.show,#schedpanel.show,#alarmpanel.show{display:block}
+#alarmpanel h2{font-size:11px;margin:0 0 7px;color:#c5221f;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+#alarmpanel table{border-collapse:collapse;width:100%}
+#alarmpanel td{padding:2px 0;vertical-align:top;font-size:12px}
+#alarmpanel td.atime{color:#80868b;white-space:nowrap;padding-right:12px;font-size:11px}
+#alarmpanel td.aerr{font-weight:600;color:#202124}
+#alarmpanel td.acount{color:#80868b;text-align:right;padding-left:10px;font-variant-numeric:tabular-nums}
 #schedpanel h2{font-size:11px;margin:0 0 7px;color:#80868b;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 #schedpanel table{border-collapse:collapse;width:100%}
 #schedpanel td{padding:2px 0;vertical-align:top;font-size:12px}
@@ -827,7 +840,7 @@ var map, infoWindow, baseMarker, robotMarker, robotPin;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
-var tracksOn = true, tracksVisible = true, crumbs = [], crumbSegments = [], lastCrumbTime = null;
+var tracksOn = true, tracksVisible = true, alarmsHighlighted = false, crumbs = [], crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
 var batteryHistory = [], lastBatteryStatusTime = null;
 
@@ -1065,7 +1078,9 @@ function hydrateInitialCrumbs(){
   if(typeof INITIAL_CRUMBS === 'undefined' || !Array.isArray(INITIAL_CRUMBS) || INITIAL_CRUMBS.length === 0) return;
   for(var i = 0; i < INITIAL_CRUMBS.length; i++){
     var c = INITIAL_CRUMBS[i];
-    crumbs.push({ lat: c.lat, lng: c.lng, color: c.color, zone: c.zone });
+    // err and t may be absent on legacy crumbs (pre-alarm-trail data) — that's fine, they
+    // just won't appear in the dedup'd alarm panel. Fields are additive, schema unchanged.
+    crumbs.push({ lat: c.lat, lng: c.lng, color: c.color, zone: c.zone, err: c.err, t: c.t });
     if(i > 0){
       var prev = INITIAL_CRUMBS[i-1];
       var seg = new google.maps.Polyline({
@@ -1073,17 +1088,23 @@ function hydrateInitialCrumbs(){
         strokeColor: c.color, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
         map: (tracksOn && tracksVisible) ? map : null
       });
+      seg.crumbColor = c.color;
       seg.crumbZone = c.zone;
+      seg.crumbErr = c.err;
+      seg.crumbT = c.t;
       crumbSegments.push(seg);
     }
   }
   applyTracksClr();
+  applyAlarmsHighlight();
   console.log('WebStatus: hydrated ' + crumbs.length + ' cached crumbs');
 }
 window.initMap = initMap;
 window.toggleTracks = toggleTracks;
 window.clearTracks = clearTracks;
 window.toggleTracksVisible = toggleTracksVisible;
+// One-time wiring: alarm panel must keep itself open when the cursor moves from a segment onto it.
+setTimeout(function(){ if(typeof bindAlarmPanelHover === 'function') bindAlarmPanelHover(); }, 0);
 
 function attachHover(marker, kind){
   var node = marker.content;
@@ -1298,8 +1319,10 @@ function recordCrumb(){
   lastCrumbTime = r.updatedPosition;
   var color = crumbColor(r);
   var zone = (r.mowing && !r.docked && r.mowing.zone !== null && r.mowing.zone !== undefined) ? String(r.mowing.zone) : null;
+  // Capture an alarm string for red crumbs so the alarm panel can dedupe by it.
+  var err = color === '#ea4335' ? ([r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || null) : null;
   var prev = crumbs[crumbs.length - 1];
-  var pt = { lat: r.latitude, lng: r.longitude, color: color, zone: zone };
+  var pt = { lat: r.latitude, lng: r.longitude, color: color, zone: zone, err: err, t: Date.now() };
   crumbs.push(pt);
   if(prev){
     var seg = new google.maps.Polyline({
@@ -1307,8 +1330,12 @@ function recordCrumb(){
       strokeColor: color, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
       map: tracksVisible ? map : null
     });
+    seg.crumbColor = color;
     seg.crumbZone = zone;
+    seg.crumbErr = err;
+    seg.crumbT = pt.t;
     crumbSegments.push(seg);
+    if(color === '#ea4335' && alarmsHighlighted) styleAlarmSegment(seg, true);
   }
   applyTracksClr();
 }
@@ -1340,6 +1367,105 @@ function applyTracksClr(){
 
 // cycle the decay limit through the canonical values; called from the [#N] button in the
 // status box. Re-applies immediately so segments drop or remain as appropriate.
+// Alarm highlighting. When alarmsHighlighted is on, red crumb segments get fatter & brighter,
+// promoted above other tracks, and hover handlers attached. Hover surfaces a deduplicated
+// alarm trail (same error within ±5min counts as one event) in a floating panel.
+var ALARM_DEDUPE_WINDOW_MS = 5 * 60 * 1000;
+function styleAlarmSegment(seg, highlight){
+  if(highlight){
+    seg.setOptions({ strokeWeight: 6, strokeOpacity: 0.95, zIndex: 6, clickable: true });
+    if(!seg._alarmOver){
+      seg._alarmOver = seg.addListener('mouseover', showAlarmsPanel);
+      seg._alarmOut  = seg.addListener('mouseout',  scheduleAlarmsPanelClose);
+    }
+  } else {
+    seg.setOptions({ strokeWeight: 3, strokeOpacity: 0.45, zIndex: 1, clickable: false });
+    if(seg._alarmOver){ google.maps.event.removeListener(seg._alarmOver); seg._alarmOver = null; }
+    if(seg._alarmOut){  google.maps.event.removeListener(seg._alarmOut);  seg._alarmOut  = null; }
+  }
+}
+function applyAlarmsHighlight(){
+  crumbSegments.forEach(function(s){
+    if(s.crumbColor === '#ea4335') styleAlarmSegment(s, alarmsHighlighted);
+  });
+}
+function setAlarmsHighlight(on){
+  if(alarmsHighlighted === on) return;
+  alarmsHighlighted = on;
+  applyAlarmsHighlight();
+  if(!alarmsHighlighted){
+    var panel = document.getElementById('alarmpanel');
+    if(panel) panel.classList.remove('show');
+  }
+  renderStatusBox();
+}
+function toggleAlarmsHighlight(){ setAlarmsHighlight(!alarmsHighlighted); }
+window.toggleAlarmsHighlight = toggleAlarmsHighlight;
+
+// Once-only: keep the alarm panel open when the pointer moves from a red segment onto the panel.
+function bindAlarmPanelHover(){
+  var panel = document.getElementById('alarmpanel');
+  if(!panel || panel.dataset.bound) return;
+  panel.dataset.bound = '1';
+  panel.addEventListener('mouseenter', function(){ if(alarmPanelCloseTimer){ clearTimeout(alarmPanelCloseTimer); alarmPanelCloseTimer = null; } });
+  panel.addEventListener('mouseleave', scheduleAlarmsPanelClose);
+}
+
+// Collect alarm crumbs (red + has err) and collapse same-text-within-window runs into a
+// single event with first/last timestamps and a count.
+function dedupAlarms(){
+  var alarms = crumbs
+    .filter(function(c){ return c.color === '#ea4335' && c.err && c.t; })
+    .slice()
+    .sort(function(a, b){ return (a.t || 0) - (b.t || 0); });
+  var groups = [];
+  alarms.forEach(function(c){
+    var g = groups[groups.length - 1];
+    if(g && g.err === c.err && (c.t - g.lastT) <= ALARM_DEDUPE_WINDOW_MS){
+      g.lastT = c.t;
+      g.count++;
+    } else {
+      groups.push({ err: c.err, firstT: c.t, lastT: c.t, count: 1 });
+    }
+  });
+  return groups.reverse(); // newest first for display
+}
+
+var alarmPanelCloseTimer = null;
+function showAlarmsPanel(){
+  if(alarmPanelCloseTimer){ clearTimeout(alarmPanelCloseTimer); alarmPanelCloseTimer = null; }
+  var panel = document.getElementById('alarmpanel');
+  var box = document.getElementById('statusbox');
+  if(!panel || !box) return;
+  var events = dedupAlarms();
+  if(events.length === 0){
+    panel.innerHTML = '<h2>Alarms</h2><div style="color:#80868b;font-size:11px">(none recorded yet — older crumbs predate alarm capture)</div>';
+  } else {
+    var html = '<h2>Alarms (' + events.length + ' event' + (events.length === 1 ? '' : 's') + ', deduped ±5min)</h2><table>';
+    events.forEach(function(e){
+      var when = ago(new Date(e.lastT).toISOString());
+      var countLabel = e.count > 1 ? ('×' + e.count) : '';
+      html += '<tr>' +
+        '<td class="atime">' + esc(when) + '</td>' +
+        '<td class="aerr">' + esc(e.err) + '</td>' +
+        '<td class="acount">' + esc(countLabel) + '</td>' +
+      '</tr>';
+    });
+    html += '</table>';
+    panel.innerHTML = html;
+  }
+  panel.classList.add('show');
+  positionHoverPanel(panel, box);
+}
+function scheduleAlarmsPanelClose(){
+  if(alarmPanelCloseTimer) clearTimeout(alarmPanelCloseTimer);
+  alarmPanelCloseTimer = setTimeout(function(){
+    var panel = document.getElementById('alarmpanel');
+    if(panel) panel.classList.remove('show');
+    alarmPanelCloseTimer = null;
+  }, 300);
+}
+
 function cycleTracksClr(){
   var idx = TRACKS_CLR_CYCLE.indexOf(tracksClr);
   tracksClr = TRACKS_CLR_CYCLE[(idx + 1) % TRACKS_CLR_CYCLE.length];
@@ -1757,11 +1883,13 @@ function renderStatusBox(){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
     var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-fetch perimeters and notifications">' + (refreshBusy ? '↻…' : '↻') + '</span>';
     var visBtn = '<span class="btn" onclick="toggleTracksVisible()" title="temporarily hide/show tracks (recording continues)">' + (tracksVisible ? 'HIDE' : 'SHOW') + '</span>';
+    var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + '" onclick="toggleAlarmsHighlight()" title="highlight error tracks and reveal deduped alarm log on hover">!</span>';
     trk = '<div class="tracks">' + refreshBtn + ' Tracks:' +
       '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
       visBtn +
       '<span class="btn" onclick="clearTracks()">CLR</span>' +
       '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
+      alarmBtn +
     '</div>';
   }
   box.innerHTML =
