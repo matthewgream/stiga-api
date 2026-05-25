@@ -723,7 +723,6 @@ class WebStatusProcessor {
 <div id="notifbox" class="pos-st empty"></div>
 <div id="zonepanel"></div>
 <div id="schedpanel"></div>
-<div id="alarmpanel"></div>
 <script>
 var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t > zoneCutoff))};
@@ -793,16 +792,13 @@ html,body{margin:0;height:100%}
 #statusbox .spark{margin-top:4px;display:block}
 #statusbox .zonelast{font-size:11px;color:#5f6368;text-align:right;cursor:default;padding:1px 0;font-weight:500}
 #statusbox .zonelast:hover{color:#202124}
-#zonepanel,#schedpanel,#alarmpanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
+#zonepanel,#schedpanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
   padding:9px 13px;box-shadow:0 2px 12px rgba(0,0,0,.35);box-sizing:border-box;
   font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;color:#202124;display:none}
-#zonepanel.show,#schedpanel.show,#alarmpanel.show{display:block}
-#alarmpanel h2{font-size:11px;margin:0 0 7px;color:#c5221f;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
-#alarmpanel table{border-collapse:collapse;width:100%}
-#alarmpanel td{padding:2px 0;vertical-align:top;font-size:12px}
-#alarmpanel td.atime{color:#80868b;white-space:nowrap;padding-right:12px;font-size:11px}
-#alarmpanel td.aerr{font-weight:600;color:#202124}
-#alarmpanel td.acount{color:#80868b;text-align:right;padding-left:10px;font-variant-numeric:tabular-nums}
+#zonepanel.show,#schedpanel.show{display:block}
+.alarmtip{font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;max-width:280px;color:#202124}
+.alarmtip .aerr{font-weight:600;color:#c5221f;margin-bottom:3px}
+.alarmtip .atime{color:#80868b;font-size:11px}
 #schedpanel h2{font-size:11px;margin:0 0 7px;color:#80868b;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
 #schedpanel table{border-collapse:collapse;width:100%}
 #schedpanel td{padding:2px 0;vertical-align:top;font-size:12px}
@@ -1103,8 +1099,6 @@ window.initMap = initMap;
 window.toggleTracks = toggleTracks;
 window.clearTracks = clearTracks;
 window.toggleTracksVisible = toggleTracksVisible;
-// One-time wiring: alarm panel must keep itself open when the cursor moves from a segment onto it.
-setTimeout(function(){ if(typeof bindAlarmPanelHover === 'function') bindAlarmPanelHover(); }, 0);
 
 function attachHover(marker, kind){
   var node = marker.content;
@@ -1335,7 +1329,11 @@ function recordCrumb(){
     seg.crumbErr = err;
     seg.crumbT = pt.t;
     crumbSegments.push(seg);
-    if(color === '#ea4335' && alarmsHighlighted) styleAlarmSegment(seg, true);
+    if(color === '#ea4335' && alarmsHighlighted){
+      styleAlarmSegment(seg, true);
+      // Rebuild clusters so a freshly-recorded alarm shows up as a circle straight away.
+      buildAlarmClusters();
+    }
   }
   applyTracksClr();
 }
@@ -1367,104 +1365,108 @@ function applyTracksClr(){
 
 // cycle the decay limit through the canonical values; called from the [#N] button in the
 // status box. Re-applies immediately so segments drop or remain as appropriate.
-// Alarm highlighting. When alarmsHighlighted is on, red crumb segments get fatter & brighter,
-// promoted above other tracks, and hover handlers attached. Hover surfaces a deduplicated
-// alarm trail (same error within ±5min counts as one event) in a floating panel.
-var ALARM_DEDUPE_WINDOW_MS = 5 * 60 * 1000;
+// Alarm highlighting. When alarmsHighlighted is on, red crumb segments get fatter & brighter
+// (so the path through an error region is obvious) AND each error LOCATION gets a red Circle
+// drawn on top with its own hover tooltip. Clusters of nearby same-error crumbs (within ~2m
+// AND ±5min) collapse into a single circle so a robot stuck in one spot doesn't paint dozens
+// of overlapping dots.
+var ALARM_CLUSTER_TIME_WINDOW_MS = 5 * 60 * 1000;
+var ALARM_CLUSTER_DISTANCE_M = 2;
+var alarmClusters = []; // [{lat, lng, err, firstT, lastT, count, circle}]
+var alarmInfoWindow = null;
+var alarmTipCloseTimer = null;
+
 function styleAlarmSegment(seg, highlight){
-  if(highlight){
-    seg.setOptions({ strokeWeight: 6, strokeOpacity: 0.95, zIndex: 6, clickable: true });
-    if(!seg._alarmOver){
-      seg._alarmOver = seg.addListener('mouseover', showAlarmsPanel);
-      seg._alarmOut  = seg.addListener('mouseout',  scheduleAlarmsPanelClose);
-    }
-  } else {
-    seg.setOptions({ strokeWeight: 3, strokeOpacity: 0.45, zIndex: 1, clickable: false });
-    if(seg._alarmOver){ google.maps.event.removeListener(seg._alarmOver); seg._alarmOver = null; }
-    if(seg._alarmOut){  google.maps.event.removeListener(seg._alarmOut);  seg._alarmOut  = null; }
-  }
+  if(highlight) seg.setOptions({ strokeWeight: 6, strokeOpacity: 0.95, zIndex: 6 });
+  else seg.setOptions({ strokeWeight: 3, strokeOpacity: 0.45, zIndex: 1 });
 }
-function applyAlarmsHighlight(){
+function applyAlarmSegmentHighlight(){
   crumbSegments.forEach(function(s){
     if(s.crumbColor === '#ea4335') styleAlarmSegment(s, alarmsHighlighted);
   });
+}
+
+function distanceMetres(lat1, lng1, lat2, lng2){
+  var dLat = (lat2 - lat1) * 111_320;
+  var dLng = (lng2 - lng1) * 111_320 * Math.cos((lat1 * Math.PI) / 180);
+  return Math.sqrt(dLat * dLat + dLng * dLng);
+}
+
+function buildAlarmClusters(){
+  clearAlarmClusters();
+  if(!map) return;
+  var red = crumbs.filter(function(c){ return c.color === '#ea4335' && c.err && c.t; }).slice().sort(function(a, b){ return a.t - b.t; });
+  red.forEach(function(c){
+    // try to attach to any recent same-error cluster within range, scanning newest-first
+    var match;
+    for(var i = alarmClusters.length - 1; i >= 0; i--){
+      var cl = alarmClusters[i];
+      if(cl.err !== c.err) continue;
+      if(c.t - cl.lastT > ALARM_CLUSTER_TIME_WINDOW_MS) continue;
+      if(distanceMetres(c.lat, c.lng, cl.lat, cl.lng) > ALARM_CLUSTER_DISTANCE_M) continue;
+      match = cl; break;
+    }
+    if(match){
+      match.count++;
+      match.lat = match.lat + (c.lat - match.lat) / match.count;
+      match.lng = match.lng + (c.lng - match.lng) / match.count;
+      match.lastT = c.t;
+    } else {
+      alarmClusters.push({ lat: c.lat, lng: c.lng, err: c.err, firstT: c.t, lastT: c.t, count: 1 });
+    }
+  });
+  // draw circles
+  alarmClusters.forEach(function(cl){
+    cl.circle = new google.maps.Circle({
+      center: { lat: cl.lat, lng: cl.lng }, radius: 1.5,
+      fillColor: '#ea4335', fillOpacity: 0.25,
+      strokeColor: '#ea4335', strokeOpacity: 0.95, strokeWeight: 2,
+      clickable: true, zIndex: 7, map: map
+    });
+    cl.circle.addListener('mouseover', function(){ showAlarmTooltip(cl); });
+    cl.circle.addListener('mouseout',  function(){ scheduleAlarmTooltipClose(); });
+  });
+}
+function clearAlarmClusters(){
+  alarmClusters.forEach(function(cl){ if(cl.circle){ cl.circle.setMap(null); cl.circle = null; } });
+  alarmClusters = [];
+  if(alarmInfoWindow) alarmInfoWindow.close();
+}
+
+function showAlarmTooltip(cluster){
+  if(alarmTipCloseTimer){ clearTimeout(alarmTipCloseTimer); alarmTipCloseTimer = null; }
+  if(!alarmInfoWindow) alarmInfoWindow = new google.maps.InfoWindow({ disableAutoPan: true });
+  var when = ago(new Date(cluster.lastT).toISOString());
+  var spanMin = Math.round((cluster.lastT - cluster.firstT) / 60_000);
+  var detail = [when];
+  if(spanMin >= 1) detail.push('over ' + spanMin + 'm');
+  if(cluster.count > 1) detail.push(cluster.count + ' samples');
+  var html = '<div class="alarmtip">' +
+    '<div class="aerr">' + esc(cluster.err) + '</div>' +
+    '<div class="atime">' + esc(detail.join(' · ')) + '</div>' +
+  '</div>';
+  alarmInfoWindow.setContent(html);
+  alarmInfoWindow.setPosition({ lat: cluster.lat, lng: cluster.lng });
+  alarmInfoWindow.open(map);
+}
+function scheduleAlarmTooltipClose(){
+  if(alarmTipCloseTimer) clearTimeout(alarmTipCloseTimer);
+  alarmTipCloseTimer = setTimeout(function(){ if(alarmInfoWindow) alarmInfoWindow.close(); alarmTipCloseTimer = null; }, 250);
+}
+
+function applyAlarmsHighlight(){
+  applyAlarmSegmentHighlight();
+  if(alarmsHighlighted) buildAlarmClusters();
+  else clearAlarmClusters();
 }
 function setAlarmsHighlight(on){
   if(alarmsHighlighted === on) return;
   alarmsHighlighted = on;
   applyAlarmsHighlight();
-  if(!alarmsHighlighted){
-    var panel = document.getElementById('alarmpanel');
-    if(panel) panel.classList.remove('show');
-  }
   renderStatusBox();
 }
 function toggleAlarmsHighlight(){ setAlarmsHighlight(!alarmsHighlighted); }
 window.toggleAlarmsHighlight = toggleAlarmsHighlight;
-
-// Once-only: keep the alarm panel open when the pointer moves from a red segment onto the panel.
-function bindAlarmPanelHover(){
-  var panel = document.getElementById('alarmpanel');
-  if(!panel || panel.dataset.bound) return;
-  panel.dataset.bound = '1';
-  panel.addEventListener('mouseenter', function(){ if(alarmPanelCloseTimer){ clearTimeout(alarmPanelCloseTimer); alarmPanelCloseTimer = null; } });
-  panel.addEventListener('mouseleave', scheduleAlarmsPanelClose);
-}
-
-// Collect alarm crumbs (red + has err) and collapse same-text-within-window runs into a
-// single event with first/last timestamps and a count.
-function dedupAlarms(){
-  var alarms = crumbs
-    .filter(function(c){ return c.color === '#ea4335' && c.err && c.t; })
-    .slice()
-    .sort(function(a, b){ return (a.t || 0) - (b.t || 0); });
-  var groups = [];
-  alarms.forEach(function(c){
-    var g = groups[groups.length - 1];
-    if(g && g.err === c.err && (c.t - g.lastT) <= ALARM_DEDUPE_WINDOW_MS){
-      g.lastT = c.t;
-      g.count++;
-    } else {
-      groups.push({ err: c.err, firstT: c.t, lastT: c.t, count: 1 });
-    }
-  });
-  return groups.reverse(); // newest first for display
-}
-
-var alarmPanelCloseTimer = null;
-function showAlarmsPanel(){
-  if(alarmPanelCloseTimer){ clearTimeout(alarmPanelCloseTimer); alarmPanelCloseTimer = null; }
-  var panel = document.getElementById('alarmpanel');
-  var box = document.getElementById('statusbox');
-  if(!panel || !box) return;
-  var events = dedupAlarms();
-  if(events.length === 0){
-    panel.innerHTML = '<h2>Alarms</h2><div style="color:#80868b;font-size:11px">(none recorded yet — older crumbs predate alarm capture)</div>';
-  } else {
-    var html = '<h2>Alarms (' + events.length + ' event' + (events.length === 1 ? '' : 's') + ', deduped ±5min)</h2><table>';
-    events.forEach(function(e){
-      var when = ago(new Date(e.lastT).toISOString());
-      var countLabel = e.count > 1 ? ('×' + e.count) : '';
-      html += '<tr>' +
-        '<td class="atime">' + esc(when) + '</td>' +
-        '<td class="aerr">' + esc(e.err) + '</td>' +
-        '<td class="acount">' + esc(countLabel) + '</td>' +
-      '</tr>';
-    });
-    html += '</table>';
-    panel.innerHTML = html;
-  }
-  panel.classList.add('show');
-  positionHoverPanel(panel, box);
-}
-function scheduleAlarmsPanelClose(){
-  if(alarmPanelCloseTimer) clearTimeout(alarmPanelCloseTimer);
-  alarmPanelCloseTimer = setTimeout(function(){
-    var panel = document.getElementById('alarmpanel');
-    if(panel) panel.classList.remove('show');
-    alarmPanelCloseTimer = null;
-  }, 300);
-}
 
 function cycleTracksClr(){
   var idx = TRACKS_CLR_CYCLE.indexOf(tracksClr);
