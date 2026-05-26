@@ -70,6 +70,7 @@ const DEFAULT_PORT = 3001;
 const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
 const NOTIF_POLL_MS_UNDOCKED = 60 * 1000; // notifications poll interval when robot is active
 const NOTIF_POLL_MS_DOCKED = 5 * 60 * 1000; // notifications poll interval when robot is parked
+const SCHEDULE_TIMEZONE_DEFAULT = 'Europe/Stockholm'; // garden tz fallback if not configured
 const PERSIST_DEFAULT_DIR = '/dev/shm';
 const PERSIST_INTERVAL_MS = 60 * 1000; // flush cached crumbs to disk every minute when persistence is enabled
 const PERSIST_DEFAULT_DAYS = 14;
@@ -99,6 +100,7 @@ class WebStatusProcessor {
         this.username = options.username;
         this.password = options.password;
         this.basicAuth = this._parseBasicAuth(options.auth);
+        this.scheduleTimezone = options.scheduleTimezone || SCHEDULE_TIMEZONE_DEFAULT;
         this.perimeters = undefined;
         this.notifications = [];
         this.cloudServer = undefined;
@@ -707,6 +709,7 @@ class WebStatusProcessor {
             baseLng: this.location.longitude,
             pollMs: POLL_MS,
             notifPollMs: NOTIF_POLL_MS_UNDOCKED,
+            scheduleTimezone: this.scheduleTimezone,
         });
         return `<!DOCTYPE html>
 <html lang="en">
@@ -1534,33 +1537,43 @@ function batterySparkSVG(){
     '</svg>';
 }
 
-// Walk the schedule forward from "now" and return up to maxEntries upcoming sessions, oldest
-// first. Each entry: { date, dayName, displayTime, startTime, durationMinutes, daysAway }.
-// Empty array if scheduling is disabled or has no blocks.
+// Extract "now" in the schedule's home timezone — Stockholm by default. The robot's schedule
+// blocks are defined in that local time, so the client must not use its own browser timezone
+// for the comparison. Intl.DateTimeFormat is the standard way to get day-of-week / hour /
+// minute for an arbitrary IANA zone without a third-party library.
+var SCHEDULE_TZ_FMT = null;
+function nowInScheduleTz(){
+  var tz = (CONFIG && CONFIG.scheduleTimezone) || 'Europe/Stockholm';
+  if(!SCHEDULE_TZ_FMT) SCHEDULE_TZ_FMT = new Intl.DateTimeFormat('en-GB', { timeZone: tz, weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+  var parts = SCHEDULE_TZ_FMT.formatToParts(new Date());
+  var weekday = parts.find(function(p){ return p.type === 'weekday'; }).value;
+  var hour = Number.parseInt(parts.find(function(p){ return p.type === 'hour'; }).value, 10);
+  var minute = Number.parseInt(parts.find(function(p){ return p.type === 'minute'; }).value, 10);
+  // schedule day index: Mon=0..Sun=6 (matches what the protobuf decoder produces)
+  var dayMap = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+  return { dayIndex: dayMap[weekday], hour: hour, minute: minute, nowMin: hour * 60 + minute };
+}
+
+// Walk the schedule forward from "now" (in the garden's timezone) and return up to maxEntries
+// upcoming sessions, oldest first. Each entry: { dayName, displayTime, startTime,
+// durationMinutes, daysAway }. Empty array if scheduling is disabled or has no blocks.
 function upcomingScheduledSessions(maxEntries){
   var max = maxEntries || 5;
   if(!state || !state.robot || !state.robot.schedule) return [];
   var s = state.robot.schedule;
   if(!s.enabled || !s.blocks || s.blocks.length === 0) return [];
-  var now = new Date();
-  // JS day-of-week (Sun=0..Sat=6) -> schedule day index (Mon=0..Sun=6)
-  var todayScheduleIdx = (now.getDay() + 6) % 7;
-  var nowMin = now.getHours() * 60 + now.getMinutes();
+  var now = nowInScheduleTz();
   var out = [];
   for(var offset = 0; offset < 8 && out.length < max; offset++){
-    var scheduleDay = (todayScheduleIdx + offset) % 7;
+    var scheduleDay = (now.dayIndex + offset) % 7;
     var bucket = s.blocks
       .filter(function(b){ return b.dayIndex === scheduleDay; })
       .sort(function(a, b){ return a.startHour * 60 + a.startMinute - (b.startHour * 60 + b.startMinute); });
     for(var i = 0; i < bucket.length; i++){
       var b = bucket[i];
       var blockMin = b.startHour * 60 + b.startMinute;
-      if(offset === 0 && blockMin <= nowMin) continue;
-      var dt = new Date(now);
-      dt.setDate(dt.getDate() + offset);
-      dt.setHours(b.startHour, b.startMinute, 0, 0);
+      if(offset === 0 && blockMin <= now.nowMin) continue;
       out.push({
-        date: dt,
         dayName: b.dayName,
         displayTime: b.displayTime,
         startTime: (b.displayTime || '').split('-')[0],
@@ -1594,22 +1607,19 @@ function currentScheduledSession(){
   if(!state || !state.robot || !state.robot.schedule) return null;
   var s = state.robot.schedule;
   if(!s.enabled || !s.blocks || s.blocks.length === 0) return null;
-  var now = new Date();
-  var todayIdx = (now.getDay() + 6) % 7;
-  var nowMin = now.getHours() * 60 + now.getMinutes();
+  var now = nowInScheduleTz();
   for(var i = 0; i < s.blocks.length; i++){
     var b = s.blocks[i];
-    if(b.dayIndex !== todayIdx) continue;
+    if(b.dayIndex !== now.dayIndex) continue;
     var startMin = b.startHour * 60 + b.startMinute;
     var endMin = startMin + (b.durationMinutes || 0);
-    if(nowMin >= startMin && nowMin < endMin){
+    if(now.nowMin >= startMin && now.nowMin < endMin){
       var endHour = Math.floor(endMin / 60);
       var endMinute = endMin % 60;
-      var endDate = new Date(now);
-      endDate.setHours(endHour, endMinute, 0, 0);
+      // Everything's now in Stockholm minutes-of-day, so the remaining delta is a simple subtract.
       return {
         endTime: endHour + ':' + String(endMinute).padStart(2, '0'),
-        remainingMin: Math.max(0, Math.round((endDate.getTime() - now.getTime()) / 60000))
+        remainingMin: Math.max(0, endMin - now.nowMin)
       };
     }
   }

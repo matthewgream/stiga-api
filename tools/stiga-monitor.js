@@ -63,7 +63,7 @@ class StigaMonitor {
     }
 
     async start() {
-        const { username, password, referencePosition, mapsApiKey } = require('../api/StigaAPIConfig').load();
+        const { username, password, referencePosition, mapsApiKey, scheduleTimezone } = require('../api/StigaAPIConfig').load();
         const lat = this.config.location_lat ?? referencePosition?.latitude;
         const lon = this.config.location_lon ?? referencePosition?.longitude;
         if (lat === undefined || lon === undefined) throw new Error('stiga-monitor: RTK reference origin not set; provide --location_lat/--location_lon or referencePosition in stiga-config.js');
@@ -130,7 +130,7 @@ class StigaMonitor {
             const apiKey = this.config.apikey ?? mapsApiKey;
             if (!apiKey) throw new Error('stiga-monitor: --webstatus requires a Google Maps API key; provide --apikey=KEY or set mapsApiKey in stiga-config.js');
             const { webstatus_auth: auth, persist, persistDays } = this.config;
-            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth, persist, persistDays });
+            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth, persist, persistDays, scheduleTimezone });
             this.processors.push(webstatus);
             this.displayLocal.updateStatus('webstatus', `port:${port}${auth ? ' auth' : ''}${persist ? ' persist' : ''}`);
         }
