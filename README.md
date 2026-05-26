@@ -61,6 +61,14 @@ The following is a set of rolling updates, each new entry may update/obsolete so
 
 ---
 
+## Update (26 May 2026)
+
+A lot of updates over the last two weeks. None of these are breaking/changes (I hope), but are all enhancements onto last years functionality, namely (1) supporting additional commands in stiga-command.js and in the API when needed (e.g. perimeters); (b) building out a "webstatus" in stiga-monitor.js, which is great for desktop side monitoring; (c) tidying up error messages, terminology (e.g. gnss/rtk, etc) and "polish"; (d) supporting a config file with reference, authentication, api keys and more (removing hard coded gnss reference points for example); (e) add scripts directory with add hoc scripts for probing/accessing the API in ways that are not yet API supported or understood.
+
+It's probably at a reasonably stable point that there will not be any more major changes for some weeks. We un-hiberneted the mower and this is the large noise that happens!
+
+Next, I want to revisit the reverse engineering to understand zone settings and other messages and functionality. We'll see when we get up to that.
+
 ## Update (23 May 2026)
 
 Significantly expanded `--webstatus`; you can run it like this:
@@ -80,14 +88,6 @@ https://workshop.local:3001/?boxStatus=rt&mapControls=off&tracks=on&tracksClr=3&
 This (a) moves the status box to the right-top; (b) turns off the map controls (zoom, etc) so just use mouse; (c) shows the robots tracks by default; (d) clears the tracks after three zones (so you see up to three zones of history); (e) turns off the battery sparkline, (f) shows the map at an offset of 38cm/4.6m from the computed centre of the garden [check the browser console for help with this], (g) turns on the command box ("start", "stop", "home"). This is a kind of kiosk mode.
 
 ![Webstatus](assets/webstatus.jpg)
-
-## Update (26 May 2026)
-
-A lot of updates over the last two weeks. None of these are breaking/changes (I hope), but are all enhancements onto last years functionality, namely (1) supporting additional commands in stiga-command.js and in the API when needed (e.g. perimeters); (b) building out a "webstatus" in stiga-monitor.js, which is great for desktop side monitoring; (c) tidying up error messages, terminology (e.g. gnss/rtk, etc) and "polish"; (d) supporting a config file with reference, authentication, api keys and more (removing hard coded gnss reference points for example); (e) add scripts directory with add hoc scripts for probing/accessing the API in ways that are not yet API supported or understood.
-
-It's probably at a reasonably stable point that there will not be any more major changes for some weeks. We un-hiberneted the mower and this is the large noise that happens!
-
-Next, I want to revisit the reverse engineering to understand zone settings and other messages and functionality. We'll see when we get up to that.
 
 ## Update (22 May 2026)
 
