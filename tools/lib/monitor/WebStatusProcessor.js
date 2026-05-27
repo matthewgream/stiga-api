@@ -1573,12 +1573,16 @@ function upcomingScheduledSessions(maxEntries){
       var b = bucket[i];
       var blockMin = b.startHour * 60 + b.startMinute;
       if(offset === 0 && blockMin <= now.nowMin) continue;
+      // Minutes from now until this block starts. Today is a simple subtract; future days
+      // assume 24h per day — fine for a "(in XhYm)" hint, DST jitter is acceptable.
+      var minutesUntil = offset === 0 ? (blockMin - now.nowMin) : ((24 * 60 - now.nowMin) + (offset - 1) * 24 * 60 + blockMin);
       out.push({
         dayName: b.dayName,
         displayTime: b.displayTime,
         startTime: (b.displayTime || '').split('-')[0],
         durationMinutes: b.durationMinutes,
-        daysAway: offset
+        daysAway: offset,
+        minutesUntil: minutesUntil
       });
       if(out.length >= max) break;
     }
@@ -1627,10 +1631,11 @@ function currentScheduledSession(){
 }
 
 // One-line status row text. States:
-//   "Inactive"                                — schedule disabled
-//   "Active (no sessions)"                    — enabled but no blocks defined
-//   "Until 11:00 (1h5m)"                      — currently inside a scheduled block
-//   "Today at 09:00 for 2h0m" / "Tomorrow …"  — before the next block
+//   "Inactive"                                       — schedule disabled
+//   "Active (no sessions)"                           — enabled but no blocks defined
+//   "Until 11:00 (1h5m)"                             — currently inside a scheduled block
+//   "Today at 09:00 for 2h (in 1h3m)"                — today, future block; (in …) is countdown
+//   "Tomorrow at 09:00 for 2h" / "Wednesday at …"    — non-today, just the day label is enough
 function formatScheduleSummary(){
   if(!state || !state.robot || !state.robot.schedule) return '-';
   var s = state.robot.schedule;
@@ -1640,7 +1645,10 @@ function formatScheduleSummary(){
   var sessions = upcomingScheduledSessions(1);
   if(sessions.length === 0) return 'Active (no sessions)';
   var n = sessions[0];
-  return scheduleWhenLabel(n.daysAway, n.dayName) + ' at ' + n.startTime + ' for ' + fmtScheduleDuration(n.durationMinutes);
+  var line = scheduleWhenLabel(n.daysAway, n.dayName) + ' at ' + n.startTime + ' for ' + fmtScheduleDuration(n.durationMinutes);
+  // For today's upcoming block, append a "(in …)" countdown so the user can see how soon.
+  if(n.daysAway === 0 && typeof n.minutesUntil === 'number' && n.minutesUntil > 0) line += ' (in ' + fmtScheduleDuration(n.minutesUntil) + ')';
+  return line;
 }
 
 // MQTT link health, derived from the freshest update timestamp across both endpoints.
