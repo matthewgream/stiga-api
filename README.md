@@ -135,7 +135,7 @@ Next, I want to revisit the reverse engineering to understand zone settings and 
 Significantly expanded `--webstatus`; you can run it like this:
 
 ```bash
-tools/stiga-monitor.js --webstatus=3001/password --monitor --persist --persist-days=24
+tools/stiga-monitor.js --webstatus=3001/password --monitor --persist --persist-days=28
 ```
 
 Which will (a) cache and persist status and position information for up to 28 days; (b) render a webserver on port 3001 with http authentication `password` to show the status of the robot, including its recent positions and status.
