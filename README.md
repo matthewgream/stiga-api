@@ -33,6 +33,67 @@ Installation check:
   [OK]   base status: op=STANDBY
 ```
 
+```
+root@workshop:/opt/stiga-api# tools/stiga-command.js
+Usage: stiga-command [options] <command> [params...]
+
+Options:
+  --robot              Select/Add robot as target
+  --base               Select/Add base station as target
+  --both               Select both robot and base station as targets (default)
+  --debug              Enable debug output (on stderr)
+  --level <lvl>        Output level: quiet (errors only), normal (default), verbose (extra diagnostics on stderr)
+  --format <fmt>       Output format: none (suppress), text (default), json (one JSON object per line)
+  --watch [secs]       Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)
+  --passive            Alias for --watch 0 (passive listen, no polling)
+  --username <u>       Override username credential from stiga-config.js
+  --password <p>       Override password credentials from stiga-config.js
+  --mqtt-broker <id>   Override MQTT broker suffix (e.g. broker, broker1, broker2)
+
+Configuration (resolved in order, first match wins):
+  1. --username/--password command-line flags (credentials only)
+  2. $STIGA_CONFIG environment variable (path to a config file)
+  3. stiga-config.<hostname>.js  (this host: stiga-config.workshop.js)
+  4. stiga-config.js
+
+Commands (| separates aliases, any unique prefix also matches):
+  version                        Get firmware/hardware version (robot, base)
+  status [types...]              Get operation/battery/mowing/location/network status (robot, base)
+  schedule [subcommand]          Display/enable/disable/insert/remove mowing schedule (robot)
+  settings                       Display device settings (robot, base)
+  start                          Start mowing (robot)
+  stop                           Stop the robot (robot)
+  go-home|home                   Send the robot home to dock (robot)
+  calibrate-blades|blades        Calibrate the cutting blades (robot)
+  info|describe                  Dump all known information for the selected target(s) (robot, base)
+  check                          Step-by-step installation/connectivity health check (robot, base)
+  perimeters                     Display garden zones and obstacles from the cloud (robot)
+  user                           Display the cloud account profile (robot, base)
+  notifications [qualifier...]   Display device notifications/events from the cloud (robot, base)
+
+For command-specific help:
+  stiga-command <command> help
+
+Examples:
+  stiga-command --robot version
+  stiga-command --robot status
+  stiga-command --robot schedule
+  stiga-command --robot settings
+  stiga-command --robot start
+  stiga-command --robot stop
+  stiga-command --robot go-home
+  stiga-command --robot calibrate-blades
+  stiga-command --robot info
+  stiga-command check
+  stiga-command perimeters
+  stiga-command user
+  stiga-command notifications
+  stiga-command --robot --watch
+  stiga-command --robot --watch 0 --debug
+  stiga-command --robot --watch 0 --format json --level quiet | jq .
+  stiga-command --robot status --format json --level quiet | jq .
+```
+
 ---
 
 ## Usage
