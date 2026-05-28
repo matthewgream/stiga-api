@@ -138,6 +138,7 @@ class WebStatusProcessor {
             },
             robot: {
                 mac: options.robotMac,
+                name: undefined,
                 latitude: undefined,
                 longitude: undefined,
                 offsetDistanceMetres: undefined,
@@ -615,6 +616,11 @@ class WebStatusProcessor {
         if (!(await garage.load())) throw new Error('garage load failed');
         const device = garage.getDevice(this.connection.getRobotMac()) || (garage.getDevices() || [])[0];
         if (!device) throw new Error('no device in garage');
+        // User-assigned device name from the cloud (e.g. "Stiga Stuga"). Surfaced in the
+        // webstatus title so the kiosk shows the user's pet name instead of a generic label.
+        // Falls back to undefined; client renders "Stiga Robot" when absent.
+        const deviceName = (await device.getName())?.value;
+        if (deviceName) this.state.robot.name = deviceName;
         const perimeters = new StigaAPIPerimeters(server, device);
         if (!(await perimeters.load())) throw new Error('perimeter load failed');
 
@@ -1913,7 +1919,7 @@ function renderStatusBox(){
     '</div>';
   }
   box.innerHTML =
-    '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>Stiga Robot' + linkTag + '</h1>' +
+    '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
     row('State', place) + row('Status', op) + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + zoneLastRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
   attachZonePanelHover();
