@@ -19,6 +19,18 @@ function _candidates() {
 let _cached;
 let _warnedLegacy = false;
 
+// Apply the broker override (if any) as a one-time side effect of loading config, so any
+// tool that calls load() picks it up automatically — no per-tool wiring needed. Required to
+// fix robots whose garage metadata reports a brokerId (e.g. 'broker1') that doesn't actually
+// accept MQTT, where 'broker' (no suffix) is the working endpoint. See issue #7.
+function _applyBrokerOverride(cfg) {
+    if (cfg && cfg.brokerOverride) {
+        // Lazy-require to avoid pulling MQTT/mqtt.js into tools that only need the config
+        // fields and never make an MQTT connection (e.g. cloud-only probe scripts).
+        require('./StigaAPIConnectionMQTT').brokerOverride = cfg.brokerOverride;
+    }
+}
+
 function load() {
     if (_cached) return _cached;
     const tried = [];
@@ -29,6 +41,7 @@ function load() {
                 process.emitWarning(`${p} is deprecated; rename to stiga-config.js and add { referencePosition: { latitude, longitude } }`, 'DeprecationWarning');
                 _warnedLegacy = true;
             }
+            _applyBrokerOverride(_cached);
             return _cached;
         } catch (e) {
             if (e.code !== 'MODULE_NOT_FOUND') throw e;

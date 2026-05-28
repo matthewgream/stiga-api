@@ -12,6 +12,7 @@ const {
     StigaAPIUser,
     StigaAPINotifications,
     StigaAPIConnectionDevice,
+    StigaAPIConnectionMQTT,
     StigaAPIDeviceConnector,
     StigaAPIBaseConnector,
     StigaAPIConfig,
@@ -87,6 +88,7 @@ function parseArgs() {
         format: 'text',
         username: undefined,
         password: undefined,
+        mqttBroker: undefined,
     };
     let i = 0;
     while (i < args.length) {
@@ -123,6 +125,13 @@ function parseArgs() {
         } else if (args[i] === '--password') {
             if (i + 1 >= args.length) throw new Error('--password requires a value');
             options.password = args[++i];
+            i++;
+        } else if (args[i] === '--mqtt-broker') {
+            if (i + 1 >= args.length) throw new Error('--mqtt-broker requires a value (e.g. broker, broker1, broker2)');
+            options.mqttBroker = args[++i];
+            i++;
+        } else if (args[i].startsWith('--mqtt-broker=')) {
+            options.mqttBroker = args[i].slice('--mqtt-broker='.length);
             i++;
         } else if (args[i] === '--format') {
             if (i + 1 >= args.length) throw new Error('--format requires a value (text|json|none)');
@@ -824,6 +833,7 @@ registerCommand(['info', 'describe'], {
 async function runChecks(credentials, target) {
     const counts = { ok: 0, fail: 0, skip: 0 };
     const unmet = new Set();
+    const failures = new Map(); // step name -> failure detail (for diagnostic hints at the end)
     const state = {};
 
     const record = (name, status, detail) => {
@@ -832,6 +842,7 @@ async function runChecks(credentials, target) {
         display.json({ source: 'check', kind: 'step', name, status, detail: detail ?? null });
         counts[status]++;
         if (status !== 'ok') unmet.add(name);
+        if (status === 'fail') failures.set(name, detail);
     };
 
     const step = async (name, requires, fn) => {
@@ -948,6 +959,26 @@ async function runChecks(credentials, target) {
     const skipTail = counts.skip ? `, ${counts.skip} skipped` : '';
     display.text(`Result: ${counts.ok} ok, ${counts.fail} fail${skipTail}`);
     display.json({ source: 'check', kind: 'summary', ok: counts.ok, fail: counts.fail, skip: counts.skip });
+
+    // Common-failure hint: if MQTT couldn't connect at all (timeout / no response from the
+    // broker the cloud told us to use), that hostname may not be reachable for this account.
+    // Some robots report a brokerId — e.g. 'broker1' — whose hostname doesn't actually accept
+    // connections, even though the unsuffixed 'broker' (or 'broker2') endpoint works. Rather
+    // than silently remap (which could break other accounts), point the user at the override.
+    // See issue #7.
+    if (failures.has('mqtt connect')) {
+        const reportedBroker = (await state.device?.getBrokerId?.())?.value;
+        const reported = reportedBroker || '(empty — fallback)';
+        const currentOverride = StigaAPIConnectionMQTT.brokerOverride;
+        display.text('');
+        display.text(`Hint: 'mqtt connect' failed (${failures.get('mqtt connect')}).`);
+        display.text(`  Cloud reports broker='${reported}', resolved hostname robot-mqtt-${currentOverride || reportedBroker || 'broker'}.stiga.com:8883.`);
+        display.text(`  Some robots need an override. Try probing the other endpoints without editing config:`);
+        display.text(`    tools/stiga-command.js check --mqtt-broker=broker     (unsuffixed / fallback)`);
+        display.text(`    tools/stiga-command.js check --mqtt-broker=broker2`);
+        display.text(`  Once you find the one that works, pin it in stiga-config.js with brokerOverride: 'broker'. See issue #7.`);
+        display.json({ source: 'check', kind: 'hint', topic: 'mqtt-broker-override', cloudBrokerId: reportedBroker || null, currentOverride: currentOverride || null });
+    }
 
     if (counts.fail > 0) throw throwExit(`check failed (${counts.fail} failure${counts.fail === 1 ? '' : 's'})`, 3);
 }
@@ -1201,16 +1232,17 @@ registerCommand('notifications', {
 async function showGeneralHelp() {
     display.log('Usage: stiga-command [options] <command> [params...]');
     display.log('\nOptions:');
-    display.log('  --robot          Select/Add robot as target');
-    display.log('  --base           Select/Add base station as target');
-    display.log('  --both           Select both robot and base station as targets (default)');
-    display.log('  --debug          Enable debug output (on stderr)');
-    display.log('  --level <lvl>    Output level: quiet (errors only), normal (default), verbose (extra diagnostics on stderr)');
-    display.log('  --format <fmt>   Output format: none (suppress), text (default), json (one JSON object per line)');
-    display.log('  --watch [secs]   Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
-    display.log('  --passive        Alias for --watch 0 (passive listen, no polling)');
-    display.log('  --username <u>   Override username credential from stiga-config.js');
-    display.log('  --password <p>   Override password credentials from stiga-config.js');
+    display.log('  --robot              Select/Add robot as target');
+    display.log('  --base               Select/Add base station as target');
+    display.log('  --both               Select both robot and base station as targets (default)');
+    display.log('  --debug              Enable debug output (on stderr)');
+    display.log('  --level <lvl>        Output level: quiet (errors only), normal (default), verbose (extra diagnostics on stderr)');
+    display.log('  --format <fmt>       Output format: none (suppress), text (default), json (one JSON object per line)');
+    display.log('  --watch [secs]       Watch and show events: request status every "secs" (default 5) if idle; 0 = passive (no polling)');
+    display.log('  --passive            Alias for --watch 0 (passive listen, no polling)');
+    display.log('  --username <u>       Override username credential from stiga-config.js');
+    display.log('  --password <p>       Override password credentials from stiga-config.js');
+    display.log('  --mqtt-broker <id>   Override MQTT broker suffix (e.g. broker, broker1, broker2)');
     display.log('\nConfiguration (resolved in order, first match wins):');
     display.log('  1. --username/--password command-line flags (credentials only)');
     display.log('  2. $STIGA_CONFIG environment variable (path to a config file)');
@@ -1280,6 +1312,10 @@ async function main() {
         display.error(e.message);
         process.exit(1);
     }
+
+    // CLI --mqtt-broker wins over any value applied from stiga-config.js. Setting the static
+    // here, before any connection is created, means every subsequent MQTT connect uses it.
+    if (options.mqttBroker) StigaAPIConnectionMQTT.brokerOverride = options.mqttBroker;
 
     if (cmd?.skipDefaultSetup) {
         try {

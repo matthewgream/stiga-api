@@ -11,8 +11,19 @@ const StigaAPIComponent = require('./StigaAPIComponent');
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 class StigaAPIConnectionMQTT extends StigaAPIComponent {
+    // Some devices report a brokerId in the garage metadata (e.g. 'broker1', 'broker2') that
+    // doesn't match the broker that actually accepts their MQTT connection. When this static
+    // is set it overrides whatever the cloud reports, so config (or a CLI flag) can pin the
+    // working broker for that account. See issue #7 for context — STIGA A 500 with garage
+    // broker='broker1' but only robot-mqtt-broker.stiga.com (the unsuffixed fallback) accepts
+    // connections. Set via stiga-config.js's `brokerOverride` field, --mqtt-broker CLI flag,
+    // or by writing directly to this property. Honoured by getBrokerURL below.
+    // eslint-disable-next-line sonarjs/public-static-readonly
+    static brokerOverride = undefined;
+
     static getBrokerURL(brokerId) {
-        return `mqtts://robot-mqtt-${brokerId || 'broker'}.stiga.com:8883`;
+        const id = StigaAPIConnectionMQTT.brokerOverride || brokerId || 'broker';
+        return `mqtts://robot-mqtt-${id}.stiga.com:8883`;
     }
     static getBrokerUsername() {
         return 'firebaseauth|connectivity-production.stiga.com';

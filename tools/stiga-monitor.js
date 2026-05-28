@@ -64,6 +64,9 @@ class StigaMonitor {
 
     async start() {
         const { username, password, referencePosition, mapsApiKey, scheduleTimezone } = require('../api/StigaAPIConfig').load();
+        // CLI --mqtt-broker beats stiga-config.js's brokerOverride. Setting this static here,
+        // before any connection is constructed, ensures every subsequent MQTT connect uses it.
+        if (this.config.mqttBroker) require('../api/StigaAPI').StigaAPIConnectionMQTT.brokerOverride = this.config.mqttBroker;
         const lat = this.config.location_lat ?? referencePosition?.latitude;
         const lon = this.config.location_lon ?? referencePosition?.longitude;
         if (lat === undefined || lon === undefined) throw new Error('stiga-monitor: RTK reference origin not set; provide --location_lat/--location_lon or referencePosition in stiga-config.js');
@@ -167,11 +170,12 @@ Processor Options:
   --capture[=database]         Enable capture mode (default: capture.db)
   --listen[=filename]          Enable listen mode (default: listen.log)
   --intercept[=port]           Enable intercept mode (default: 8083)
-  --webstatus[=port[/creds]]   Enable real-time status web page (default port: 3001).
+  --webstatus[=port[/creds]]   Enable real-time status web page (default port: 3001)
                                creds = user:pass (full basic-auth) or pass (any user)
-  --persist[=dir]              Persist breadcrumb trail to disk across restarts.
-                               Default dir: /dev/shm. Implies --webstatus context.
-  --persist-days=N             Crumb retention in days (default 14, only with --persist).
+  --persist[=dir]              Persist breadcrumb trail to disk across restarts
+                               Default dir: /dev/shm. Implies --webstatus context
+  --persist-days=N             Crumb retention in days (default 14, only with --persist)
+  --mqtt-broker=id             Override MQTT broker suffix (e.g. broker, broker1, broker2)
 
 Configuration:
   --directory=dir              Data directory (default: '/opt/stiga-api/data')
@@ -231,6 +235,9 @@ function parseArgs() {
                     break;
                 case 'persist-days':
                     config.persistDays = Number.parseFloat(value);
+                    break;
+                case 'mqtt-broker':
+                    config.mqttBroker = value;
                     break;
                 case 'listen':
                     config.listen = value || true;
