@@ -723,6 +723,7 @@ class WebStatusProcessor {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stiga Robot — Live Status</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect y='21' width='32' height='11' fill='%23137333'/><path fill='%2334a853' d='M2 21 L3 11 L4 21 Z M6 21 L7 13 L8 21 Z M10 21 L11 10 L12 21 Z M13 21 L14 14 L15 21 Z M17 21 L18 9 L19 21 Z M21 21 L22 12 L23 21 Z M25 21 L26 11 L27 21 Z M29 21 L30 13 L31 21 Z'/></svg>">
 <style>${PAGE_CSS}</style>
 </head>
 <body>
@@ -1035,7 +1036,16 @@ function ago(iso){
   var s = Math.round((Date.now() - new Date(iso).getTime())/1000);
   if(s < 60) return s + 's ago';
   if(s < 3600) return Math.round(s/60) + 'm ago';
-  return Math.round(s/3600) + 'h ago';
+  if(s < 86_400){
+    var hr = Math.round(s/3600);
+    if(hr < 24) return hr + 'h ago';
+    // round-up lands on a full day boundary — drop through to the day formatter
+  }
+  // 24h+: split into days + hours so "166h ago" reads as "6d22h ago".
+  var d = Math.floor(s / 86_400);
+  var h = Math.round((s % 86_400) / 3600);
+  if(h === 24){ d++; h = 0; }
+  return h === 0 ? (d + 'd ago') : (d + 'd' + h + 'h ago');
 }
 
 function initMap(){
@@ -1758,7 +1768,6 @@ function attachSchedPanelHover(){
   var trigger = box && box.querySelector('.sched-trigger');
   if(!trigger) return;
   if(!state || !state.robot || !state.robot.schedule || !state.robot.schedule.enabled) return;
-  trigger.style.cursor = 'help';
   trigger.addEventListener('mouseenter', showSchedPanel);
   trigger.addEventListener('mouseleave', scheduleSchedPanelClose);
   var panel = document.getElementById('schedpanel');
