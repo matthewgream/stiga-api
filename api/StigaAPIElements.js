@@ -195,7 +195,7 @@ const ROBOT_COMMAND_TYPES = {
     32: 'CLOUDSYNC_REQUEST',
     //  37:
     38: 'FORCE_CUT',
-    //  40:
+    40: 'GO_AWAY',
     47: 'ZONE_ORDER_UPDATE',
     51: 'FORCE_BORDER_CUT',
 };
@@ -467,6 +467,56 @@ function decodeRobotForceCut(decoded) {
     if (typeof decoded === 'string') return Number.parseInt(decoded, 16);
     if (Buffer.isBuffer(decoded)) return decoded[0];
     return Number(decoded);
+}
+
+// GO_AWAY (command 40) — a temporary circular avoid-obstacle pushed to the robot in real time.
+// The command payload [2] is, reverse engineered byte-exact (2026-06-04):
+//   { 1:3, 3:4 (fixed constants), 6: secondsUntilExpiry, 7: { 1:{1:eastM, 2:northM}, 2: radiusM },
+//     8: "Bearer <jwt>", 9: perimeter url }
+// The centre east/north and the radius are wire FIXED32 floats (not doubles, not varints) — even an
+// integer radius like 2 must be written as a fixed32 float, so we build field 7 by hand.
+function _encodeFixed32Float(field, value) {
+    const buffer = Buffer.alloc(5);
+    buffer[0] = (field << 3) | 5; // wire type 5 = 32-bit
+    buffer.writeFloatLE(value, 1);
+    return buffer;
+}
+function encodeRobotGoAway({ east, north, radius, expirySeconds, auth, url }) {
+    const point = Buffer.concat([_encodeFixed32Float(1, east), _encodeFixed32Float(2, north)]);
+    const placement = Buffer.concat([
+        Buffer.from([(1 << 3) | 2, point.length]), // [7][1] = point sub-message (length-delimited, <128 bytes)
+        point,
+        _encodeFixed32Float(2, radius), // [7][2] = radius
+    ]);
+    return protobufEncode({ 1: 3, 3: 4, 6: expirySeconds, 7: placement, 8: auth, 9: url });
+}
+function decodeRobotGoAway(decoded) {
+    if (!decoded) return undefined;
+    const point = decoded[7]?.[1];
+    return upgradeRobotGoAway({
+        east: point?.[1],
+        north: point?.[2],
+        radius: decoded[7]?.[2],
+        expirySeconds: decoded[6],
+        url: decoded[9],
+    });
+}
+function formatRobotGoAway(goAway) {
+    if (!goAway) return undefined;
+    return formatStruct(
+        {
+            centre: `${(+goAway.east).toFixed(2)},${(+goAway.north).toFixed(2)}`,
+            radius: goAway.radius,
+            expiresInDays: goAway.expirySeconds === undefined ? undefined : +(goAway.expirySeconds / 86400).toFixed(1),
+            url: goAway.url,
+        },
+        'goAway',
+        { centre: { units: 'm' }, radius: { units: 'm' }, expiresInDays: { units: 'd' } }
+    );
+}
+function upgradeRobotGoAway(goAway) {
+    goAway.toString = () => formatRobotGoAway(goAway);
+    return goAway;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1219,6 +1269,9 @@ module.exports = {
     formatRobotCloudSync,
     encodeRobotForceCut,
     decodeRobotForceCut,
+    encodeRobotGoAway,
+    decodeRobotGoAway,
+    formatRobotGoAway,
     createRobotScheduleSettings,
     encodeRobotScheduleSettings,
     decodeRobotScheduleSettings,

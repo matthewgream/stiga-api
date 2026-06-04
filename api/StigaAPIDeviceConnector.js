@@ -13,6 +13,7 @@ const {
     encodeRobotCommand,
     encodeRobotCloudSync,
     encodeRobotForceCut,
+    encodeRobotGoAway,
     encodeRobotStatusRequestTypes,
     encodeRobotSettings,
     encodeRobotScheduleSettings,
@@ -377,6 +378,9 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     }
     async sendForceBorderCut(zone) {
         return this._commandRequest(ROBOT_COMMAND_IDS.FORCE_BORDER_CUT, encodeRobotForceCut(zone), undefined, 'command');
+    }
+    async sendGoAway(auth, url, { east, north, radius, expirySeconds }) {
+        return this._commandRequest(ROBOT_COMMAND_IDS.GO_AWAY, encodeRobotGoAway({ east, north, radius, expirySeconds, auth, url }), undefined, 'command');
     }
 
     //

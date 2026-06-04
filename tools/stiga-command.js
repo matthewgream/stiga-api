@@ -48,7 +48,8 @@ const aliases = {};
 function registerCommand(names, config) {
     const [primary, ...rest] = Array.isArray(names) ? names : [names];
     commands[primary] = { ...config, name: primary, aliases: rest };
-    for (const alias of rest) aliases[alias] = primary;
+    // store alias lookup keys lower-cased so resolution is case-insensitive (e.g. goAway == goaway)
+    for (const alias of rest) aliases[alias.toLowerCase()] = primary;
 }
 
 function resolveCommand(name) {
@@ -56,8 +57,8 @@ function resolveCommand(name) {
     if (commands[key]) return commands[key];
     if (aliases[key]) return commands[aliases[key]];
     const matches = new Set();
-    for (const n of Object.keys(commands)) if (n.startsWith(key)) matches.add(n);
-    for (const [a, p] of Object.entries(aliases)) if (a.startsWith(key)) matches.add(p);
+    for (const n of Object.keys(commands)) if (n.toLowerCase().startsWith(key)) matches.add(n);
+    for (const [a, p] of Object.entries(aliases)) if (a.toLowerCase().startsWith(key)) matches.add(p);
     if (matches.size === 0) return undefined;
     if (matches.size === 1) return commands[[...matches][0]];
     throw new Error(`Ambiguous command '${name}': matches ${[...matches].join(', ')}`);
@@ -748,6 +749,46 @@ registerCommand(['force-border-cut', 'forceBorderCut', 'border-cut'], {
         const zone = Number.parseInt(context.params[0], 10);
         if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-border-cut requires a zone number, e.g. force-border-cut 2', 2);
         return executeRobotCommand('force-border-cut', (d) => d.sendForceBorderCut(zone), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['go-away', 'goAway', 'avoid'], {
+    description: 'Push a temporary circular GO_AWAY obstacle to the robot (real-time avoid)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot go-away <lat> <lng> <radius_m> [expiry_days]',
+    summary: 'Tell the robot to avoid a circle at lat/lng now (MQTT push only).',
+    details: [
+        '',
+        'NOTE: this only pushes the real-time GO_AWAY command over MQTT. It does NOT add the obstacle',
+        'to the cloud perimeter (tempObstacles), so it will not persist across a full re-sync. To make',
+        'it permanent the caller must also update the cloud perimeter — left to the API client.',
+    ],
+    examples: ['stiga-command --robot go-away 59.6620665 12.9959925 2 30'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        const { auth } = connectors;
+        const lat = Number.parseFloat(context.params[0]),
+            lng = Number.parseFloat(context.params[1]),
+            radius = Number.parseFloat(context.params[2]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radius)) throw throwExit('go-away requires <lat> <lng> <radius_m>, e.g. go-away 59.662 12.996 2', 2);
+        const days = Number.isFinite(Number.parseFloat(context.params[3])) ? Number.parseFloat(context.params[3]) : 30;
+        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+        const server = new StigaAPIConnectionServer(auth);
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+        const url = perimeters.getResourceUrl();
+        const ref = perimeters.getReferencePosition();
+        if (!url || !ref) throw throwExit('no perimeter / reference position available', 2);
+        // lat/lng -> ENU east/north metres, relative to the perimeter reference position
+        const placement = {
+            east: (lng - ref.longitude) * (111320 * Math.cos((ref.latitude * Math.PI) / 180)),
+            north: (lat - ref.latitude) * 111320,
+            radius,
+            expirySeconds: Math.round(days * 86400),
+        };
+        return executeRobotCommand('go-away', (d) => d.sendGoAway(`Bearer ${auth.token}`, url, placement), context);
     },
 });
 

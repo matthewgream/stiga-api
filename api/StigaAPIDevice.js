@@ -198,6 +198,9 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendForceBorderCut(zone) {
         return this._cmdViaConnector('sendForceBorderCut', zone);
     }
+    async sendGoAway(auth, url, placement) {
+        return this._cmdViaConnector('sendGoAway', auth, url, placement);
+    }
 
     //
 

@@ -41,6 +41,9 @@ function message_robot_CMD_ROBOT(decoded, { interpretation, fieldTracker }) {
             case 'FORCE_BORDER_CUT':
                 fieldTracker.add(addField(interpretation, 2, 'Zone', elements.decodeRobotForceCut(decoded[2])));
                 break;
+            case 'GO_AWAY':
+                fieldTracker.add(addField(interpretation, 2, 'Go-Away Obstacle', elements.formatRobotGoAway(elements.decodeRobotGoAway(decoded[2]))));
+                break;
         }
     if (decoded[3] !== undefined) {
         fieldTracker.add('3');
