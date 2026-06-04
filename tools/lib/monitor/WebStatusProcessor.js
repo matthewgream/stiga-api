@@ -150,6 +150,7 @@ class WebStatusProcessor {
                 statusText: undefined,
                 statusValid: undefined,
                 statusFlag: undefined,
+                interventionRequired: undefined,
                 battery: undefined,
                 mowing: undefined,
                 schedule: undefined,
@@ -325,6 +326,7 @@ class WebStatusProcessor {
         r.statusValid = elements.formatRobotStatusValid(elements.decodeRobotStatusValid(decoded[1]));
         r.statusFlag = elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]));
         r.docked = elements.formatRobotStatusDocking(elements.decodeRobotStatusDocking(decoded[13])).startsWith('yes');
+        r.interventionRequired = elements.decodeRobotStatusFlag(decoded[12]);
         if (decoded[17]) {
             const battery = elements.decodeRobotBatteryStatus(decoded[17]);
             r.battery = battery ? { charge: battery.charge, capacity: battery.capacity } : undefined;
@@ -765,6 +767,8 @@ html,body{margin:0;height:100%}
 #statusbox .row{display:flex;justify-content:space-between;gap:18px}
 #statusbox .k{color:#80868b}
 #statusbox .v{font-weight:600;text-align:right}
+#statusbox .v.alert{animation:statusAlertFlash 1.1s ease-in-out infinite;padding:1px 7px;border-radius:5px}
+@keyframes statusAlertFlash{0%,100%{background:#ffffff;color:#202124}50%{background:#ea4335;color:#ffffff}}
 #statusbox .muted{color:#9aa0a6;font-size:11px;margin-top:5px}
 .dot{width:9px;height:9px;border-radius:50%;margin-right:6px;display:inline-block}
 .infobox{font:12px/1.45 system-ui,Segoe UI,Arial,sans-serif;max-width:280px;color:#202124}
@@ -1700,8 +1704,8 @@ function linkState(){
   return { cls: 'offline', label: 'offline ' + Math.round(freshest / 60_000) + 'm' };
 }
 
-function row(k,v){
-  return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
+function row(k,v,vcls){
+  return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v' + (vcls ? ' ' + vcls : '') + '">' + esc(v) + '</span></div>';
 }
 
 // Floating panel showing the per-zone completion trail, opened on hover of the latest-zone
@@ -1946,7 +1950,7 @@ function renderStatusBox(){
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
-    row('State', place) + row('Status', op) + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + zoneLastRow +
+    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + zoneLastRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
   attachZonePanelHover();
   attachSchedPanelHover();

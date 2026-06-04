@@ -61,11 +61,12 @@ function message_robot_LOG_STATUS(decoded, { interpretation, fieldTracker }) {
     interpretation.push('ROBOT::LOG_STATUS');
     fieldTracker.add(addField(interpretation, 1, 'Status Valid', elements.formatRobotStatusValid(elements.decodeRobotStatusValid(decoded[1]))));
     // seems to correlate with on/off the ground or operable??
-    fieldTracker.add(addField(interpretation, 2, 'Status Flag[2]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]))));
+    // fieldTracker.add(addField(interpretation, 2, 'Status Flag[2]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]))));
     fieldTracker.add(addField(interpretation, 3, 'Status Type', elements.formatRobotStatusType(elements.decodeRobotStatusType(decoded[3]))));
     fieldTracker.add(addField(interpretation, 4, 'Status Error', elements.formatRobotStatusError(elements.decodeRobotStatusError(decoded[4]))));
-    fieldTracker.add(addField(interpretation, 5, 'Status Flag[5]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[5]))));
+    // fieldTracker.add(addField(interpretation, 5, 'Status Flag[5]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[5]))));
     fieldTracker.add(addField(interpretation, 10, 'Status Info', elements.formatRobotStatusInfo(elements.decodeRobotStatusInfo(decoded[10]))));
+    fieldTracker.add(addField(interpretation, 12, 'Intervention Required', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[12]))));
     fieldTracker.add(addField(interpretation, 13, 'Docked', elements.formatRobotStatusDocking(elements.decodeRobotStatusDocking(decoded[13]))));
     if (decoded[17] !== undefined) fieldTracker.add(addField(interpretation, 17, 'Battery Status', elements.formatRobotBatteryStatus(elements.decodeRobotBatteryStatus(decoded[17]))));
     // if (decoded[18] !== undefined) fieldTracker.add(addField(interpretation, 18, 'Mowing Status', elements.formatRobotMowingStatus(elements.decodeRobotMowingStatus(decoded[18]))));
