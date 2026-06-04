@@ -55,12 +55,92 @@ class StigaDatabaseExporter {
         return this.db.prepare(`SELECT DISTINCT topic, data FROM messages`).all();
     }
 
-    exportToLog({ startTime, endTime, head, tail }, outputFile) {
+    getTopics() {
+        return this.db
+            .prepare(`SELECT DISTINCT topic FROM messages`)
+            .all()
+            .map((row) => row.topic);
+    }
+
+    // The canonical message name for a topic: the path with the device/base MAC stripped, e.g.
+    //   D0:..:BA/LOG/ROBOT_POSITION  -> LOG/ROBOT_POSITION
+    //   CMD_ROBOT_ACK/D0:..:BA       -> CMD_ROBOT_ACK
+    // Also reports which device the topic belongs to ('base' or 'robot') for the group shortcuts.
+    _classifyTopic(topic, mac_device, mac_base) {
+        let name = topic;
+        let device;
+        for (const [mac, dev] of [
+            [mac_device, 'robot'],
+            [mac_base, 'base'],
+        ]) {
+            if (name.startsWith(mac + '/')) {
+                name = name.slice(mac.length + 1);
+                device = dev;
+            } else if (name.endsWith('/' + mac)) {
+                name = name.slice(0, name.length - mac.length - 1);
+                device = dev;
+            }
+        }
+        return { name, device };
+    }
+
+    // A message is "undecoded" if it has no handler (unknown topic), failed protobuf decode, or
+    // carries protobuf fields the interpreter did not recognise (the "Unknown: [..]" summary line).
+    _isUndecoded(topic, data, mac_device, mac_base) {
+        let lines;
+        try {
+            lines = interpretMessage(topic, data, { MAC_ROBOT: mac_device, MAC_BASE: mac_base });
+        } catch {
+            return true;
+        }
+        return lines.some((line) => line.startsWith('UNKNOWN::') || line.startsWith('Failed to decode message:') || line.startsWith('Unknown: '));
+    }
+
+    // Build a row predicate from a comma-separated filter spec, e.g. "undecoded" or
+    // "no-base,no-LOG/ROBOT_POSITION". Returns undefined when no filter is requested. A row passes
+    // when it matches every requested positive selector ('undecoded') and none of the 'no-*' exclusions.
+    // Exclusion targets are the literal message names from the topics (case-insensitive, prefix match):
+    //   no-base / no-robot          drop a whole device
+    //   no-LOG                      drop every LOG/* message
+    //   no-LOG/STATUS               drop LOG/STATUS and LOG/STATUS/ACK
+    //   no-CMD_REFERENCE            drop CMD_REFERENCE and CMD_REFERENCE_ACK
+    _buildRowFilter(filterStr, mac_device, mac_base) {
+        if (!filterStr) return undefined;
+        const tokens = filterStr
+            .split(',')
+            .map((token) => token.trim())
+            .filter(Boolean);
+
+        const wantUndecoded = tokens.includes('undecoded');
+        const excludeTokens = tokens.filter((token) => token.startsWith('no-')).map((token) => token.slice(3));
+        const unknownTokens = tokens.filter((token) => token !== 'undecoded' && !token.startsWith('no-'));
+        if (unknownTokens.length > 0) throw new Error(`Unknown filter '${unknownTokens[0]}' (expected 'undecoded' or 'no-<name>')`);
+
+        // Validate exclusion targets against names actually present, so typos are caught early.
+        const availableNames = new Set();
+        for (const topic of this.getTopics()) availableNames.add(this._classifyTopic(topic, mac_device, mac_base).name);
+        const matchesName = (target) => target === 'base' || target === 'robot' || [...availableNames].some((name) => name.toLowerCase().startsWith(target.toLowerCase()));
+        for (const target of excludeTokens) if (!matchesName(target)) throw new Error(`Unknown filter 'no-${target}' (available: base, robot, ${[...availableNames].sort().join(', ')})`);
+
+        return (row) => {
+            const { name, device } = this._classifyTopic(row.topic, mac_device, mac_base);
+            for (const target of excludeTokens) {
+                if (target === 'base' || target === 'robot') {
+                    if (device === target) return false;
+                } else if (name.toLowerCase().startsWith(target.toLowerCase())) return false;
+            }
+            if (wantUndecoded && !this._isUndecoded(row.topic, row.data, mac_device, mac_base)) return false;
+            return true;
+        };
+    }
+
+    exportToLog({ startTime, endTime, head, tail }, outputFile, filterFn) {
         const output = fs.createWriteStream(outputFile);
         let count = 0;
 
         for (const row of this.getRowsData(startTime, endTime, head, tail)) {
-            output.write(`${row.timestamp}|${row.topic}|${row.data.toString('hex')}\n`);
+            if (filterFn && !filterFn(row)) continue;
+            this._writeLogRow(output, row);
             if (++count % 10000 === 0) console.log(`Exported ${count} messages...`);
         }
 
@@ -69,29 +149,66 @@ class StigaDatabaseExporter {
         return count;
     }
 
-    async exportToLogVerbose({ startTime, endTime, head, tail }, outputFile, mac_device, mac_base) {
+    async exportToLogVerbose({ startTime, endTime, head, tail }, outputFile, mac_device, mac_base, filterFn) {
         const output = fs.createWriteStream(outputFile);
         let count = 0;
         for (const row of this.getRowsData(startTime, endTime, head, tail)) {
-            const direction = this._getDirection(row.topic, mac_device, mac_base);
-            output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${direction} PUBLISH\n`);
-            output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Time:       ${row.timestamp}\n`);
-            output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Topic:      ${row.topic}\n`);
-            output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Length:     ${row.data.length} bytes\n`);
-            if (row.data.length > 0) {
-                formatHexDump(row.data, 'Payload:    ').forEach((line) => output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${line}\n`));
-                try {
-                    interpretMessage(row.topic, row.data, { MAC_ROBOT: mac_device, MAC_BASE: mac_base }).forEach((line) => output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Decode:     ${line}\n`));
-                } catch (e) {
-                    output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Decode:     Error - ${e.message}\n`);
-                }
-            }
-            output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${'═'.repeat(70)}\n`);
+            if (filterFn && !filterFn(row)) continue;
+            this._writeLogVerboseRow(output, row, mac_device, mac_base);
             if (++count % 1000 === 0) console.log(`Exported ${count} messages...`);
         }
         output.end();
         console.log(`Export complete: ${count} messages written to ${outputFile}`);
         return count;
+    }
+
+    _writeLogRow(output, row) {
+        output.write(`${row.timestamp}|${row.topic}|${row.data.toString('hex')}\n`);
+    }
+
+    _writeLogVerboseRow(output, row, mac_device, mac_base) {
+        const direction = this._getDirection(row.topic, mac_device, mac_base);
+        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${direction} PUBLISH\n`);
+        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Time:       ${row.timestamp}\n`);
+        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Topic:      ${row.topic}\n`);
+        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Length:     ${row.data.length} bytes\n`);
+        if (row.data.length > 0) {
+            formatHexDump(row.data, 'Payload:    ').forEach((line) => output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${line}\n`));
+            try {
+                interpretMessage(row.topic, row.data, { MAC_ROBOT: mac_device, MAC_BASE: mac_base }).forEach((line) => output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Decode:     ${line}\n`));
+            } catch (e) {
+                output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Decode:     Error - ${e.message}\n`);
+            }
+        }
+        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${'═'.repeat(70)}\n`);
+    }
+
+    // Follow capture.db as the monitor writes to it: start at the current max rowid and poll for
+    // newly-inserted rows, emitting each (filtered) row in the same plain/verbose format as the
+    // one-shot exports. Runs until interrupted (Ctrl-C). `id` autoincrements on insert, so it is a
+    // reliable high-water mark even though timestamps can tie. Resolves when `stop()` is called.
+    async followLog(output, mac_device, mac_base, filterFn, verbose, pollMs = 1000) {
+        const writeRow = verbose ? (row) => this._writeLogVerboseRow(output, row, mac_device, mac_base) : (row) => this._writeLogRow(output, row);
+        const stmt = this.db.prepare('SELECT id, timestamp, topic, data FROM messages WHERE id > ? ORDER BY id');
+        let lastId = this.db.prepare('SELECT MAX(id) AS id FROM messages').get().id ?? 0;
+        let timer;
+        await new Promise((resolve) => {
+            this._followStop = () => {
+                clearInterval(timer);
+                resolve();
+            };
+            timer = setInterval(() => {
+                for (const row of stmt.iterate(lastId)) {
+                    lastId = row.id;
+                    if (filterFn && !filterFn(row)) continue;
+                    writeRow(row);
+                }
+            }, pollMs);
+        });
+    }
+
+    stopFollow() {
+        if (this._followStop) this._followStop();
     }
 
     _getDirection(topic, mac_device, mac_base) {
@@ -107,7 +224,7 @@ class StigaDatabaseExporter {
         return 'UNKNOWN';
     }
 
-    async exportToCSV({ startTime, endTime, head, tail }, outputFile) {
+    async exportToCSV({ startTime, endTime, head, tail }, outputFile, filterFn) {
         console.log('Building schema from database...');
         const schema = this.buildSchema();
 
@@ -125,6 +242,7 @@ class StigaDatabaseExporter {
 
         output.write(['timestamp', 'topic', 'protobuf_hex', ...sortedFields].join(',') + '\n');
         for (const row of this.getRowsData(startTime, endTime, head, tail)) {
+            if (filterFn && !filterFn(row)) continue;
             let decoded = {};
             try {
                 let buffer = row.data;
@@ -151,7 +269,7 @@ class StigaDatabaseExporter {
         return count;
     }
 
-    async exportToGoogleSheets({ startTime, endTime, head, tail }, spreadsheetName, userEmail, credentialsPath) {
+    async exportToGoogleSheets({ startTime, endTime, head, tail }, spreadsheetName, userEmail, credentialsPath, filterFn) {
         console.log('Building schema from database...');
         const schema = this.buildSchema();
 
@@ -170,6 +288,7 @@ class StigaDatabaseExporter {
 
         let count = 0;
         for (const row of this.getRowsData(startTime, endTime, head, tail)) {
+            if (filterFn && !filterFn(row)) continue;
             let decoded = {};
             try {
                 let buffer = row.data;
@@ -346,10 +465,19 @@ Options:
   --start <ISO timestamp>       Start time (inclusive)
   --end <ISO timestamp>         End time (inclusive)
   --head <number>               Export only the first N messages
-  --tail <number>               Export only the last N messages  
+  --tail <number>               Export only the last N messages
+  --filter <list>               Comma-separated message filters (applied after head/tail):
+                                  undecoded         keep only unknown/undecodable messages
+                                  no-base|no-robot  drop a whole device
+                                  no-<NAME>         drop messages by topic name (prefix match),
+                                                    e.g. no-LOG/ROBOT_POSITION, no-LOG/STATUS,
+                                                    no-CMD_REFERENCE, no-LOG (drops all LOG/*)
   --stats                       Show database statistics only
   --verbose                     For log format: output in listen.log format with full decoding
-  
+  --follow, -f                  Follow capture.db: stream new messages as the monitor writes them
+                                (log format only; honours --filter/--verbose; runs until Ctrl-C).
+                                Output defaults to stdout; use --output - explicitly or a filename.
+
 Environment (for Google Sheets):
   GOOGLE_IMPERSONATE_EMAIL      Email to impersonate (REQUIRED for sheets format)
   
@@ -358,7 +486,11 @@ Examples:
   stiga-exporter.js capture.db --format csv --output analysis.csv
   stiga-exporter.js capture.db --format sheets --credentials creds.json --sheet-name "MQTT Analysis"
   stiga-exporter.js capture.db --start 2025-06-22T00:00:00Z --end 2025-06-23T00:00:00Z
-  
+  stiga-exporter.js capture.db --verbose --filter undecoded
+  stiga-exporter.js capture.db --verbose --filter no-base,no-LOG/ROBOT_POSITION
+  stiga-exporter.js capture.db --follow --verbose --filter undecoded
+  stiga-exporter.js capture.db -f --filter undecoded | grep '|41542b'
+
 Note: This exporter can run while capture is active (uses read-only mode).
 
 Google Sheets Setup:
@@ -380,6 +512,8 @@ Google Sheets Setup:
     let tail;
     let showStats = false;
     let verbose = false;
+    let follow = false;
+    let filter;
     let mac_device = 'D0:EF:76:64:32:BA';
     let mac_base = 'FC:E8:C0:72:EC:62';
 
@@ -409,6 +543,9 @@ Google Sheets Setup:
             case '--tail':
                 tail = Number.parseInt(args[i + 1]);
                 break;
+            case '--filter':
+                filter = args[i + 1];
+                break;
             case '--mac_device':
                 mac_device = args[i + 1];
                 break;
@@ -425,6 +562,12 @@ Google Sheets Setup:
                 // eslint-disable-next-line sonarjs/updated-loop-counter
                 i--; // No value for this flag
                 break;
+            case '--follow':
+            case '-f':
+                follow = true;
+                // eslint-disable-next-line sonarjs/updated-loop-counter
+                i--; // No value for this flag
+                break;
         }
     }
 
@@ -436,7 +579,7 @@ Google Sheets Setup:
     const exporter = new StigaDatabaseExporter(dbPath);
     try {
         exporter.open();
-        console.log(`Opened database: ${dbPath} (read-only mode)`);
+        (follow ? console.error : console.log)(`Opened database: ${dbPath} (read-only mode)`);
 
         if (showStats) {
             const stats = exporter.getStats();
@@ -447,16 +590,29 @@ Google Sheets Setup:
             Object.entries(stats.topics)
                 .sort(([, a], [, b]) => b - a)
                 .forEach(([topic, count]) => console.log(`  ${topic}: ${count.toLocaleString()}`));
+        } else if (follow) {
+            // Stream new rows as the monitor appends them. Diagnostics go to stderr so stdout stays
+            // a clean message stream that can be piped to grep/etc.
+            const filterFn = exporter._buildRowFilter(filter, mac_device, mac_base);
+            const toStdout = !outputFile || outputFile === '-';
+            const output = toStdout ? process.stdout : fs.createWriteStream(outputFile);
+            console.error(`Following ${dbPath} for new messages (${verbose ? 'verbose' : 'plain'} log${filter ? `, filter: ${filter}` : ''}) - Ctrl-C to stop`);
+            process.on('SIGINT', () => exporter.stopFollow());
+            await exporter.followLog(output, mac_device, mac_base, filterFn, verbose);
+            if (!toStdout) output.end();
+            console.error('Stopped.');
         } else {
             const filters = { startTime, endTime, head, tail };
             console.log(`format: ${format}`);
             console.log(`filters: ${formatStruct(filters, 'filters')}`);
+            const filterFn = exporter._buildRowFilter(filter, mac_device, mac_base);
+            if (filter) console.log(`message filter: ${filter}`);
 
             switch (format) {
                 case 'csv':
                     if (!outputFile) outputFile = `export_${new Date().toISOString().split('T')[0]}.csv`;
                     console.log(`Output file: ${outputFile}`);
-                    await exporter.exportToCSV(filters, outputFile);
+                    await exporter.exportToCSV(filters, outputFile, filterFn);
                     break;
 
                 case 'sheets':
@@ -474,13 +630,13 @@ Google Sheets Setup:
                         console.error('Set it to the email address to impersonate.');
                         process.exit(1);
                     }
-                    await exporter.exportToGoogleSheets(filters, sheetName, userEmail, credentialsFile);
+                    await exporter.exportToGoogleSheets(filters, sheetName, userEmail, credentialsFile, filterFn);
                     break;
 
                 default: // 'log' format
                     if (!outputFile) outputFile = `export_${new Date().toISOString().split('T')[0]}.log`;
                     console.log(`Output file: ${outputFile}`);
-                    verbose ? await exporter.exportToLogVerbose(filters, outputFile, mac_device, mac_base) : await exporter.exportToLog(filters, outputFile);
+                    verbose ? await exporter.exportToLogVerbose(filters, outputFile, mac_device, mac_base, filterFn) : await exporter.exportToLog(filters, outputFile, filterFn);
                     break;
             }
         }

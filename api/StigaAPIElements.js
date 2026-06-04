@@ -174,7 +174,7 @@ const ROBOT_COMMAND_TOPICS = {
 const ROBOT_COMMAND_TYPES = {
     0: 'STOP',
     1: 'START',
-    2: 'UNKNOWN_CMD_2',
+    //  2:
     4: 'GO_HOME',
     7: 'ZONE_SETTINGS_UPDATE',
     17: 'SETTINGS_REQUEST',
@@ -185,9 +185,13 @@ const ROBOT_COMMAND_TYPES = {
     22: 'POSITION_REQUEST',
     26: 'CALIBRATE_BLADES',
     28: 'STATUS_REQUEST',
+    //  31:
     32: 'CLOUDSYNC_REQUEST',
-    37: 'UNKNOWN_CMD_37',
+    //  37:
+    //  38:
+    //  40:
     47: 'ZONE_ORDER_UPDATE',
+    //  51:
 };
 const ROBOT_COMMAND_IDS = Object.fromEntries(Object.entries(ROBOT_COMMAND_TYPES).map(([key, value]) => [value, Number.parseInt(key)]));
 
@@ -336,6 +340,7 @@ function upgradeRobotStatusError(statusError) {
 
 const ROBOT_STATUS_INFO_CODES = {
     0x0064: 'LOW_BATTERY', // 3/1/1 (100)
+    0x00da: 'BLADE_MOTOR_TROUBLE', // 2/3/1
     0x0191: 'BLOCKED', // 3/1/1 (401)
     0x0195: 'UNKNOWN_0195', // 3/1/1 (405) [when BLOCKED]
     0x019e: 'UNKNOWN_019E', // 3/1/1 (414)
