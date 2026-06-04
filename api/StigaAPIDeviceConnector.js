@@ -11,6 +11,7 @@ const {
     decodeRobotCommandType,
     decodeRobotCommandAckResult,
     encodeRobotCommand,
+    encodeRobotCloudSync,
     encodeRobotStatusRequestTypes,
     encodeRobotSettings,
     encodeRobotScheduleSettings,
@@ -366,6 +367,9 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     }
     async sendCalibrateBlades() {
         return this._commandRequest(ROBOT_COMMAND_IDS.CALIBRATE_BLADES, undefined, undefined, 'command');
+    }
+    async sendCloudSync(auth, url) {
+        return this._commandRequest(ROBOT_COMMAND_IDS.CLOUDSYNC_DOWNLOAD, encodeRobotCloudSync({ auth, url }), undefined, 'command');
     }
 
     //

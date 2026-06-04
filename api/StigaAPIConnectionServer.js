@@ -75,6 +75,29 @@ class StigaAPIConnectionServer extends StigaAPIComponent {
         }
     }
 
+    async patch(endpoint, data = {}) {
+        const url = new URL(this.baseUrl + endpoint);
+
+        const requestOptions = {
+            method: 'PATCH',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data),
+        };
+        await this.auth.addAuthentication(requestOptions);
+
+        try {
+            const response = await fetch(url.toString(), requestOptions);
+            if (!response.ok) this.display.error(`connection: http patch request failed: ${response.status} ${response.statusText}`);
+            return response;
+        } catch (e) {
+            this.display.error(`connection: http patch request error:`, e);
+            throw e;
+        }
+    }
+
     getBaseUrl() {
         return this.baseUrl;
     }

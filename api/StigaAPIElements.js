@@ -185,7 +185,13 @@ const ROBOT_COMMAND_TYPES = {
     22: 'POSITION_REQUEST',
     26: 'CALIBRATE_BLADES',
     28: 'STATUS_REQUEST',
-    //  31:
+    // 31 and 32 carry an identical payload [2] = { 1: "Bearer <jwt>", 2: cloud resource URL } and both
+    // make the robot DOWNLOAD/fetch that resource from the cloud and apply it (NOT an upload — the robot
+    // re-publishing its own copy to the cloud afterwards is separate autonomous behaviour). The observed
+    // difference is the trigger: 31 fires automatically when a perimeter edit is saved (robot adopts the
+    // app's new map; the app's "Download data failed" is this fetch failing); 32 fires on a manual
+    // "sync now" from the app. Exact functional difference beyond trigger is still unconfirmed. (2026-06-04)
+    31: 'CLOUDSYNC_DOWNLOAD',
     32: 'CLOUDSYNC_REQUEST',
     //  37:
     //  38:
@@ -430,6 +436,10 @@ function upgradeRobotBatteryStatus(battery) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+function encodeRobotCloudSync({ auth, url }) {
+    // inverse of decodeRobotCloudSync: field [1] = auth ("Bearer <jwt>"), field [2] = resource url
+    return protobufEncode({ 1: auth, 2: url });
+}
 function decodeRobotCloudSync(decoded) {
     return decoded
         ? upgradeRobotCloudSync({
@@ -1191,6 +1201,7 @@ module.exports = {
     encodeRobotSettings,
     decodeRobotSettings,
     formatRobotSettings,
+    encodeRobotCloudSync,
     decodeRobotCloudSync,
     formatRobotCloudSync,
     createRobotScheduleSettings,

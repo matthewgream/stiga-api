@@ -189,6 +189,9 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendCalibrateBlades() {
         return this._cmdViaConnector('sendCalibrateBlades');
     }
+    async sendCloudSync(auth, url) {
+        return this._cmdViaConnector('sendCloudSync', auth, url);
+    }
 
     //
 
@@ -258,11 +261,11 @@ class StigaAPIDevice extends StigaAPIComponent {
         throw new Error(`No connector available for ${method}`);
     }
 
-    async _cmdViaConnector(method) {
+    async _cmdViaConnector(method, ...args) {
         for (const [name, connector] of this.connectors)
             if (connector[method] && typeof connector[method] === 'function')
                 try {
-                    const result = await connector[method]();
+                    const result = await connector[method](...args);
                     this.display.debug(`device ${this.macAddress}: ${method} success via ${name}`);
                     return result;
                 } catch (e) {

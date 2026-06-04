@@ -33,6 +33,7 @@ function message_robot_CMD_ROBOT(decoded, { interpretation, fieldTracker }) {
             case 'ZONE_ORDER_UPDATE':
                 fieldTracker.add(addField(interpretation, 2, 'Zone Order', elements.formatRobotZoneOrder(elements.decodeRobotZoneOrder(decoded[2]))));
                 break;
+            case 'CLOUDSYNC_DOWNLOAD':
             case 'CLOUDSYNC_REQUEST':
                 fieldTracker.add(addField(interpretation, 2, 'CloudSync Parameters', elements.formatRobotCloudSync(elements.decodeRobotCloudSync(decoded[2]))));
                 break;

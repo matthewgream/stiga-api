@@ -179,6 +179,50 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         return false;
     }
 
+    // Write the currently-loaded perimeter back to the cloud. Mutate the geometry first (via
+    // this.perimeterData) then call write(). NOTE: this updates the CLOUD copy only — the robot owns
+    // the authoritative map and will re-publish its own copy unless it is told to pull this one with a
+    // CLOUDSYNC_DOWNLOAD command over MQTT. Write protocol reverse engineered 2026-06-04, see
+    // scripts/stiga-probe-perimeter-write.js. Returns true on success (HTTP 204).
+    async write() {
+        if (!this.perimeterData?.attributes) {
+            this.display.error('perimeters: failed to write: nothing loaded');
+            return false;
+        }
+        const uuid = this.perimeterData.attributes.uuid;
+        if (!uuid) {
+            this.display.error('perimeters: failed to write: missing uuid');
+            return false;
+        }
+
+        // Refresh timestamp+checksum so the write supersedes the current record (checksum is the
+        // string form of the epoch-ms timestamp), and drop null-valued top-level fields the write
+        // schema rejects (e.g. base_position). Body envelope is { data: <attributes> }.
+        const attributes = JSON.parse(JSON.stringify(this.perimeterData.attributes));
+        const now = Date.now();
+        const stamp = (obj) => {
+            if (obj) {
+                obj.timestamp = now;
+                obj.checksum = String(now);
+            }
+        };
+        stamp(attributes.preview);
+        stamp(attributes.data_points);
+        for (const key of Object.keys(attributes)) if (attributes[key] === null) delete attributes[key];
+
+        try {
+            const response = await this.server.patch(`/api/perimeters/${uuid}`, { data: attributes });
+            if (response.ok) {
+                this.perimeterData.attributes = attributes;
+                this._parseData();
+                return true;
+            }
+        } catch (e) {
+            this.display.error('perimeters: failed to write:', e);
+        }
+        return false;
+    }
+
     _parseData() {
         const preview = this.perimeterData?.attributes?.preview;
         const geometry = _decodePerimeterGeometry(this.perimeterData);
@@ -282,6 +326,13 @@ class StigaAPIPerimeters extends StigaAPIComponent {
     getTimestamp() {
         const preview = this.perimeterData?.attributes?.preview;
         return preview?.timestamp ? new Date(preview.timestamp) : undefined;
+    }
+
+    // The cloud resource URL for this perimeter — the value that goes in a CLOUDSYNC_DOWNLOAD command
+    // so the robot can fetch it. Undefined until loaded.
+    getResourceUrl() {
+        const uuid = this.perimeterData?.attributes?.uuid;
+        return uuid ? `${this.server.getBaseUrl()}/api/perimeters/${uuid}` : undefined;
     }
 
     getReferencePosition() {

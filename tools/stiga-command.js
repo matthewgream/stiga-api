@@ -680,7 +680,7 @@ registerCommand('stop', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['go-home', 'home'], {
+registerCommand(['go-home', 'goHome', 'home'], {
     description: 'Send the robot home to dock',
     targets: ['robot'],
     usage: 'stiga-command --robot go-home [help]',
@@ -691,13 +691,34 @@ registerCommand(['go-home', 'home'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['calibrate-blades', 'blades'], {
+registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
     description: 'Calibrate the cutting blades',
     targets: ['robot'],
     usage: 'stiga-command --robot calibrate-blades [help]',
     summary: 'Trigger blade calibration on the robot.',
     examples: ['stiga-command --robot calibrate-blades'],
     execute: async (options, context) => executeRobotCommand('calibrate-blades', (d) => d.sendCalibrateBlades(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['cloud-sync', 'cloudSync', 'sync'], {
+    description: 'Tell the robot to re-sync its perimeter from the cloud',
+    targets: ['robot'],
+    usage: 'stiga-command --robot cloud-sync [help]',
+    summary: 'Trigger the robot to download and apply the current cloud perimeter (CLOUDSYNC_DOWNLOAD).',
+    examples: ['stiga-command --robot cloud-sync'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        const { auth } = connectors;
+        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+        const server = new StigaAPIConnectionServer(auth);
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+        const url = perimeters.getResourceUrl();
+        if (!url) throw throwExit('no perimeter resource url available', 2);
+        return executeRobotCommand('cloud-sync', (d) => d.sendCloudSync(`Bearer ${auth.token}`, url), context);
+    },
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
