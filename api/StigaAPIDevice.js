@@ -192,6 +192,12 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendCloudSync(auth, url) {
         return this._cmdViaConnector('sendCloudSync', auth, url);
     }
+    async sendForceCut(zone) {
+        return this._cmdViaConnector('sendForceCut', zone);
+    }
+    async sendForceBorderCut(zone) {
+        return this._cmdViaConnector('sendForceBorderCut', zone);
+    }
 
     //
 

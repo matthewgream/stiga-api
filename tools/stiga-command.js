@@ -723,6 +723,36 @@ registerCommand(['cloud-sync', 'cloudSync', 'sync'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+registerCommand(['force-cut', 'forceCut', 'cut'], {
+    description: 'Force the robot to mow a specific zone now',
+    targets: ['robot'],
+    usage: 'stiga-command --robot force-cut <zone> [help]',
+    summary: 'Send the robot to mow the given zone number immediately (FORCE_CUT).',
+    examples: ['stiga-command --robot force-cut 2'],
+    execute: async (options, context) => {
+        const zone = Number.parseInt(context.params[0], 10);
+        if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-cut requires a zone number, e.g. force-cut 2', 2);
+        return executeRobotCommand('force-cut', (d) => d.sendForceCut(zone), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['force-border-cut', 'forceBorderCut', 'border-cut'], {
+    description: "Force the robot to cut a specific zone's border now",
+    targets: ['robot'],
+    usage: 'stiga-command --robot force-border-cut <zone> [help]',
+    summary: "Send the robot to cut the given zone's border immediately (FORCE_BORDER_CUT).",
+    examples: ['stiga-command --robot force-border-cut 2'],
+    execute: async (options, context) => {
+        const zone = Number.parseInt(context.params[0], 10);
+        if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-border-cut requires a zone number, e.g. force-border-cut 2', 2);
+        return executeRobotCommand('force-border-cut', (d) => d.sendForceBorderCut(zone), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 async function safeAwait(label, fn) {
     try {
         return await fn();

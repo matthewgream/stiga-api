@@ -37,6 +37,10 @@ function message_robot_CMD_ROBOT(decoded, { interpretation, fieldTracker }) {
             case 'CLOUDSYNC_REQUEST':
                 fieldTracker.add(addField(interpretation, 2, 'CloudSync Parameters', elements.formatRobotCloudSync(elements.decodeRobotCloudSync(decoded[2]))));
                 break;
+            case 'FORCE_CUT':
+            case 'FORCE_BORDER_CUT':
+                fieldTracker.add(addField(interpretation, 2, 'Zone', elements.decodeRobotForceCut(decoded[2])));
+                break;
         }
     if (decoded[3] !== undefined) {
         fieldTracker.add('3');

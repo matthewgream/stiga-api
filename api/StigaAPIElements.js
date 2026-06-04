@@ -194,10 +194,10 @@ const ROBOT_COMMAND_TYPES = {
     31: 'CLOUDSYNC_DOWNLOAD',
     32: 'CLOUDSYNC_REQUEST',
     //  37:
-    //  38:
+    38: 'FORCE_CUT',
     //  40:
     47: 'ZONE_ORDER_UPDATE',
-    //  51:
+    51: 'FORCE_BORDER_CUT',
 };
 const ROBOT_COMMAND_IDS = Object.fromEntries(Object.entries(ROBOT_COMMAND_TYPES).map(([key, value]) => [value, Number.parseInt(key)]));
 
@@ -454,6 +454,19 @@ function formatRobotCloudSync(cloudSync) {
 function upgradeRobotCloudSync(cloudSync) {
     cloudSync.toString = () => formatRobotCloudSync(cloudSync);
     return cloudSync;
+}
+
+function encodeRobotForceCut(zone) {
+    // Shared by FORCE_CUT (38) and FORCE_BORDER_CUT (51): field [2] = single-byte zone number,
+    // length-delimited (e.g. zone 3 -> 12 01 03).
+    return Buffer.from([zone]);
+}
+function decodeRobotForceCut(decoded) {
+    if (decoded === undefined) return undefined;
+    // protobufDecode renders the 1-byte length-delimited field as a hex string ("02", "03", ...)
+    if (typeof decoded === 'string') return Number.parseInt(decoded, 16);
+    if (Buffer.isBuffer(decoded)) return decoded[0];
+    return Number(decoded);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1204,6 +1217,8 @@ module.exports = {
     encodeRobotCloudSync,
     decodeRobotCloudSync,
     formatRobotCloudSync,
+    encodeRobotForceCut,
+    decodeRobotForceCut,
     createRobotScheduleSettings,
     encodeRobotScheduleSettings,
     decodeRobotScheduleSettings,
