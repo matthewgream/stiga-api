@@ -842,7 +842,7 @@ html,body{margin:0;height:100%}
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
 // no backticks, no ${...}) so it can be embedded verbatim into the page template above.
 const CLIENT_JS = `
-var map, infoWindow, baseMarker, robotMarker, robotPin;
+var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
@@ -1075,7 +1075,17 @@ function initMap(){
   attachHover(baseMarker, 'base');
 
   robotPin = new google.maps.marker.PinElement({ background:'#34a853', borderColor:'#ffffff', glyphColor:'#ffffff', glyphText:'R' });
-  robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin });
+  // Wrap the pin so we can overlay a heading arrow that pivots to the robot's reported orientation.
+  // The wrapper's bottom-centre (the pin tip = the robot's location) stays the marker anchor; the
+  // arrow box is centred on that point via negative margins and rotated by orientationCompass (0=N, CW).
+  var robotEl = document.createElement('div');
+  robotEl.style.position = 'relative';
+  robotEl.appendChild(robotPin.element);
+  robotArrow = document.createElement('div');
+  robotArrow.style.cssText = 'position:absolute; left:50%; bottom:0; width:40px; height:40px; margin-left:-20px; margin-bottom:-20px; transform-origin:50% 50%; transition:transform .25s ease; pointer-events:none; display:none;';
+  robotArrow.innerHTML = '<svg viewBox="0 0 40 40" width="40" height="40" style="overflow:visible; filter:drop-shadow(0 1px 1px rgba(0,0,0,.45))"><path d="M20 6 L26 16 L20 13 L14 16 Z" fill="currentColor" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+  robotEl.appendChild(robotArrow);
+  robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotEl });
   attachHover(robotMarker, 'robot');
 
   hydrateInitialCrumbs();
@@ -1282,6 +1292,13 @@ function refresh(){
         robotMarker.position = pos;
         if(!robotMarker.map) robotMarker.map = map;
         robotPin.background = robotColor(r);
+        if(typeof r.orientationCompass === 'number'){
+          robotArrow.style.display = 'block';
+          robotArrow.style.color = robotColor(r);
+          robotArrow.style.transform = 'rotate(' + r.orientationCompass + 'deg)';
+        } else {
+          robotArrow.style.display = 'none';
+        }
         if(!didFit && !userMoved){
           didFit = true;
           var b = new google.maps.LatLngBounds();
