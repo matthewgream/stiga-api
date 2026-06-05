@@ -332,8 +332,8 @@ class WebStatusProcessor {
             r.battery = battery ? { charge: battery.charge, capacity: battery.capacity } : undefined;
         }
         if (decoded[18]) {
-            const mowing = elements.decodeRobotMowingStatus(decoded[18]);
-            r.mowing = mowing ? { zone: mowing.zone, zoneCompleted: mowing.zoneCompleted, gardenCompleted: mowing.gardenCompleted } : undefined;
+            const mowing = elements.decodeRobotMowingStatus(decoded[18], this.location);
+            r.mowing = mowing ? { zone: mowing.zone, zoneCompleted: mowing.zoneCompleted, gardenCompleted: mowing.gardenCompleted, target: mowing.target } : undefined;
         }
         if (decoded[19]) r.location = this._rtk(decoded[19]);
         if (decoded[20]) r.network = this._network(decoded[20]);
@@ -846,7 +846,7 @@ html,body{margin:0;height:100%}
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
 // no backticks, no ${...}) so it can be embedded verbatim into the page template above.
 const CLIENT_JS = `
-var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow;
+var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow, targetMarker, targetLine;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
@@ -881,7 +881,8 @@ var URL_CONFIG = (function(){
     tracksClr: p.get('tracksClr'),
     statusBatterySparkline: p.get('statusBatterySparkline'),
     statusTracksControls: p.get('statusTracksControls'),
-    commands: p.get('commands')
+    commands: p.get('commands'),
+    experimental: p.get('experimental')
   };
 })();
 
@@ -1091,6 +1092,13 @@ function initMap(){
   robotEl.appendChild(robotArrow);
   robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotEl });
   attachHover(robotMarker, 'robot');
+
+  // experimental (?experimental=on): a reticle at the current mowing target + a line from the robot to it
+  targetLine = new google.maps.Polyline({ path: [], strokeColor:'#fbbc04', strokeOpacity:0.85, strokeWeight:2, clickable:false, zIndex:1 });
+  var targetEl = document.createElement('div');
+  targetEl.style.cssText = 'position:relative;width:0;height:0;';
+  targetEl.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" style="position:absolute;left:-12px;top:-12px;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,.4))"><circle cx="12" cy="12" r="8" fill="none" stroke="#fbbc04" stroke-width="2.5"/><circle cx="12" cy="12" r="2.5" fill="#fbbc04"/></svg>';
+  targetMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Mowing target', content: targetEl });
 
   hydrateInitialCrumbs();
 
@@ -1302,6 +1310,17 @@ function refresh(){
           robotArrow.style.transform = 'rotate(' + r.orientationCompass + 'deg)';
         } else {
           robotArrow.style.display = 'none';
+        }
+        // experimental: show the mowing target reticle + robot->target line (?experimental=on)
+        var tgt = (URL_CONFIG.experimental === 'on' && r.mowing && r.mowing.target && typeof r.mowing.target.latitude === 'number') ? r.mowing.target : null;
+        if(tgt){
+          var tp = { lat: tgt.latitude, lng: tgt.longitude };
+          targetMarker.position = tp; if(!targetMarker.map) targetMarker.map = map;
+          targetMarker.title = 'Mowing target ' + tp.lat.toFixed(6) + ',' + tp.lng.toFixed(6) + ' · heading ' + Math.round(tgt.headingCompass) + '°' + (tgt.raw ? ' · [4] 1=' + tgt.raw[1] + ' 2=' + tgt.raw[2] + ' 3=' + tgt.raw[3] + ' 4=' + tgt.raw[4] + ' 7=' + tgt.raw[7] : '');
+          targetLine.setPath([pos, tp]); if(!targetLine.getMap()) targetLine.setMap(map);
+        } else {
+          if(targetMarker.map) targetMarker.map = null;
+          if(targetLine.getMap()) targetLine.setMap(null);
         }
         if(!didFit && !userMoved){
           didFit = true;
@@ -1926,6 +1945,19 @@ function renderStatusBox(){
   var schedRow = '<div class="row"><span class="k">Schedule</span><span class="v sched-trigger" data-schedpanel="1">' + esc(sched) + '</span></div>';
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
+  // experimental: current mowing target waypoint (from LOG/STATUS [18][4]); gated on ?experimental=on
+  var tgtRow = '';
+  if(URL_CONFIG.experimental === 'on' && r.mowing && r.mowing.target){
+    var tg = r.mowing.target;
+    var tw = (typeof tg.latitude === 'number') ? (tg.latitude.toFixed(6) + ',' + tg.longitude.toFixed(6)) : (fmt(tg.east,1) + ',' + fmt(tg.north,1) + 'm');
+    var dist = '';
+    if(typeof tg.latitude === 'number' && typeof r.latitude === 'number'){
+      var mLat = 111320, mLng = 111320 * Math.cos(r.latitude * Math.PI / 180);
+      dist = ' · ' + Math.hypot((tg.latitude - r.latitude) * mLat, (tg.longitude - r.longitude) * mLng).toFixed(1) + 'm';
+    }
+    tgtRow = row('Target', tw + ' · ' + Math.round(tg.headingCompass) + '°' + dist);
+    if(tg.raw) tgtRow += row('Mow[4]', 'en=(' + fmt(tg.east,1) + ',' + fmt(tg.north,1) + ') · 1=' + tg.raw[1] + ' 2=' + tg.raw[2] + ' 3=' + tg.raw[3] + ' 4=' + tg.raw[4] + ' 7=' + tg.raw[7]);
+  }
   var zoneLastRow = '';
   var zc = state.zoneCompletions;
   if(Array.isArray(zc) && zc.length > 0){
@@ -1950,7 +1982,7 @@ function renderStatusBox(){
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
-    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + zoneLastRow +
+    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
   attachZonePanelHover();
   attachSchedPanelHover();

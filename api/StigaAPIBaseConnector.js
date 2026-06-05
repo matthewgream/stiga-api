@@ -252,6 +252,15 @@ class StigaAPIBaseConnector extends StigaAPIComponent {
     async setLedSetting(mode) {
         return this._commandRequest(BASE_COMMAND_IDS.SETTINGS_UPDATE, encodeBaseSettingLED(mode)); //, undefined, 'ledSetting');
     }
+    async sendMode(mode) {
+        return this._commandRequest(BASE_COMMAND_IDS.SET_MODE, { 1: mode });
+    }
+    async sendPublishStart() {
+        return this._commandRequest(BASE_COMMAND_IDS.PUBLISH_START);
+    }
+    async sendPublishStop() {
+        return this._commandRequest(BASE_COMMAND_IDS.PUBLISH_STOP);
+    }
 
     //
 

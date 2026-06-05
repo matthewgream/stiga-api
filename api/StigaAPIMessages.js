@@ -64,13 +64,12 @@ function message_robot_LOG_STATUS(decoded, { interpretation, fieldTracker }) {
     // fieldTracker.add(addField(interpretation, 2, 'Status Flag[2]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[2]))));
     fieldTracker.add(addField(interpretation, 3, 'Status Type', elements.formatRobotStatusType(elements.decodeRobotStatusType(decoded[3]))));
     fieldTracker.add(addField(interpretation, 4, 'Status Error', elements.formatRobotStatusError(elements.decodeRobotStatusError(decoded[4]))));
-    // fieldTracker.add(addField(interpretation, 5, 'Status Flag[5]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[5]))));
+    fieldTracker.add(addField(interpretation, 5, 'Status Flag[5]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[5])))); // omnipresent
     fieldTracker.add(addField(interpretation, 10, 'Status Info', elements.formatRobotStatusInfo(elements.decodeRobotStatusInfo(decoded[10]))));
     fieldTracker.add(addField(interpretation, 12, 'Intervention Required', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[12]))));
     fieldTracker.add(addField(interpretation, 13, 'Docked', elements.formatRobotStatusDocking(elements.decodeRobotStatusDocking(decoded[13]))));
     if (decoded[17] !== undefined) fieldTracker.add(addField(interpretation, 17, 'Battery Status', elements.formatRobotBatteryStatus(elements.decodeRobotBatteryStatus(decoded[17]))));
-    // if (decoded[18] !== undefined) fieldTracker.add(addField(interpretation, 18, 'Mowing Status', elements.formatRobotMowingStatus(elements.decodeRobotMowingStatus(decoded[18]))));
-    if (decoded[18] !== undefined) interpretation.push(`Mowing Status: ` + elements.formatRobotMowingStatus(elements.decodeRobotMowingStatus(decoded[18])));
+    if (decoded[18] !== undefined) fieldTracker.add(addField(interpretation, 18, 'Mowing Status', elements.formatRobotMowingStatus(elements.decodeRobotMowingStatus(decoded[18], BASE_LOCATION))));
     if (decoded[19] !== undefined) fieldTracker.add(addField(interpretation, 19, 'Location Status', elements.formatLocationStatus(elements.decodeLocationStatus(decoded[19], BASE_LOCATION))));
     if (decoded[20] !== undefined) fieldTracker.add(addField(interpretation, 20, 'Network Status', elements.formatNetworkStatus(elements.decodeNetworkStatus(decoded[20]))));
 }
@@ -119,8 +118,8 @@ function message_base_CMD_REFERENCE(decoded, { interpretation, fieldTracker }) {
             case 'SETTINGS_UPDATE':
                 fieldTracker.add(addField(interpretation, 2, 'LED Mode', elements.formatBaseSettingLED(elements.decodeBaseSettingLED(decoded[2]))));
                 break;
-            case 'UNKNOWN_13':
-                fieldTracker.add(addField(interpretation, 2, 'Unknown Field', elements.formatBaseUnknown13(elements.decodeBaseUnknown13(decoded[2]))));
+            case 'SET_MODE':
+                fieldTracker.add(addField(interpretation, 2, 'Status Mode', elements.formatBaseStatusType(elements.decodeBaseStatusType(decoded[2]?.[1]))));
                 break;
         }
 }
@@ -136,6 +135,9 @@ function message_base_LOG_STATUS(decoded, { interpretation, fieldTracker }) {
     fieldTracker.add(addField(interpretation, 3, 'Status Detail', elements.formatBaseStatusDetail(elements.decodeBaseStatusDetail(decoded[3]))));
     fieldTracker.add(addField(interpretation, 4, 'Status Flag', elements.formatBaseStatusFlag(elements.decodeBaseStatusFlag(decoded[4]))));
     // 5, 6, 7
+    // [8] is the base's own GNSS/RTK status (reusing the location decoder). [8][5] -> rtkQuality is the
+    // survey/Svin accuracy and only appears while the base is acquiring (SET_MODE 2/4); during normal
+    // PUBLISHING/STANDBY it is absent. [2]/[3] (Status Value/Detail) drop out while acquiring.
     if (decoded[8] !== undefined) fieldTracker.add(addField(interpretation, 8, 'Location Status', elements.formatLocationStatus(elements.decodeLocationStatus(decoded[8], BASE_LOCATION))));
     if (decoded[9] !== undefined) fieldTracker.add(addField(interpretation, 9, 'Network Status', elements.formatNetworkStatus(elements.decodeNetworkStatus(decoded[9]))));
     if (decoded[10] !== undefined) fieldTracker.add(addField(interpretation, 10, 'LED Mode', elements.formatBaseSettingLED(elements.decodeBaseSettingLED(decoded[10]))));

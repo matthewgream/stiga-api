@@ -284,7 +284,7 @@ const ROBOT_STATUS_TYPES = {
     13: 'GOING_HOME', // ? duplicate
     18: 'CALIBRATION',
     20: 'BLADES_CALIBRATING',
-    24: 'UNKNOWN_24',
+    // 24: 'UNKNOWN_24',
     27: 'STORING_DATA',
     28: 'PLANNING_ONGOING',
     29: 'REACHING_FIRST_POINT',
@@ -348,8 +348,8 @@ const ROBOT_STATUS_INFO_CODES = {
     0x0064: 'LOW_BATTERY', // 3/1/1 (100)
     0x00da: 'BLADE_MOTOR_TROUBLE', // 2/3/1
     0x0191: 'BLOCKED', // 3/1/1 (401)
-    0x0195: 'UNKNOWN_0195', // 3/1/1 (405) [when BLOCKED]
-    0x019e: 'UNKNOWN_019E', // 3/1/1 (414)
+    // 0x0195: 'UNKNOWN_0195', // 3/1/1 (405) [when BLOCKED]
+    // 0x019e: 'UNKNOWN_019E', // 3/1/1 (414)
     0x01a2: 'LID_SENSOR', // 2/1/1 (418)
     0x01a9: 'RAIN_SENSOR', // 3/1/1 (425)
     0x01b0: 'LIFT_SENSOR', // 2/1/1 (432)
@@ -402,21 +402,55 @@ function formatRobotStatusDocking(statusDocking) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-function decodeRobotMowingStatus(decoded) {
-    return decoded
-        ? upgradeRobotMowingStatus({
-              zone: decoded[1],
-              zoneCompleted: decoded[2],
-              gardenCompleted: decoded[3],
-          })
-        : undefined;
+function decodeRobotMowingStatus(decoded, location) {
+    if (!decoded) return undefined;
+    return upgradeRobotMowingStatus({
+        zone: decoded[1],
+        zoneCompleted: decoded[2],
+        gardenCompleted: decoded[3],
+        target: decodeRobotMowingTarget(decoded[4], location),
+    });
+}
+// [18][4] — the mowing PLAN + progress (reverse engineered; full field table in api/status.txt).
+// Set once at (re)plan time and constant for the whole run: [5] = anchor/reference point ({1:east,
+// 2:north} doubles on a 0.5 m grid — NOT a live target and NOT where the robot starts), [6] = cutting
+// direction (radians, rotates each run), [2] = 4-state orientation class, [4] = an opaque per-plan
+// quantity (NOT the zone work-total). [1] is the only live value: cumulative work/length mowed, whose
+// per-zone ceiling approximates the zone's total work. [3]/[7] = constant-when-present markers.
+// omitted == 0. Only surfaced when an anchor [5] is present. (Field name `target` kept for now.)
+function decodeRobotMowingTarget(decoded, location) {
+    if (!decoded || decoded[5] === undefined) return undefined;
+    const east = hexToDouble(decoded[5][1] || '0000000000000000'),
+        north = hexToDouble(decoded[5][2] || '0000000000000000');
+    const headingDegrees = ((decoded[6] || 0) * 180) / Math.PI;
+    return upgradeRobotMowingTarget({
+        east,
+        north,
+        ...calculateLocationFromOffset(location, [east, north]),
+        headingDegrees,
+        headingCompass: (450 - headingDegrees) % 360,
+        // raw [18][4] counters/markers, surfaced for correlation eyeballing (meaning TBD; omitted == 0)
+        raw: { 1: decoded[1] || 0, 2: decoded[2] || 0, 3: decoded[3] || 0, 4: decoded[4] || 0, 7: decoded[7] || 0 },
+    });
 }
 function formatRobotMowingStatus(mowing) {
-    return formatStruct(mowing, 'mowing', { zoneCompleted: { units: '%' }, gardenCompleted: { units: '%' } });
+    if (!mowing) return undefined;
+    return (
+        formatStruct({ zone: mowing.zone, zoneCompleted: mowing.zoneCompleted, gardenCompleted: mowing.gardenCompleted }, 'mowing', { zoneCompleted: { units: '%' }, gardenCompleted: { units: '%' } }) +
+        (mowing.target ? ', ' + formatRobotMowingTarget(mowing.target) : '')
+    );
+}
+function formatRobotMowingTarget(target) {
+    const where = target.latitude !== undefined && target.longitude !== undefined ? `${target.latitude.toFixed(7)},${target.longitude.toFixed(7)}` : `${target.east.toFixed(1)},${target.north.toFixed(1)}m`;
+    return `target=${where} heading=${Math.round(target.headingCompass)}°`;
 }
 function upgradeRobotMowingStatus(mowing) {
     mowing.toString = () => formatRobotMowingStatus(mowing);
     return mowing;
+}
+function upgradeRobotMowingTarget(target) {
+    target.toString = () => formatRobotMowingTarget(target);
+    return target;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1059,14 +1093,17 @@ const BASE_COMMAND_TOPICS = {
 };
 const BASE_COMMAND_TYPES = {
     1: 'VERSION_REQUEST',
-    3: 'UNKNOWN_3',
-    4: 'UNKNOWN_4',
-    5: 'UNKNOWN_5',
+    // 3: cloud->base, parameterless (0803). Bursts as a re-sync/abort reaction when the base is driven
+    //    into an odd state or a second controller appears (observed during SET_MODE experiments). TBD.
+    // 4/5: 'UNKNOWN_4' / 'UNKNOWN_5'
     6: 'PUBLISH_START',
     7: 'PUBLISH_STOP',
     8: 'STATUS_REQUEST',
-    // 13 is sent with 2.1=1 (at start) and 2.1=5 (at end)
-    13: 'UNKNOWN_13',
+    // 13: cloud->base, drives the base RTK mode; [2][1] is a BASE_STATUS_TYPE. Cloud cycles 1=STANDBY
+    //    (re-survey, ~5min) and 5=PUBLISHING_CORRECTIONS (~36min). Experimentally, 2=INITIALIZING and
+    //    4=ACQUIRING_GPS both force a re-survey (base drops status [2]/[3] and reports [8][5] survey
+    //    accuracy); the base status type never echoes the commanded mode. 3=ERROR untested.
+    13: 'SET_MODE',
     15: 'SETTINGS_UPDATE',
 };
 const BASE_COMMAND_IDS = Object.fromEntries(Object.entries(BASE_COMMAND_TYPES).map(([key, value]) => [value, Number.parseInt(key)]));
@@ -1191,14 +1228,6 @@ function formatBaseSettingLED(settingLED) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-function decodeBaseUnknown13(decoded) {
-    // 13 is sent with 2.1=1 (at start) and 2.1=5 (at end)
-    return decoded?.[1];
-}
-function formatBaseUnknown13(x) {
-    return x;
-}
-
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -1305,8 +1334,6 @@ module.exports = {
     encodeBaseSettingLED,
     decodeBaseSettingLED,
     formatBaseSettingLED,
-    decodeBaseUnknown13,
-    formatBaseUnknown13,
     decodeBaseaMessageVersion,
     decodeBaseMessageStatus,
 };
