@@ -1,7 +1,7 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const { protobufEncode } = require('./StigaAPIUtilitiesProtobuf');
+const { protobufEncode, protobufField } = require('./StigaAPIUtilitiesProtobuf');
 const { formatStruct, formatNetworkId } = require('./StigaAPIUtilitiesFormat');
 
 function toInt32(value) {
@@ -557,9 +557,9 @@ function formatRobotGoAway(goAway) {
     if (!goAway) return undefined;
     return formatStruct(
         {
-            centre: `${(+goAway.east).toFixed(2)},${(+goAway.north).toFixed(2)}`,
+            centre: `${Number(goAway.east).toFixed(2)},${Number(goAway.north).toFixed(2)}`,
             radius: goAway.radius,
-            expiresInDays: goAway.expirySeconds === undefined ? undefined : +(goAway.expirySeconds / 86400).toFixed(1),
+            expiresInDays: goAway.expirySeconds === undefined ? undefined : Number(goAway.expirySeconds / 86400).toFixed(1),
             url: goAway.url,
         },
         'goAway',
@@ -976,83 +976,82 @@ function upgradeRobotScheduleSettings(settings) {
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// DEPRECATED — MQTT zone-settings codec. This was written on the assumption that per-zone settings
+// are pushed over MQTT as CMD_ROBOT command 7 (ZONE_SETTINGS_UPDATE), but that turned out to be
+// wrong: per-zone settings live in the cloud perimeter blob, not MQTT (cmd 7 in real traffic carries
+// a position+timestamp, not this schema, and there is no zone-settings read path over MQTT). The
+// `{1:type,[type]:settings}` framing and the field mapping here (notably cuttingAngle on [19]) do not
+// match reality. Use decodePerimeterZoneSettings / encodePerimeterZoneSettings (above) and
+// StigaAPIPerimeters.getZoneSettings / setZoneSettings instead. Kept only so the legacy CMD_ROBOT
+// message interpreter (StigaAPIMessages) still resolves; do not use for new code.
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+// Encode a per-zone settings update for the robot over MQTT (CMD_ROBOT command 7). The robot's zone
+// record uses the SAME field schema as the cloud data_points record (see PERIMETER_ZONE_FIELDS), so
+// the app pushes the FULL record. The wrapper is { 1: type, [type]: <zoneRecord> } (the [2] payload of
+// the command; the command envelope { 1:7, 2:<this>, 3:7 } is added by encodeRobotCommand). `type` was
+// observed = 3 for a zone-settings update; overridable via settings.type. Returns a Buffer, built at
+// the wire level so the customAngle [18] is a FIXED32 float even when it is a whole number (which
+// protobufEncode would otherwise mis-encode as a varint). Verified byte-exact against a live capture
+// (2026-06-05). Field set 1,5,6,7,8,9,11,12,13,15,17,18,19 mirrors what the app transmits.
 function encodeRobotZoneSettings(zoneSettings) {
     if (!zoneSettings || typeof zoneSettings !== 'object') throw new Error('Zone settings must be an object');
-    if (zoneSettings.zone === undefined || zoneSettings.zone === null) throw new Error('Zone number is required');
-    if (typeof zoneSettings.zone !== 'number' || !Number.isInteger(zoneSettings.zone) || zoneSettings.zone < 0) throw new Error('Zone must be a non-negative integer');
-    const type = zoneSettings.type || 1;
-    if (![1, 2, 3, 4].includes(type)) throw new Error('Zone settings type must be 1, 2, 3, or 4');
-    const settings = {};
-    settings[1] = zoneSettings.zone;
-    if (zoneSettings.unknown_5 !== undefined) settings[5] = zoneSettings.unknown_5;
-    if (zoneSettings.unknown_6 !== undefined) settings[6] = zoneSettings.unknown_6;
-    if (zoneSettings.unknown_7 !== undefined) settings[7] = zoneSettings.unknown_7;
+    const zone = zoneSettings.zone ?? zoneSettings.id;
+    if (zone === undefined || zone === null || !Number.isInteger(zone) || zone < 0) throw new Error('Zone must be a non-negative integer');
+    const type = zoneSettings.type ?? 3;
+    const heights = getCuttingHeightsMap(),
+        modes = getCuttingModesMap();
+    let heightValue = 5,
+        modeValue = 0;
+    if (zoneSettings.cuttingHeight !== undefined) {
+        if (heights[zoneSettings.cuttingHeight] === undefined) throw new Error(`cuttingHeight must be one of: ${Object.keys(heights).join(', ')} mm`);
+        heightValue = heights[zoneSettings.cuttingHeight];
+    }
     if (zoneSettings.cuttingMode !== undefined) {
         if (typeof zoneSettings.cuttingMode === 'string') {
-            if (getCuttingModesMap()[zoneSettings.cuttingMode] === undefined) throw new Error(`Cutting mode name must be one of: ${Object.keys(getCuttingModesMap()).join(',')}`);
-            settings[8] = getCuttingModesMap()[zoneSettings.cuttingMode];
-        } else if (typeof zoneSettings.cuttingMode === 'number') {
-            if (!Object.values(getCuttingModesMap()).includes(zoneSettings.cuttingMode)) throw new Error(`Cutting mode number must be one of: ${Object.values(getCuttingModesMap()).join(',')}`);
-            settings[8] = zoneSettings.cuttingMode;
-        } else throw new Error('Cutting mode must be a string or number');
+            if (modes[zoneSettings.cuttingMode] === undefined) throw new Error(`cuttingMode must be one of: ${Object.keys(modes).join(', ')}`);
+            modeValue = modes[zoneSettings.cuttingMode];
+        } else if (typeof zoneSettings.cuttingMode === 'number') modeValue = zoneSettings.cuttingMode;
+        else throw new Error('cuttingMode must be a string or number');
     }
-    if (zoneSettings.cuttingHeight !== undefined) {
-        if (getCuttingHeightsMap()[zoneSettings.cuttingHeight] === undefined) throw new Error(`Cutting height must be one of: ${Object.keys(getCuttingHeightsMap()).join(', ')} mm`);
-        settings[9] = getCuttingHeightsMap()[zoneSettings.cuttingHeight];
-    }
-    if (zoneSettings.unknown_11 !== undefined) settings[11] = zoneSettings.unknown_11;
-    if (zoneSettings.deactivated !== undefined) {
-        if (typeof zoneSettings.deactivated !== 'boolean') throw new Error('Deactivated must be a boolean');
-        settings[12] = zoneSettings.deactivated ? 1 : 0;
-    }
-    if (zoneSettings.unknown_13 !== undefined) settings[13] = zoneSettings.unknown_13;
-    if (zoneSettings.name !== undefined) {
-        if (typeof zoneSettings.name !== 'string') throw new Error('Zone name must be a string');
-        if (zoneSettings.name.length > 255) throw new Error('Zone name is too long (max 255 characters)');
-        settings[15] = zoneSettings.name;
-    }
-    if (zoneSettings.cuttingAngleCustom !== undefined) {
-        if (typeof zoneSettings.cuttingAngleCustom !== 'boolean') throw new Error('Cutting angle custom must be a boolean');
-        settings[17] = zoneSettings.cuttingAngleCustom ? 1 : 0;
-    }
-    if (zoneSettings.cuttingAngle !== undefined) {
-        if (typeof zoneSettings.cuttingAngle !== 'number') throw new Error('Cutting angle must be a number');
-        if (zoneSettings.cuttingAngle < 0 || zoneSettings.cuttingAngle > 360) throw new Error('Cutting angle must be between 0 and 360 degrees');
-        settings[19] = zoneSettings.cuttingAngle;
-    }
-    const encoded = { 1: type, [type]: settings };
-    return encoded;
+    const name = zoneSettings.name ?? '';
+    if (typeof name !== 'string' || name.length > 255) throw new Error('name must be a string of at most 255 characters');
+    const customAngle = zoneSettings.customAngle ?? 0;
+    if (typeof customAngle !== 'number') throw new Error('customAngle must be a number');
+    // housekeeping fields preserved from the source record (raw) where known, else the observed defaults
+    const raw = zoneSettings.raw ?? {};
+    const record = Buffer.concat([
+        protobufField(1, 0, zone),
+        protobufField(5, 0, raw[5] ?? 1),
+        protobufField(6, 0, raw[6] ?? 0),
+        protobufField(7, 0, raw[7] ?? 0),
+        protobufField(8, 0, modeValue),
+        protobufField(9, 0, heightValue),
+        protobufField(11, 0, raw[11] ?? 0),
+        protobufField(12, 0, zoneSettings.deactivated ? 1 : 0),
+        protobufField(13, 0, zoneSettings.priority ?? 0),
+        protobufField(15, 2, Buffer.from(name, 'utf8')),
+        protobufField(17, 0, zoneSettings.customAngleActive ? 1 : 0),
+        protobufField(18, 5, customAngle),
+        protobufField(19, 0, zoneSettings.borderCut ? 1 : 0),
+    ]);
+    // [2] payload = { 1: type, [type]: record }
+    return Buffer.concat([protobufField(1, 0, type), protobufField(type, 2, record)]);
 }
+// Decode an MQTT zone-settings payload (the command's [2] = { 1: type, [type]: record }). Shares the
+// cloud zone-record decoder so the field mapping (angle [18], borderCut [19], priority [13]) is
+// consistent. Used by the CMD_ROBOT message interpreter (StigaAPIMessages).
 function decodeRobotZoneSettings(decoded) {
-    const settings = decoded?.[decoded?.[1]];
-    return settings
-        ? upgradeRobotZoneSettings({
-              type: decoded[1],
-              zone: settings[1],
-              unknown_5: settings[5],
-              unknown_6: settings[6],
-              unknown_7: settings[7],
-              cuttingMode: getCuttingModesMap()[settings[8] || 0],
-              cuttingHeight: getCuttingHeightsMap()[settings[9] || 5],
-              unknown_11: settings[11],
-              deactivated: Boolean(settings[12]),
-              unknown_13: settings[13],
-              name: settings[15] || '',
-              cuttingAngleCustom: Boolean(settings[17]),
-              cuttingAngle: settings[19] || 0,
-          })
-        : undefined;
+    const type = decoded?.[1];
+    const record = type === undefined ? undefined : decoded?.[type];
+    if (!record) return undefined;
+    const settings = decodePerimeterZoneSettings(record);
+    settings.type = type;
+    settings.toString = () => formatRobotZoneSettings(settings);
+    return settings;
 }
 function formatRobotZoneSettings(zoneSettings) {
-    return formatStruct(zoneSettings, 'zoneSettings', { cuttingHeight: { units: 'mm' }, cuttingAngle: { units: 'deg' } });
-}
-function upgradeRobotZoneSettings(zoneSettings) {
-    zoneSettings.getCuttingModes = () => Object.keys(getCuttingModesMap());
-    zoneSettings.getCuttingHeights = () => Object.keys(getCuttingHeightsMap());
-    zoneSettings.toString = () => formatRobotZoneSettings(zoneSettings);
-    return zoneSettings;
+    return formatPerimeterZoneSettings(zoneSettings);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1083,6 +1082,131 @@ function decodeRobotZoneOrder(decoded) {
 }
 function formatRobotZoneOrder(zoneOrder) {
     return zoneOrder?.join(',') ?? '-';
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Per-zone settings — the CLOUD representation.
+//
+// Per-zone settings are NOT carried over MQTT (there is no ZONE_SETTINGS log topic, and CMD_ROBOT
+// cmd 7 carries something else). They live in the cloud perimeter resource: GET /api/perimeters ->
+// attributes.data_points.data is a protobuf blob whose field 1 is the list of zones, one sub-message
+// per zone. Each zone sub-message carries both geometry (points/anchor/name) and these settings:
+//   [1]  id                 varint
+//   [8]  cuttingMode        varint  (getCuttingModesMap; absent => 0/denseGrid)
+//   [9]  cuttingHeight      varint  (getCuttingHeightsMap index; absent => 5/45mm)
+//   [13] priority           varint  (cut order; absent => 0, e.g. the main zone)
+//   [15] name               string  (UTF-8; protobufDecode yields hex for non-ASCII)
+//   [17] customAngleActive  varint  (bool)
+//   [18] customAngle        FIXED32 float (degrees, signed)
+//   [19] borderCut          varint  (bool; absent/unset => off)
+// Verified 2026-06-05 against a live garden and a before/after app-edit diff (height [9], borderCut
+// [19]). Writes go back via PATCH /api/perimeters/{uuid} (see StigaAPIPerimeters.setZoneSettings),
+// patched at the wire level so the geometry bytes are preserved. Field number / wire-type spec, the
+// single source of truth shared by read (decode) and write (patch):
+const PERIMETER_ZONE_FIELDS = {
+    cuttingMode: { field: 8, wire: 0, kind: 'mode' },
+    cuttingHeight: { field: 9, wire: 0, kind: 'height' },
+    priority: { field: 13, wire: 0, kind: 'int' },
+    name: { field: 15, wire: 2, kind: 'string' },
+    customAngleActive: { field: 17, wire: 0, kind: 'bool' },
+    customAngle: { field: 18, wire: 5, kind: 'float' },
+    borderCut: { field: 19, wire: 0, kind: 'bool' },
+};
+
+function _decodePerimeterZoneName(value) {
+    if (typeof value !== 'string') return value;
+    if (/^(?:[\da-f]{2})+$/i.test(value)) return Buffer.from(value, 'hex').toString('utf8');
+    return value;
+}
+
+// Decode a single zone sub-message (as produced by protobufDecode of data_points field 1) into a
+// friendly settings object. Unknown housekeeping fields ([5],[10],[11]) are preserved under `raw`
+// so callers can inspect them without us guessing their meaning.
+function decodePerimeterZoneSettings(zoneEntry) {
+    if (!zoneEntry || typeof zoneEntry !== 'object') return undefined;
+    const cuttingModesByValue = Object.fromEntries(Object.entries(getCuttingModesMap()).map(([k, v]) => [v, k]));
+    const cuttingHeightsByValue = Object.fromEntries(Object.entries(getCuttingHeightsMap()).map(([k, v]) => [v, Number(k)]));
+    const modeValue = zoneEntry[8] ?? 0;
+    const heightValue = zoneEntry[9] ?? 5;
+    return {
+        id: zoneEntry[1],
+        name: _decodePerimeterZoneName(zoneEntry[15]) || '',
+        cuttingMode: cuttingModesByValue[modeValue] ?? modeValue,
+        cuttingHeight: cuttingHeightsByValue[heightValue] ?? heightValue, // mm
+        priority: zoneEntry[13] ?? 0,
+        customAngleActive: Boolean(zoneEntry[17]),
+        customAngle: zoneEntry[18] ?? 0, // degrees
+        borderCut: Boolean(zoneEntry[19]),
+        raw: { 5: zoneEntry[5], 10: zoneEntry[10], 11: zoneEntry[11] },
+    };
+}
+
+function formatPerimeterZoneSettings(settings) {
+    if (!settings) return '-';
+    return formatStruct(
+        {
+            id: settings.id,
+            name: settings.name,
+            cuttingHeight: settings.cuttingHeight,
+            cuttingMode: settings.cuttingMode,
+            priority: settings.priority,
+            customAngle: settings.customAngleActive ? settings.customAngle : 'off',
+            borderCut: settings.borderCut,
+        },
+        'zoneSettings',
+        { cuttingHeight: { units: 'mm' }, customAngle: { units: 'deg' }, borderCut: { onoff: true } }
+    );
+}
+
+// Translate a friendly partial settings object ({ cuttingHeight, cuttingMode, priority, name,
+// customAngleActive, customAngle, borderCut }) into a list of wire-level patches
+// ({ field, wire, value }) for protobufSetFields. Validates each value and throws on bad input.
+// Only keys present in `settings` are emitted, so callers can change one field without touching others.
+function encodePerimeterZoneSettings(settings) {
+    if (!settings || typeof settings !== 'object') throw new Error('Zone settings must be an object');
+    const patches = [];
+    const heights = getCuttingHeightsMap(),
+        modes = getCuttingModesMap();
+    for (const [key, value] of Object.entries(settings)) {
+        if (value === undefined || key === 'id' || key === 'zone' || key === 'raw') continue;
+        const spec = PERIMETER_ZONE_FIELDS[key];
+        if (!spec) throw new Error(`Unknown zone setting: ${key}`);
+        let encoded;
+        switch (spec.kind) {
+            case 'height':
+                if (heights[value] === undefined) throw new Error(`cuttingHeight must be one of: ${Object.keys(heights).join(', ')} mm`);
+                encoded = heights[value];
+                break;
+            case 'mode':
+                if (typeof value === 'string') {
+                    if (modes[value] === undefined) throw new Error(`cuttingMode must be one of: ${Object.keys(modes).join(', ')}`);
+                    encoded = modes[value];
+                } else if (typeof value === 'number') encoded = value;
+                else throw new Error('cuttingMode must be a string or number');
+                break;
+            case 'int':
+                if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throw new Error(`${key} must be a non-negative integer`);
+                encoded = value;
+                break;
+            case 'bool':
+                if (typeof value !== 'boolean') throw new Error(`${key} must be a boolean`);
+                encoded = value ? 1 : 0;
+                break;
+            case 'float':
+                if (typeof value !== 'number') throw new Error(`${key} must be a number`);
+                encoded = value;
+                break;
+            case 'string':
+                if (typeof value !== 'string') throw new Error(`${key} must be a string`);
+                if (value.length > 255) throw new Error(`${key} is too long (max 255 characters)`);
+                encoded = Buffer.from(value, 'utf8');
+                break;
+            default:
+                throw new Error(`Unhandled zone setting kind: ${spec.kind}`);
+        }
+        patches.push({ field: spec.field, wire: spec.wire, value: encoded });
+    }
+    return patches;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1331,6 +1455,10 @@ module.exports = {
     encodeRobotZoneOrder,
     decodeRobotZoneOrder,
     formatRobotZoneOrder,
+    PERIMETER_ZONE_FIELDS,
+    decodePerimeterZoneSettings,
+    encodePerimeterZoneSettings,
+    formatPerimeterZoneSettings,
     //
     BASE_MESSAGE_TOPICS,
     BASE_COMMAND_TOPICS,

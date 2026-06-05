@@ -123,13 +123,16 @@ class StigaAPIDevice extends StigaAPIComponent {
     async setScheduleSettings(scheduleSettings) {
         return this._setViaConnector('setScheduleSettings', scheduleSettings);
     }
-    async getZoneSettings(zone, options = {}) {
-        const allSettings = await this._dataGet('zoneSettings', options);
-        return {
-            value: allSettings.value?.[zone],
-            _updated: allSettings._updated,
-        };
+    // DEPRECATED: there is no MQTT read path for per-zone settings (no ZONE_SETTINGS log topic).
+    // Per-zone settings are read from the cloud perimeter — use StigaAPIPerimeters.getZoneSettings()
+    // / getAllZoneSettings(). Kept only to fail loudly rather than silently return undefined.
+    async getZoneSettings() {
+        throw new Error('getZoneSettings (MQTT) is not available — read per-zone settings from StigaAPIPerimeters.getZoneSettings()');
     }
+    // Immediate per-zone push to the robot over MQTT (CMD_ROBOT cmd 7). `zoneSettings` is the FULL
+    // zone record { zone, cuttingMode, cuttingHeight, priority, name, customAngleActive, customAngle,
+    // borderCut, ... }. NOTE: this only updates the robot's live copy; it does NOT persist to the cloud
+    // perimeter. To do both (persist + immediate, like the app), use StigaAPIPerimeters.setZoneSettings().
     async setZoneSettings(zoneSettings) {
         return this._setViaConnector('setZoneSettings', zoneSettings);
     }

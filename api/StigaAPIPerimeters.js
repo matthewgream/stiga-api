@@ -2,7 +2,8 @@
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const { formatStruct } = require('./StigaAPIUtilitiesFormat');
-const { protobufDecode } = require('./StigaAPIUtilitiesProtobuf');
+const { protobufDecode, protobufScan, protobufField, protobufSetFields } = require('./StigaAPIUtilitiesProtobuf');
+const { decodePerimeterZoneSettings, encodePerimeterZoneSettings } = require('./StigaAPIElements');
 const StigaAPIComponent = require('./StigaAPIComponent');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -72,6 +73,58 @@ function _decodePerimeterGeometry(perimeterData) {
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Per-zone settings share the data_points blob with the geometry (field 1 = zones, one sub-message
+// per zone). Decode just the settings, keyed by zone id.
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function _decodeZoneSettingsMap(perimeterData) {
+    const bytes = perimeterData?.attributes?.data_points?.data;
+    if (!Array.isArray(bytes) || bytes.length === 0) return {};
+    let decoded;
+    try {
+        decoded = protobufDecode(Buffer.from(bytes));
+    } catch {
+        return {};
+    }
+    let zones = [];
+    if (Array.isArray(decoded[1])) zones = decoded[1];
+    else if (decoded[1] !== undefined) zones = [decoded[1]];
+    const map = {};
+    for (const entry of zones) {
+        const settings = decodePerimeterZoneSettings(entry);
+        if (settings?.id !== undefined) map[settings.id] = settings;
+    }
+    return map;
+}
+
+// Wire-level patch of one zone's settings inside a data_points buffer. Every other byte (all the
+// geometry) is copied through verbatim — see protobufSetFields. Returns a new Buffer; throws if the
+// zone id is not present.
+function _patchZoneSettingsBytes(dataPointsBuf, zoneId, patches) {
+    const parts = [];
+    let found = false;
+    for (const f of protobufScan(dataPointsBuf)) {
+        if (f.field === 1 && !found) {
+            const sub = Buffer.from(dataPointsBuf.subarray(f.valStart, f.valEnd));
+            let id;
+            try {
+                id = protobufDecode(sub)[1];
+            } catch {
+                id = undefined;
+            }
+            if (id === zoneId) {
+                parts.push(protobufField(1, 2, protobufSetFields(sub, patches)));
+                found = true;
+                continue;
+            }
+        }
+        parts.push(dataPointsBuf.subarray(f.tagStart, f.valEnd));
+    }
+    if (!found) throw new Error(`zone ${zoneId} not found in perimeter`);
+    return Buffer.concat(parts);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 class StigaAPIPerimeter {
@@ -80,6 +133,13 @@ class StigaAPIPerimeter {
         this.index = index;
         this.name = undefined;
         this.path = undefined;
+        this.settings = undefined; // per-zone settings (zones only), decoded from data_points
+    }
+
+    // Per-zone settings { id, name, cuttingHeight(mm), cuttingMode, priority, customAngleActive,
+    // customAngle(deg), borderCut }. Only populated for zones (not obstacles/paths).
+    getSettings() {
+        return this.settings;
     }
 
     getId() {
@@ -151,6 +211,7 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         this.connectPaths = []; // inter-zone connector polylines
         this.dockingPaths = []; // approach polylines into the docking station
         this.pickupPoints = []; // singular pickup point locations (geometry layout TBD when sample data appears)
+        this.zoneSettings = {}; // per-zone settings keyed by zone id (decoded from data_points)
     }
 
     async load() {
@@ -189,7 +250,7 @@ class StigaAPIPerimeters extends StigaAPIComponent {
             this.display.error('perimeters: failed to write: nothing loaded');
             return false;
         }
-        const uuid = this.perimeterData.attributes.uuid;
+        const { uuid } = this.perimeterData.attributes;
         if (!uuid) {
             this.display.error('perimeters: failed to write: missing uuid');
             return false;
@@ -198,6 +259,7 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         // Refresh timestamp+checksum so the write supersedes the current record (checksum is the
         // string form of the epoch-ms timestamp), and drop null-valued top-level fields the write
         // schema rejects (e.g. base_position). Body envelope is { data: <attributes> }.
+        // eslint-disable-next-line unicorn/prefer-structured-clone
         const attributes = JSON.parse(JSON.stringify(this.perimeterData.attributes));
         const now = Date.now();
         const stamp = (obj) => {
@@ -226,6 +288,7 @@ class StigaAPIPerimeters extends StigaAPIComponent {
     _parseData() {
         const preview = this.perimeterData?.attributes?.preview;
         const geometry = _decodePerimeterGeometry(this.perimeterData);
+        this.zoneSettings = _decodeZoneSettingsMap(this.perimeterData); // keyed by zone id
         const build = (elements, kind) =>
             (elements ?? []).map((element, index) => {
                 const perimeter = new StigaAPIPerimeter(element, index);
@@ -234,6 +297,7 @@ class StigaAPIPerimeters extends StigaAPIComponent {
                     perimeter.name = geo.name;
                     perimeter.path = geo.path;
                 }
+                if (kind === 'zones') perimeter.settings = this.zoneSettings[perimeter.getId()];
                 return perimeter;
             });
         // The geometry blob's field 1 (zones) and field 3 (obstacles) hold BOTH the regular and
@@ -262,6 +326,97 @@ class StigaAPIPerimeters extends StigaAPIComponent {
 
     getZones() {
         return this.zones;
+    }
+
+    // ----- Per-zone settings (cloud) ---------------------------------------------------------------
+    // These are read from / written to the cloud perimeter (data_points), NOT MQTT. load() must have
+    // been called first. Settings shape: { id, name, cuttingHeight(mm), cuttingMode, priority,
+    // customAngleActive, customAngle(deg), borderCut }.
+
+    // All zones' settings as an array (bulk read).
+    getAllZoneSettings() {
+        return Object.values(this.zoneSettings);
+    }
+
+    // One zone's settings by zone id, or undefined if absent.
+    getZoneSettings(zoneId) {
+        return this.zoneSettings[zoneId];
+    }
+
+    // Change one zone's settings. `settings` is a partial object — only the keys present are changed
+    // (e.g. { cuttingHeight: 60, borderCut: true }). See setZoneSettingsBulk for the two-target write
+    // semantics and options. Returns { ok, cloud, robot }.
+    async setZoneSettings(zoneId, settings, options = {}) {
+        return this.setZoneSettingsBulk([{ zone: zoneId, ...settings }], options);
+    }
+
+    // Change several zones at once: changes = [{ zone, ...settings }, ...]. A zone settings change has
+    // TWO destinations and we write BOTH, in sequence, mirroring the app:
+    //   1. cloud  — patch the data_points blob (wire level, geometry untouched) and PATCH it back to
+    //               /api/perimeters. This is the persistent/bulk store and the canonical read source.
+    //   2. robot  — push each changed zone to the robot over MQTT (CMD_ROBOT cmd 7) for immediate
+    //               application. Requires a connected robot connector on this.device.
+    // options: { cloud = true, robot = true } to do one side only. Returns { ok, cloud, robot } where
+    // cloud/robot are true|false|undefined (undefined = not attempted). ok = every attempted target succeeded.
+    async setZoneSettingsBulk(changes, options = {}) {
+        const { cloud = true, robot = true } = options;
+        const result = { ok: false, cloud: undefined, robot: undefined };
+        if (!Array.isArray(changes) || changes.length === 0) {
+            this.display.error('perimeters: setZoneSettings: no changes provided');
+            return result;
+        }
+        const data = this.perimeterData?.attributes?.data_points?.data;
+        if (!Array.isArray(data) || data.length === 0) {
+            this.display.error('perimeters: setZoneSettings: nothing loaded (call load() first)');
+            return result;
+        }
+        // Validate up front, and compute the FULL merged settings per zone (needed for the robot push,
+        // which sends the whole record, not just the delta).
+        let buffer;
+        const merged = [];
+        try {
+            buffer = Buffer.from(data);
+            for (const change of changes) {
+                const { zone, ...settings } = change;
+                if (zone === undefined) throw new Error('each change must include a zone id');
+                const current = this.zoneSettings[zone];
+                if (current === undefined) throw new Error(`zone ${zone} not found in perimeter`);
+                const patches = encodePerimeterZoneSettings(settings); // validates values
+                if (patches.length > 0) buffer = _patchZoneSettingsBytes(buffer, zone, patches);
+                merged.push({ ...current, ...settings, zone });
+            }
+        } catch (e) {
+            this.display.error('perimeters: setZoneSettings: failed to encode:', e.message);
+            return result;
+        }
+
+        // 1. cloud
+        if (cloud) {
+            this.perimeterData.attributes.data_points.data = [...buffer];
+            result.cloud = await this.write(); // re-parses on success, refreshing this.zoneSettings
+        }
+
+        // 2. robot (immediate). Best-effort per zone; needs device + connected robot connector.
+        if (robot) {
+            if (!this.device || typeof this.device.setZoneSettings !== 'function') {
+                this.display.error('perimeters: setZoneSettings: no device for robot push');
+                result.robot = false;
+            } else {
+                result.robot = true;
+                for (const full of merged) {
+                    try {
+                        const ack = await this.device.setZoneSettings(full);
+                        if (ack === false) result.robot = false;
+                    } catch (e) {
+                        this.display.error(`perimeters: setZoneSettings: robot push failed for zone ${full.zone}:`, e.message);
+                        result.robot = false;
+                    }
+                }
+            }
+        }
+
+        result.ok = (result.cloud ?? true) && (result.robot ?? true);
+        return result;
     }
 
     getClosedZones() {

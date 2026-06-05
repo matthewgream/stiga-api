@@ -334,8 +334,10 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
         return this._commandRequest(ROBOT_COMMAND_IDS.SCHEDULING_SETTINGS_REQUEST, undefined, ROBOT_COMMAND_TOPICS.SCHEDULING_SETTINGS, 'scheduleSettings');
     }
     async getZoneSettings() {
-        // This needs special handling - might need to request all zones?
-        this.display.error(`connectedDevice ${this.macAddress}: getZoneSettings not fully implemented`);
+        // No MQTT read path exists for per-zone settings (no ZONE_SETTINGS log topic, and there is no
+        // zone-settings REQUEST command). Per-zone settings are read from the cloud perimeter instead
+        // — see StigaAPIPerimeters.getZoneSettings().
+        this.display.error(`connectedDevice ${this.macAddress}: getZoneSettings unavailable over MQTT — read from StigaAPIPerimeters`);
         return undefined;
     }
     async getZoneOrder() {
@@ -349,6 +351,10 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     async setScheduleSettings(scheduleSettings) {
         return this._commandRequest(ROBOT_COMMAND_IDS.SCHEDULING_SETTINGS_UPDATE, encodeRobotScheduleSettings(scheduleSettings), undefined, 'scheduleSettings');
     }
+    // Push a full per-zone settings record to the robot for immediate application (CMD_ROBOT cmd 7,
+    // type 3). encodeRobotZoneSettings returns the [2] payload bytes (angle as FIXED32); the robot
+    // ACKs with result OK. Does not persist to the cloud — StigaAPIPerimeters.setZoneSettings pairs
+    // this with the cloud write. Verified byte-exact against a live capture (2026-06-05).
     async setZoneSettings(zoneSettings) {
         return this._commandRequest(ROBOT_COMMAND_IDS.ZONE_SETTINGS_UPDATE, encodeRobotZoneSettings(zoneSettings), undefined, 'zoneSettings');
     }

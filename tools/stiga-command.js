@@ -659,6 +659,61 @@ registerCommand('settings', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
+    description: 'Display per-zone settings (cutting height, mode, priority, angle, border cut)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot zone-settings [zone] [help]',
+    summary: 'Read the per-zone settings from the cloud perimeter (the canonical store). Optionally pass a zone id to show just one zone.',
+    details: [
+        '',
+        'Per-zone settings are stored in the cloud perimeter, not over MQTT.',
+        'Each zone reports: name, cuttingHeight (mm), cuttingMode, priority,',
+        'customAngle (deg, when customAngleActive), borderCut.',
+        '',
+        'Read-only for now.',
+    ],
+    examples: ['stiga-command --robot zone-settings', 'stiga-command --robot zone-settings 2', 'stiga-command --robot zone-settings --format json | jq .'],
+    execute: async (options, context) => {
+        const { device, connectors, params } = context;
+        const { auth } = connectors;
+        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+        const server = new StigaAPIConnectionServer(auth);
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+
+        const wanted = params[0] !== undefined ? Number.parseInt(params[0], 10) : undefined;
+        let all = perimeters.getAllZoneSettings();
+        if (wanted !== undefined) {
+            if (!Number.isInteger(wanted)) throw throwExit(`invalid zone id: ${params[0]}`, 2);
+            all = all.filter((z) => z.id === wanted);
+            if (all.length === 0)
+                throw throwExit(
+                    `zone ${wanted} not found (zones: ${
+                        perimeters
+                            .getAllZoneSettings()
+                            .map((z) => z.id)
+                            .join(', ') || 'none'
+                    })`,
+                    2
+                );
+        }
+
+        display.text('Zone Settings:');
+        if (all.length === 0) display.text('  (no zones)');
+        for (const z of all) {
+            const angle = z.customAngleActive ? `${z.customAngle}°` : 'off';
+            display.text(`  zone ${z.id} "${z.name}": height=${z.cuttingHeight}mm mode=${z.cuttingMode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
+        }
+        display.json({
+            source: 'cloud',
+            kind: 'zoneSettings',
+            value: all.map((z) => ({ id: z.id, name: z.name, cuttingHeight: z.cuttingHeight, cuttingMode: z.cuttingMode, priority: z.priority, customAngleActive: z.customAngleActive, customAngle: z.customAngle, borderCut: z.borderCut })),
+        });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 registerCommand('start', {
     description: 'Start mowing',
     targets: ['robot'],
@@ -785,13 +840,13 @@ registerCommand(['go-away', 'goAway', 'avoid'], {
     ],
     examples: ['stiga-command --robot go-away 59.6620665 12.9959925 2 30'],
     execute: async (options, context) => {
-        const { device, connectors } = context;
+        const { device, connectors, params } = context;
         const { auth } = connectors;
-        const lat = Number.parseFloat(context.params[0]),
-            lng = Number.parseFloat(context.params[1]),
-            radius = Number.parseFloat(context.params[2]);
+        const lat = Number.parseFloat(params[0]),
+            lng = Number.parseFloat(params[1]),
+            radius = Number.parseFloat(params[2]);
         if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radius)) throw throwExit('go-away requires <lat> <lng> <radius_m>, e.g. go-away 59.662 12.996 2', 2);
-        const days = Number.isFinite(Number.parseFloat(context.params[3])) ? Number.parseFloat(context.params[3]) : 30;
+        const days = Number.isFinite(Number.parseFloat(params[3])) ? Number.parseFloat(params[3]) : 30;
         if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
         const server = new StigaAPIConnectionServer(auth);
         const perimeters = new StigaAPIPerimeters(server, device);

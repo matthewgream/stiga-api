@@ -343,6 +343,57 @@ test('Encode/decode 1000 messages', () => {
 });
 
 // --------------------------------------------------------------------------------------------
+// Wire-level surgical edit helpers (protobufScan / protobufField / protobufSetFields). These back
+// the per-zone settings patcher, which must rewrite specific fields while preserving every other
+// byte (so it never corrupts the perimeter geometry on a write).
+// --------------------------------------------------------------------------------------------
+
+section('Wire-level Edit Helpers');
+
+test('protobufScan reports field/wire/byte-ranges', () => {
+    const buf = protobuf.encode({ 1: 6, 8: 6, 15: 'hi' });
+    const fields = protobuf.protobufScan(buf);
+    if (fields.length !== 3) throw new Error(`expected 3 fields, got ${fields.length}`);
+    const f15 = fields.find((f) => f.field === 15);
+    if (f15.wire !== 2) throw new Error('field 15 should be length-delimited');
+    if (buf.subarray(f15.valStart, f15.valEnd).toString('utf8') !== 'hi') throw new Error('value range wrong');
+});
+
+test('protobufField builds a FIXED32 float field', () => {
+    const b = protobuf.protobufField(18, 5, -15);
+    // tag 0x95 0x01 (field 18, wire 5) + little-endian float32 -15.0 (0x0000 70c1)
+    if (b.toString('hex') !== '9501000070c1') throw new Error(`got ${b.toString('hex')}`);
+    if (protobuf.decode(b)[18] !== -15) throw new Error('round-trip float failed');
+});
+
+test('protobufSetFields replaces a field in place, preserving others', () => {
+    const buf = protobuf.encode({ 1: 6, 9: 6, 15: 'zone' });
+    const out = protobuf.protobufSetFields(buf, [{ field: 9, wire: 0, value: 8 }]);
+    const dec = protobuf.decode(out);
+    if (dec[9] !== 8 || dec[1] !== 6 || dec[15] !== 'zone') throw new Error(`unexpected ${JSON.stringify(dec)}`);
+});
+
+test('protobufSetFields appends an absent field', () => {
+    const buf = protobuf.encode({ 1: 6 });
+    const out = protobuf.protobufSetFields(buf, [{ field: 19, wire: 0, value: 1 }]);
+    const dec = protobuf.decode(out);
+    if (dec[1] !== 6 || dec[19] !== 1) throw new Error(`unexpected ${JSON.stringify(dec)}`);
+});
+
+test('protobufSetFields preserves untouched FIXED32/bytes verbatim (no lossy round-trip)', () => {
+    // Build a message with a float and a name, patch an unrelated varint, and confirm the float and
+    // name bytes are byte-identical (a decode->encode round-trip would corrupt the FIXED32).
+    const original = Buffer.concat([protobuf.protobufField(1, 0, 6), protobuf.protobufField(18, 5, -15), protobuf.protobufField(15, 2, Buffer.from('Grönsaksland', 'utf8')), protobuf.protobufField(9, 0, 6)]);
+    const patched = protobuf.protobufSetFields(original, [{ field: 9, wire: 0, value: 8 }]);
+    const fOrig = protobuf.protobufScan(original).find((f) => f.field === 18);
+    const fNew = protobuf.protobufScan(patched).find((f) => f.field === 18);
+    if (!original.subarray(fOrig.valStart, fOrig.valEnd).equals(patched.subarray(fNew.valStart, fNew.valEnd))) throw new Error('FIXED32 angle bytes changed');
+    const nOrig = protobuf.protobufScan(original).find((f) => f.field === 15);
+    const nNew = protobuf.protobufScan(patched).find((f) => f.field === 15);
+    if (!original.subarray(nOrig.valStart, nOrig.valEnd).equals(patched.subarray(nNew.valStart, nNew.valEnd))) throw new Error('name bytes changed');
+});
+
+// --------------------------------------------------------------------------------------------
 // --------------------------------------------------------------------------------------------
 
 console.log(`\n${colors.blue}==============================${colors.reset}`);

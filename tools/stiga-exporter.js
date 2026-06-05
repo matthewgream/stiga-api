@@ -598,7 +598,7 @@ Google Sheets Setup:
             const filterFn = exporter._buildRowFilter(filter, mac_device, mac_base);
             const toStdout = !outputFile || outputFile === '-';
             const output = toStdout ? process.stdout : fs.createWriteStream(outputFile);
-            console.error(`Following ${dbPath} for new messages (${verbose ? 'verbose' : 'plain'} log${filter ? `, filter: ${filter}` : ''}) - Ctrl-C to stop`);
+            console.error(`Following ${dbPath} for new messages (${verbose ? 'verbose' : 'plain'} log${filter ? ', filter: ' + filter : ''}) - Ctrl-C to stop`);
             process.on('SIGINT', () => exporter.stopFollow());
             await exporter.followLog(output, mac_device, mac_base, filterFn, verbose);
             if (!toStdout) output.end();

@@ -130,6 +130,132 @@ function stringToBytes(string) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Low-level wire-format helpers for surgical, loss-free edits of an EXISTING protobuf message.
+// protobufDecode is lossy (FIXED64 -> hex string, FIXED32 -> float, string/bytes ambiguity), so a
+// decode -> mutate -> protobufEncode round-trip corrupts geometry. These helpers instead walk the
+// raw bytes and rewrite only the fields we target, copying every other field through verbatim.
+// Used to patch per-zone settings inside the perimeter data_points blob without touching the
+// (large, fragile) point/anchor geometry. See StigaAPIPerimeters.setZoneSettings.
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function _readRawVarint(buf, pos) {
+    let result = 0n,
+        shift = 0n,
+        p = pos;
+    for (;;) {
+        const byte = buf[p++];
+        result |= BigInt(byte & 0x7f) << shift;
+        if ((byte & 0x80) === 0) break;
+        shift += 7n;
+    }
+    return { value: result, next: p };
+}
+function _encodeRawVarint(value) {
+    let v = BigInt.asUintN(64, BigInt(value)); // two's-complement 64-bit, so negatives encode like protobuf int64
+    const out = [];
+    for (;;) {
+        const byte = Number(v & 0x7fn);
+        v >>= 7n;
+        if (v === 0n) {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+    return Buffer.from(out);
+}
+function _encodeTag(field, wire) {
+    return _encodeRawVarint((field << 3) | wire);
+}
+
+// Walk one message level, returning each field's wire type and exact byte ranges. tagStart..valEnd is
+// the whole field (copy that slice to preserve a field verbatim); valStart..valEnd is just the value.
+function protobufScan(buf, start = 0, end = buf.length) {
+    const fields = [];
+    let p = start;
+    while (p < end) {
+        const tagStart = p;
+        const tag = _readRawVarint(buf, p);
+        p = tag.next;
+        const field = Number(tag.value) >>> 3,
+            wire = Number(tag.value) & 7;
+        let valStart = p,
+            valEnd;
+        switch (wire) {
+            case WIRE_TYPES.VARINT:
+                valEnd = _readRawVarint(buf, p).next;
+                break;
+            case WIRE_TYPES.FIXED64:
+                valEnd = p + 8;
+                break;
+            case WIRE_TYPES.FIXED32:
+                valEnd = p + 4;
+                break;
+            case WIRE_TYPES.LENGTH_DELIMITED: {
+                const len = _readRawVarint(buf, p);
+                valStart = len.next;
+                valEnd = len.next + Number(len.value);
+                break;
+            }
+            default:
+                throw new Error(`protobufScan: unsupported wire type ${wire} for field ${field}`);
+        }
+        fields.push({ field, wire, tagStart, valStart, valEnd });
+        p = valEnd;
+    }
+    return fields;
+}
+
+// Build a complete field (tag + value) buffer. For LENGTH_DELIMITED, `value` may be a Buffer or a
+// string (encoded UTF-8). For FIXED32, `value` is written as a little-endian float.
+function protobufField(field, wire, value) {
+    switch (wire) {
+        case WIRE_TYPES.VARINT:
+            return Buffer.concat([_encodeTag(field, wire), _encodeRawVarint(value)]);
+        case WIRE_TYPES.FIXED32: {
+            const b = Buffer.alloc(4);
+            b.writeFloatLE(Number(value), 0);
+            return Buffer.concat([_encodeTag(field, wire), b]);
+        }
+        case WIRE_TYPES.FIXED64: {
+            const b = Buffer.isBuffer(value) ? value : Buffer.from(value, 'hex');
+            return Buffer.concat([_encodeTag(field, wire), b]);
+        }
+        case WIRE_TYPES.LENGTH_DELIMITED: {
+            const content = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8');
+            return Buffer.concat([_encodeTag(field, wire), _encodeRawVarint(content.length), content]);
+        }
+        default:
+            throw new Error(`protobufField: unsupported wire type ${wire}`);
+    }
+}
+
+// Replace-or-append top-level fields, preserving all others byte-for-byte. `patches` is an array of
+// { field, wire, value } (replace existing occurrence, else append) or { field, delete: true }.
+// Singular fields only — intended for scalar settings, not repeated fields.
+function protobufSetFields(buf, patches) {
+    const byField = new Map(patches.map((p) => [p.field, p]));
+    const handled = new Set();
+    const parts = [];
+    for (const f of protobufScan(buf)) {
+        const patch = byField.get(f.field);
+        if (patch) {
+            if (!handled.has(f.field)) {
+                if (!patch.delete) parts.push(protobufField(f.field, patch.wire, patch.value));
+                handled.add(f.field);
+            }
+            continue; // drop the original (replaced or deleted)
+        }
+        parts.push(buf.subarray(f.tagStart, f.valEnd));
+    }
+    for (const patch of patches) if (!handled.has(patch.field) && !patch.delete) parts.push(protobufField(patch.field, patch.wire, patch.value));
+    return Buffer.concat(parts);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 function hexToProtobuf(hexString) {
     return protobufDecode(Buffer.from(hexString, 'hex'));
 }
@@ -146,6 +272,9 @@ module.exports = {
     protobufDecode,
     encode: protobufEncode,
     decode: protobufDecode,
+    protobufScan,
+    protobufField,
+    protobufSetFields,
     stringToBytes,
     hexToProtobuf,
     protobufToHex,

@@ -14,7 +14,8 @@ const StigaAPIComponent = require('./StigaAPIComponent');
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 function _asArray(value) {
-    return value === undefined ? [] : Array.isArray(value) ? value : [value];
+    if (value === undefined) return [];
+    return Array.isArray(value) ? value : [value];
 }
 // A circular obstacle: { 1:{1:east, 2:north}, 2:radius } — fixed32 floats, same layout as GO_AWAY.
 function _decodeCircle(obstacle, ref) {

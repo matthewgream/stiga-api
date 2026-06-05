@@ -274,7 +274,7 @@ class WebStatusProcessor {
         }
         try {
             this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS[id], params), { qos: 2 });
-            this.logger(`WebStatus: command ${id} dispatched${params ? ` (zone ${req.query.zone})` : ''}`);
+            this.logger(`WebStatus: command ${id} dispatched${params ? ' (zone ' + req.query.zone + ')' : ''}`);
             res.json({ ok: true, command: id });
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
