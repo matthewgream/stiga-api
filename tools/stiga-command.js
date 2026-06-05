@@ -227,7 +227,7 @@ async function connectToRobot(device, connectors) {
         connectors.deviceConnection = new StigaAPIConnectionDevice(connectors.auth, (await device.getBrokerId()).value, { debug: globalOptions.debug });
         connectors.connectedDevice = new StigaAPIDeviceConnector(device, connectors.deviceConnection);
         if (!(await connectors.connectedDevice.listen())) throw new Error('Failed to connect to robot');
-        display.debug('Robot connected successfully');
+        display.log(`Connected to robot/${device.getMacAddress()} '${(await device.getName()).value}'`);
     }
 }
 
@@ -237,7 +237,7 @@ async function connectToBase(base, connectors) {
         if (!connectors.deviceConnection) connectors.deviceConnection = new StigaAPIConnectionDevice(connectors.auth, (await connectors.device.getBrokerId()).value, { debug: globalOptions.debug });
         connectors.connectedBase = new StigaAPIBaseConnector(base, connectors.deviceConnection);
         if (!(await connectors.connectedBase.listen())) throw new Error('Failed to connect to base');
-        display.debug('Base connected successfully');
+        display.log(`Connected to base/${base.getMacAddress()}`);
     }
 }
 
@@ -1542,9 +1542,10 @@ async function main() {
         const { device, base } = framework.getDeviceAndBasePair();
         if (!device) throw new Error('No robot found');
         if (options.target !== 'robot' && !base) throw new Error('No base found for robot');
-        const robotStr = `robot/${device.getMacAddress()} '${(await device.getName()).value}'`;
-        const baseStr = base ? `base/${base.getMacAddress()}` : '';
-        display.log(`Connected to ${robotStr + (options.target === 'robot' ? '' : ' and ' + baseStr)}`);
+        // Framework load only reaches the CLOUD (auth + garage) — no device MQTT session is opened here.
+        // The actual robot/base MQTT connect happens lazily in connectToRobot/connectToBase (and is logged
+        // there), so cloud-only commands (zone-settings, notifications, …) never connect to MQTT at all.
+        display.verbose(`Cloud: robot/${device.getMacAddress()} '${(await device.getName()).value}'${base ? `, base/${base.getMacAddress()}` : ''}`);
 
         const connectors = {
             auth: framework.auth,
