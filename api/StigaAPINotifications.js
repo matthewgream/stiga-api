@@ -60,7 +60,7 @@ class StigaAPINotification {
     }
 
     isRead() {
-        return this.data?.attributes?.read_at !== undefined;
+        return this.data?.attributes?.read_at != null;
     }
 
     getReadAt() {
@@ -162,6 +162,24 @@ class StigaAPINotifications extends StigaAPIComponent {
             }
         } catch (e) {
             this.display.error('notifications: failed to load:', e);
+        }
+        return false;
+    }
+
+    // Delete (dismiss) a notification by its uuid via DELETE /api/user/notifications/{uuid} (confirmed).
+    // NOTE: a mark-as-read path exists too (the app does it) but hasn't been found yet — none of the
+    // obvious REST/JSON:API shapes worked, and no fetch implies read; needs HTTPS interception of the app
+    // to discover. Returns true on success and drops it from the local list.
+    async delete(uuid) {
+        if (!uuid) return false;
+        try {
+            const response = await this.server.delete(`/api/user/notifications/${uuid}`);
+            if (response.ok) {
+                this.notifications = this.notifications.filter((n) => n.getUuid() !== uuid);
+                return true;
+            }
+        } catch (e) {
+            this.display.error('notifications: failed to delete:', e);
         }
         return false;
     }

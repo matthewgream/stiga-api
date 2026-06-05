@@ -1422,6 +1422,57 @@ async function runNotifications(credentials, selectors) {
     });
 }
 
+// Resolve which notifications a `delete[:selector]` targets. `all` is sorted newest-first.
+//   (none)        -> all          read|unread -> by state
+//   <N>s|m|h|d    -> created within the last N (e.g. 5h, 20m)
+//   YYYY-MM[-DD]  -> created on that date prefix
+//   <N>           -> the last N (most recent)        <uuid> -> that exact notification
+function notificationDeleteTargets(all, selector) {
+    if (!selector) return all.slice();
+    const sel = selector.toLowerCase();
+    if (sel === 'read') return all.filter((n) => n.isRead());
+    if (sel === 'unread') return all.filter((n) => !n.isRead());
+    const dur = sel.match(/^(\d+)([smhd])$/);
+    if (dur) {
+        const mult = { s: 1e3, m: 60e3, h: 3600e3, d: 86400e3 }[dur[2]];
+        const cutoff = Date.now() - Number(dur[1]) * mult;
+        return all.filter((n) => (n.getCreatedAt()?.getTime() ?? 0) > cutoff);
+    }
+    if (/^\d{4}-\d{2}(-\d{2})?$/.test(sel)) return all.filter((n) => (n.getCreatedAt()?.toISOString() ?? '').startsWith(sel));
+    if (/^\d+$/.test(sel)) return all.slice(0, Number(sel)); // last N (newest-first)
+    return all.filter((n) => n.getUuid() === selector); // uuid (case-sensitive)
+}
+
+async function runNotificationsDelete(credentials, selector) {
+    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+    const server = new StigaAPIConnectionServer(auth);
+    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
+    const notifications = new StigaAPINotifications(server);
+    if (!(await notifications.load())) throw throwExit('failed to load notifications', 2);
+
+    const all = [...notifications.getAll()].sort((a, b) => (b.getCreatedAt()?.getTime() ?? 0) - (a.getCreatedAt()?.getTime() ?? 0));
+    const targets = notificationDeleteTargets(all, selector);
+    const label = `delete${selector ? ':' + selector : ''}`;
+    if (targets.length === 0) {
+        display.text(`No notifications match '${label}' (of ${all.length} total)`);
+        display.json({ source: 'cloud', kind: 'notificationsDelete', value: { selector: selector ?? null, matched: 0, deleted: 0, total: all.length, results: [] } });
+        return;
+    }
+    display.text(`Deleting ${targets.length} of ${all.length} notification(s) [${label}]:`);
+    let deleted = 0;
+    const results = [];
+    for (const n of targets) {
+        const uuid = n.getUuid();
+        const ok = await notifications.delete(uuid);
+        if (ok) deleted++;
+        display.text(`  ${ok ? 'deleted' : 'FAILED '}  ${n.getCreatedAt()?.toISOString() ?? '?'}  ${n.isRead() ? 'read  ' : 'unread'}  ${n.getTitle()}`);
+        results.push({ uuid, ok, createdAt: n.getCreatedAt()?.toISOString() ?? null, title: n.getTitle() });
+    }
+    display.text(`Done: ${deleted}/${targets.length} deleted.`);
+    display.json({ source: 'cloud', kind: 'notificationsDelete', value: { selector: selector ?? null, matched: targets.length, deleted, total: all.length, results } });
+}
+
 registerCommand('notifications', {
     description: 'Display device notifications/events from the cloud',
     targets: ['robot', 'base'],
@@ -1437,10 +1488,26 @@ registerCommand('notifications', {
         '  type:<value>             match notification type',
         '  category:<value>         match notification category',
         '  <value>                  bare value matches either type or category',
+        '',
+        'Delete (mark-as-read endpoint not found yet — only delete is wired):',
+        '  delete                   delete ALL notifications',
+        '  delete:read | :unread    by read state',
+        '  delete:5h | :20m         created within the last 5 hours / 20 minutes (s|m|h|d)',
+        '  delete:2025-06[-05]      created on that year-month[-day]',
+        '  delete:5                 the last 5 (most recent)',
+        '  delete:<uuid>            one specific notification',
     ],
-    examples: ['stiga-command notifications', 'stiga-command notifications unread', 'stiga-command notifications recent:48 error', 'stiga-command notifications recent unread --format json | jq .'],
+    examples: ['stiga-command notifications', 'stiga-command notifications unread', 'stiga-command notifications delete:read', 'stiga-command notifications delete:5h', 'stiga-command notifications delete:2026-06-05'],
     skipDefaultSetup: true,
-    execute: async (options, context) => runNotifications(context.credentials, context.params),
+    execute: async (options, context) => {
+        const first = (context.params[0] || '').toLowerCase();
+        if (first === 'delete' || first.startsWith('delete:')) {
+            const raw = context.params[0];
+            const selector = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : undefined;
+            return runNotificationsDelete(context.credentials, selector);
+        }
+        return runNotifications(context.credentials, context.params);
+    },
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------

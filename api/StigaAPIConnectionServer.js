@@ -98,6 +98,28 @@ class StigaAPIConnectionServer extends StigaAPIComponent {
         }
     }
 
+    async delete(endpoint) {
+        const url = new URL(this.baseUrl + endpoint);
+
+        const requestOptions = {
+            method: 'DELETE',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+        };
+        await this.auth.addAuthentication(requestOptions);
+
+        try {
+            const response = await fetch(url.toString(), requestOptions);
+            if (!response.ok) this.display.error(`connection: http delete request failed: ${response.status} ${response.statusText}`);
+            return response;
+        } catch (e) {
+            this.display.error(`connection: http delete request error:`, e);
+            throw e;
+        }
+    }
+
     getBaseUrl() {
         return this.baseUrl;
     }
