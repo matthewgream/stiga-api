@@ -17,20 +17,20 @@ function _asArray(value) {
     if (value === undefined) return [];
     return Array.isArray(value) ? value : [value];
 }
+// ENU metres (east, north) -> { latitude, longitude } using a reference origin; {} when no reference.
+function _enuToLatLng(east, north, ref) {
+    if (ref?.latitude === undefined || ref?.longitude === undefined) return {};
+    const mPerDegLat = 111320,
+        mPerDegLon = 111320 * Math.cos((ref.latitude * Math.PI) / 180);
+    return { latitude: ref.latitude + north / mPerDegLat, longitude: ref.longitude + east / mPerDegLon };
+}
 // A circular obstacle: { 1:{1:east, 2:north}, 2:radius } — fixed32 floats, same layout as GO_AWAY.
 function _decodeCircle(obstacle, ref) {
     const east = obstacle?.[1]?.[1],
         north = obstacle?.[1]?.[2],
         radius = obstacle?.[2];
     if (typeof east !== 'number' || typeof north !== 'number') return undefined;
-    const circle = { east, north, radius };
-    if (ref?.latitude !== undefined && ref?.longitude !== undefined) {
-        const mPerDegLat = 111320,
-            mPerDegLon = 111320 * Math.cos((ref.latitude * Math.PI) / 180);
-        circle.latitude = ref.latitude + north / mPerDegLat;
-        circle.longitude = ref.longitude + east / mPerDegLon;
-    }
-    return circle;
+    return { east, north, radius, ..._enuToLatLng(east, north, ref) };
 }
 
 const NOTIFICATION_PAYLOAD_DECODERS = {
@@ -101,9 +101,16 @@ class StigaAPINotification {
         return this.getData()?.deviceUuid || undefined;
     }
 
-    getPosition() {
+    // The event location carried by error/info notifications as data.x/data.y (ENU metres, x=east,
+    // y=north — same frame as obstacle geometry and the robot). Returns { x, y } plus { latitude,
+    // longitude } when a referencePosition is supplied. undefined when the notification carries no point.
+    getPosition(referencePosition) {
         const data = this.getData();
-        return data?.x && data?.y ? { x: Number.parseFloat(data.x), y: Number.parseFloat(data.y) } : undefined;
+        if (data?.x === undefined || data?.y === undefined) return undefined;
+        const x = Number.parseFloat(data.x),
+            y = Number.parseFloat(data.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+        return { x, y, ..._enuToLatLng(x, y, referencePosition) };
     }
 
     // Decode the notification's base64 protobuf `data.payload` into structured metadata, dispatched by

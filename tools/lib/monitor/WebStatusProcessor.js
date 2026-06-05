@@ -694,6 +694,8 @@ class WebStatusProcessor {
                             createdAt: n.getCreatedAt()?.toISOString(),
                             // decoded payload metadata (e.g. obstacle_proposal -> { obstacles:[{lat,lng,radius}] })
                             metadata: n.getMetadata(this.location),
+                            // single-point event location (stuck / out-of-perimeter / skip / job-done): { x, y, latitude, longitude }
+                            position: n.getPosition(this.location),
                         }));
                 } catch (e) {
                     this.logger(`WebStatus: notifications poll failed (${e.message})`);
@@ -931,6 +933,22 @@ function showProposalCircles(obstacles){
     }));
   }
   var on = true; // flash so it stands out from the static red obstacle circles
+  proposalFlash = setInterval(function(){ on = !on; for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setVisible(on); }, 450);
+}
+// Single-point notification location (stuck / out-of-perimeter / skip / job-done): a flashing red
+// crosshair sized like a radius-1m obstacle proposal, so the on/off change of shape is easy to spot.
+// Reuses proposalCircles/proposalFlash so clearProposalCircles() tears it down the same way.
+function showProposalCrosshair(lat, lng){
+  clearProposalCircles();
+  if(typeof map === 'undefined' || !map) return;
+  if(typeof lat !== 'number' || typeof lng !== 'number') return;
+  var R = 1; // metres — matches an obstacle proposal of radius 1
+  var dLat = R / 111320, dLng = R / (111320 * Math.cos(lat * Math.PI / 180));
+  function arm(path){ return new google.maps.Polyline({ path: path, strokeColor: '#ea4335', strokeOpacity: 1, strokeWeight: 2, clickable: false, zIndex: 8, map: map }); }
+  proposalCircles.push(arm([{ lat: lat, lng: lng - dLng }, { lat: lat, lng: lng + dLng }]));
+  proposalCircles.push(arm([{ lat: lat - dLat, lng: lng }, { lat: lat + dLat, lng: lng }]));
+  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R, fillOpacity: 0, strokeColor: '#ea4335', strokeOpacity: 0.6, strokeWeight: 1, clickable: false, zIndex: 8, map: map }));
+  var on = true;
   proposalFlash = setInterval(function(){ on = !on; for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setVisible(on); }, 450);
 }
 var batteryHistory = [], lastBatteryStatusTime = null;
@@ -2181,6 +2199,7 @@ function renderStatusBox(){
   var trk = '';
   if(URL_CONFIG.statusTracksControls !== 'off'){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
+    var notifBtn = '<span class="btn' + (notifBoxClosed ? '' : ' on') + '" onclick="toggleNotifBox()" title="show/hide the notifications box">#</span>';
     var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsDirtyFlag ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
     var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-fetch perimeters and notifications">' + (refreshBusy ? '↻…' : '↻') + '</span>';
     var visBtn = '<span class="btn" onclick="toggleTracksVisible()" title="temporarily hide/show tracks (recording continues)">' + (tracksVisible ? 'HIDE' : 'SHOW') + '</span>';
@@ -2190,7 +2209,7 @@ function renderStatusBox(){
       visBtn +
       '<span class="btn" onclick="clearTracks()">CLR</span>' +
       '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
-      alarmBtn + settingsBtn +
+      alarmBtn + notifBtn + settingsBtn +
     '</div>';
   }
   box.innerHTML =
@@ -2267,6 +2286,14 @@ function closeNotifBox(){
   for(var i = 0; i < notifications.length; i++) notifClosedUuids[notifications[i].uuid] = true;
   renderNotifBox();
 }
+// The '#' button in the status box toggles the notif box: bring it back if removed, or hide it if shown.
+// (Illuminated when the box is active i.e. not closed; re-rendered via renderStatusBox.)
+function toggleNotifBox(){
+  if(notifBoxClosed){ notifBoxClosed = false; renderNotifBox(); }
+  else { closeNotifBox(); }
+  renderStatusBox();
+}
+window.toggleNotifBox = toggleNotifBox;
 function renderNotifBox(){
   var box = document.getElementById('notifbox');
   if(!box) return;
@@ -2319,8 +2346,12 @@ function renderNotifBox(){
     (function(row){
       var n = notifByUuid(row.getAttribute('data-uuid'));
       var obs = n && n.metadata && n.metadata.obstacles;
+      var pos = n && n.position;
       if(obs && obs.length){
         row.addEventListener('mouseenter', function(){ showProposalCircles(obs); });
+        row.addEventListener('mouseleave', clearProposalCircles);
+      } else if(pos && typeof pos.latitude === 'number'){
+        row.addEventListener('mouseenter', function(){ showProposalCrosshair(pos.latitude, pos.longitude); });
         row.addEventListener('mouseleave', clearProposalCircles);
       }
     })(nrows[k]);

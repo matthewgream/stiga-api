@@ -347,14 +347,14 @@ registerCommand('version', {
             const version = await device.getVersion({ refresh: 'force' });
             display.text('Robot Version:');
             display.text(version.value.toString({ compressed: false }));
-            display.json({ source: 'robot', kind: 'version', value: version.value });
+            display.json({ source: 'robot', kind: 'version', value: version.value ?? null });
         }
         if (target === 'both' || target === 'base') {
             await connectToBase(base, connectors);
             const version = await base.getVersion({ refresh: 'force' });
             display.text('Base Version:');
             display.text(version.value.toString({ compressed: false }));
-            display.json({ source: 'base', kind: 'version', value: version.value });
+            display.json({ source: 'base', kind: 'version', value: version.value ?? null });
         }
     },
 });
@@ -633,7 +633,7 @@ registerCommand('settings', {
         'Robot settings include:',
         '  rainSensorEnabled, rainSensorDelay, keyboardLock,',
         '  zoneCuttingHeightEnabled, zoneCuttingHeight, zoneCuttingHeightUniform,',
-        '  antiTheft, smartCutHeight, longExit, longExitMode,',
+        '  antiTheft, smartCutHeight, longExitEnabled, longExitDistance,',
         '  pushNotifications, obstacleNotifications',
         '',
         'Base settings:',
@@ -1347,10 +1347,10 @@ async function runNotifications(credentials, selectors) {
     for (const selector of selectors) list = list.filter(notificationPredicate(selector));
     list = [...list].sort((a, b) => (b.getCreatedAt()?.getTime() ?? 0) - (a.getCreatedAt()?.getTime() ?? 0));
 
-    // resolve the base reference position (only if some notification carries geometry) so obstacle
-    // metadata can be shown as lat/lng + a copy-paste Google Maps link, not just ENU metres
+    // resolve the base reference position (only if some notification carries geometry or a point) so
+    // obstacle metadata AND error/info positions can be shown as lat/lng + a copy-paste Google Maps link
     let referencePosition;
-    if (list.some((n) => n.getMetadata()?.obstacles?.length)) {
+    if (list.some((n) => n.getMetadata()?.obstacles?.length || n.getPosition())) {
         try {
             const garage = new StigaAPIGarage(server);
             const device = (await garage.load()) ? garage.getDevices()?.[0] : undefined;
@@ -1376,6 +1376,11 @@ async function runNotifications(credentials, selectors) {
                 const link = typeof o.latitude === 'number' ? `  (https://www.google.com/maps?q=${o.latitude.toFixed(7)},${o.longitude.toFixed(7)})` : '';
                 display.text(`      obstacle: ${o.east.toFixed(1)},${o.north.toFixed(1)} m  radius ${o.radius?.toFixed(2)} m${link}`);
             }
+        const pos = n.getPosition(referencePosition);
+        if (pos) {
+            const link = typeof pos.latitude === 'number' ? `  (https://www.google.com/maps?q=${pos.latitude.toFixed(7)},${pos.longitude.toFixed(7)})` : '';
+            display.text(`      position: ${pos.x.toFixed(1)},${pos.y.toFixed(1)} m${link}`);
+        }
     }
     display.json({
         source: 'cloud',
@@ -1395,7 +1400,7 @@ async function runNotifications(credentials, selectors) {
                 title: n.getTitle(),
                 body: n.getBody(),
                 deviceUuid: n.getDeviceUuid() ?? null,
-                position: n.getPosition() ?? null,
+                position: n.getPosition(referencePosition) ?? null,
                 metadata: n.getMetadata(referencePosition) ?? null,
             })),
         },

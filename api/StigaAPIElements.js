@@ -618,6 +618,9 @@ function getRainDelaysMap() {
 function getCuttingModesMap() {
     return { denseGrid: 0, chessBoard: 1, northSouth: 5, eastWest: 6 };
 }
+function getLongExitDistancesMap() {
+    return { 1: 200, 2: 50, 3: 100, 4: 150, 5: 250, 6: 300, 7: 350 };
+}
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -659,15 +662,16 @@ function encodeRobotSettings(settings) {
         if (typeof settings.smartCutHeight !== 'boolean') throw new Error('smartCutHeight must be a boolean');
         encoded[7] = settings.smartCutHeight ? 1 : 0;
     }
-    if (settings.longExit !== undefined) {
-        if (typeof settings.longExit !== 'boolean') throw new Error('longExit must be a boolean');
+    if (settings.longExitEnabled !== undefined || settings.longExitDistance !== undefined) {
         if (!encoded[8]) encoded[8] = {};
-        encoded[8][1] = settings.longExit ? 1 : 0;
-    }
-    if (settings.longExitMode !== undefined) {
-        if (typeof settings.longExitMode !== 'number' || settings.longExitMode < 0) throw new Error('longExitMode must be a non-negative number');
-        if (!encoded[8]) encoded[8] = {};
-        encoded[8][3] = settings.longExitMode;
+        if (settings.longExitEnabled === false) encoded[8][1] = 0;
+        else {
+            const map = getLongExitDistancesMap();
+            const cm = settings.longExitDistance ?? 200; // enabling without a distance defaults to 200
+            const idx = Object.keys(map).find((i) => map[i] === cm);
+            if (idx === undefined) throw new Error(`longExitDistance must be one of: ${Object.values(map).join(', ')} cm`);
+            encoded[8][1] = Number(idx);
+        }
     }
     if (settings.zoneCuttingHeightUniform !== undefined) {
         if (typeof settings.zoneCuttingHeightUniform !== 'boolean') throw new Error('zoneCuttingHeightUniform must be a boolean');
@@ -697,8 +701,8 @@ function decodeRobotSettings(decoded) {
               // 4.3 is set to 1 when the height is being changed
               antiTheft: Boolean(decoded?.[6] === 1),
               smartCutHeight: Boolean(decoded?.[7] === 1),
-              longExit: Boolean(decoded?.[8]?.[1] === 1),
-              longExitMode: decoded?.[8]?.[3] || 0,
+              longExitEnabled: Boolean(decoded?.[8]?.[1]),
+              longExitDistance: getLongExitDistancesMap()[decoded?.[8]?.[1]] || 0, // cm; 0 when off
               zoneCuttingHeightUniform: Boolean(decoded?.[9] === 1),
               unknown: decoded?.[11] || 110,
               pushNotifications: Boolean(decoded?.[14]?.[1] === 1),
@@ -716,7 +720,8 @@ function formatRobotSettings(settings) {
         zoneCuttingHeightUniform: { onoff: true },
         antiTheft: { onoff: true },
         smartCutHeight: { onoff: true },
-        longExit: { onoff: true },
+        longExitEnabled: { onoff: true },
+        longExitDistance: { units: 'cm' },
         pushNotifications: { onoff: true },
         obstacleNotifications: { onoff: true },
     });
@@ -724,6 +729,7 @@ function formatRobotSettings(settings) {
 function upgradeRobotSettings(settings) {
     settings.getRainSensorDelays = () => Object.keys(getRainDelaysMap());
     settings.getCuttingHeights = () => Object.keys(getCuttingHeightsMap());
+    settings.getLongExitDistances = () => Object.values(getLongExitDistancesMap()).sort((a, b) => a - b);
     settings.toString = () => formatRobotSettings(settings);
     return settings;
 }
