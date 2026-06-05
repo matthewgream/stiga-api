@@ -1265,6 +1265,22 @@ async function runNotifications(credentials, selectors) {
     for (const selector of selectors) list = list.filter(notificationPredicate(selector));
     list = [...list].sort((a, b) => (b.getCreatedAt()?.getTime() ?? 0) - (a.getCreatedAt()?.getTime() ?? 0));
 
+    // resolve the base reference position (only if some notification carries geometry) so obstacle
+    // metadata can be shown as lat/lng + a copy-paste Google Maps link, not just ENU metres
+    let referencePosition;
+    if (list.some((n) => n.getMetadata()?.obstacles?.length)) {
+        try {
+            const garage = new StigaAPIGarage(server);
+            const device = (await garage.load()) ? garage.getDevices()?.[0] : undefined;
+            if (device) {
+                const perimeters = new StigaAPIPerimeters(server, device);
+                if (await perimeters.load()) referencePosition = perimeters.getReferencePosition();
+            }
+        } catch {
+            // no reference -> fall back to ENU metres without a link
+        }
+    }
+
     const filterNote = selectors.length > 0 ? ` [qualifiers: ${selectors.join(', ')}]` : '';
     display.text(`Notifications: ${list.length} shown of ${notifications.getCount()} total, ${notifications.getUnreadCount()} unread${filterNote}`);
     for (const n of list) {
@@ -1272,6 +1288,12 @@ async function runNotifications(credentials, selectors) {
         const status = n.isRead() ? 'read  ' : 'UNREAD';
         const kind = [n.getType(), n.getCategory()].filter(Boolean).join('/') || '-';
         display.text(`  ${when}  ${status}  ${kind}  ${n.getTitle()}`);
+        const meta = n.getMetadata(referencePosition);
+        if (meta?.obstacles?.length)
+            for (const o of meta.obstacles) {
+                const link = typeof o.latitude === 'number' ? `  (https://www.google.com/maps?q=${o.latitude.toFixed(7)},${o.longitude.toFixed(7)})` : '';
+                display.text(`      obstacle: ${o.east.toFixed(1)},${o.north.toFixed(1)} m  radius ${o.radius?.toFixed(2)} m${link}`);
+            }
     }
     display.json({
         source: 'cloud',
@@ -1292,6 +1314,7 @@ async function runNotifications(credentials, selectors) {
                 body: n.getBody(),
                 deviceUuid: n.getDeviceUuid() ?? null,
                 position: n.getPosition() ?? null,
+                metadata: n.getMetadata(referencePosition) ?? null,
             })),
         },
     });

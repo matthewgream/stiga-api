@@ -667,6 +667,8 @@ class WebStatusProcessor {
                             category: n.getCategory(),
                             read: n.isRead(),
                             createdAt: n.getCreatedAt()?.toISOString(),
+                            // decoded payload metadata (e.g. obstacle_proposal -> { obstacles:[{lat,lng,radius}] })
+                            metadata: n.getMetadata(this.location),
                         }));
                 } catch (e) {
                     this.logger(`WebStatus: notifications poll failed (${e.message})`);
@@ -852,6 +854,31 @@ var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
 var tracksOn = true, tracksVisible = true, alarmsHighlighted = false, crumbs = [], crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
+// Hovering a notification that carries decoded geometry (e.g. obstacle_proposal -> metadata.obstacles)
+// flashes it on the map — distinct purple, on/off, only while hovered. Generic: any future notification
+// metadata exposing {latitude,longitude,radius} circles renders the same way.
+var proposalCircles = [], proposalFlash = null;
+function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
+function clearProposalCircles(){
+  if(proposalFlash){ clearInterval(proposalFlash); proposalFlash = null; }
+  for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setMap(null);
+  proposalCircles = [];
+}
+function showProposalCircles(obstacles){
+  clearProposalCircles();
+  if(typeof map === 'undefined' || !map) return;
+  for(var i = 0; i < obstacles.length; i++){
+    var o = obstacles[i];
+    if(typeof o.latitude !== 'number' || typeof o.longitude !== 'number') continue;
+    proposalCircles.push(new google.maps.Circle({
+      center: { lat: o.latitude, lng: o.longitude }, radius: (typeof o.radius === 'number' && o.radius > 0 ? o.radius : 0.5),
+      fillColor: '#a142f4', fillOpacity: 0.5, strokeColor: '#a142f4', strokeOpacity: 1, strokeWeight: 2,
+      clickable: false, zIndex: 7, map: map
+    }));
+  }
+  var on = true; // flash so it stands out from the static red obstacle circles
+  proposalFlash = setInterval(function(){ on = !on; for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setVisible(on); }, 450);
+}
 var batteryHistory = [], lastBatteryStatusTime = null;
 
 // Hydrate from the snapshot baked into the page so the boxes show real data from first paint
@@ -2069,7 +2096,7 @@ function renderNotifBox(){
     var meta = [n.type, n.category].filter(Boolean).join(' · ');
     var body = n.body && n.body !== 'No body' ? n.body : '';
     var bodyChunk = body ? '<span class="nsep">—</span><span class="nbody">' + esc(body) + '</span>' : '';
-    html += '<div class="nrow">' +
+    html += '<div class="nrow" data-uuid="' + esc(n.uuid) + '">' +
       '<span class="ndismiss" data-uuid="' + esc(n.uuid) + '" title="dismiss">×</span>' +
       '<span class="nago">' + esc(ago(n.createdAt)) + '</span>' +
       '<div class="ncol">' + '<div class="nline"><strong>' + esc(n.title) + '</strong>' + bodyChunk + '</div>' + (meta ? '<div class="nmeta">' + esc(meta) + '</div>' : '') + '</div>' +
@@ -2081,6 +2108,18 @@ function renderNotifBox(){
     (function(el){
       el.addEventListener('click', function(){ dismissed[el.getAttribute('data-uuid')] = true; renderNotifBox(); });
     })(buttons[j]);
+  }
+  // hover a notification that has decoded geometry -> flash it on the map
+  var nrows = box.querySelectorAll('.nrow');
+  for(var k = 0; k < nrows.length; k++){
+    (function(row){
+      var n = notifByUuid(row.getAttribute('data-uuid'));
+      var obs = n && n.metadata && n.metadata.obstacles;
+      if(obs && obs.length){
+        row.addEventListener('mouseenter', function(){ showProposalCircles(obs); });
+        row.addEventListener('mouseleave', clearProposalCircles);
+      }
+    })(nrows[k]);
   }
   applyStackedNotifyPosition();
 }
