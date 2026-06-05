@@ -252,6 +252,9 @@ class WebStatusProcessor {
     // its own commands). Fire-and-forget — the robot's next STATUS will reflect the new state.
     _handleCommandPost(req, res) {
         const name = (req.params.name || '').toLowerCase();
+        // Schedule on/off is a write that must resend the FULL current schedule (time blocks preserved)
+        // with only [1] flipped — exactly what the app sends. Handled specially (see _handleScheduleToggle).
+        if (name === 'schedule-on' || name === 'schedule-off') return this._handleScheduleToggle(name === 'schedule-on', res);
         const simple = { 'start': 'START', 'stop': 'STOP', 'home': 'GO_HOME', 'reset-error': 'RESET_ERROR', 'boot': 'BOOT' };
         const zoned = { 'force-cut': 'FORCE_CUT', 'force-border-cut': 'FORCE_BORDER_CUT' };
         const id = simple[name] || zoned[name];
@@ -280,15 +283,38 @@ class WebStatusProcessor {
             res.status(500).json({ ok: false, error: e.message });
         }
     }
+    // Enable/disable scheduled mowing: resend the robot's last-reported schedule (its time blocks, stashed
+    // in _handleRobotSchedule) via SCHEDULING_SETTINGS_UPDATE (cmd 20) with [1] flipped — never a flag-only
+    // update, which could wipe the blocks. Byte-identical to what the app sends.
+    _handleScheduleToggle(enabled, res) {
+        if (!this.connection.isConnected()) {
+            res.status(503).json({ ok: false, error: 'MQTT not connected' });
+            return;
+        }
+        if (this.scheduleBlocks === undefined) {
+            res.status(409).json({ ok: false, error: 'no schedule received from robot yet' });
+            return;
+        }
+        try {
+            const params = { 1: enabled ? 1 : 0, 2: Buffer.from(this.scheduleBlocks, 'hex'), 4: 0 };
+            this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.SCHEDULING_SETTINGS_UPDATE, params), { qos: 2 });
+            this.logger(`WebStatus: schedule ${enabled ? 'enabled' : 'disabled'}`);
+            res.json({ ok: true, command: 'SCHEDULING_SETTINGS_UPDATE', enabled });
+        } catch (e) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
+    }
 
     // Re-fetch cloud-side data on demand (perimeters from the cloud, then notification poll
     // immediately). The MQTT state is already live, so nothing to do for it.
     async _handleRefreshPost(req, res) {
         try {
             this.perimeters = undefined;
-            await this._loadPerimeters();
+            await this._loadPerimeters(); // perimeters incl. per-zone settings (cloud)
             if (this.notificationsTimer) clearTimeout(this.notificationsTimer);
-            this._startNotificationPoll();
+            this._startNotificationPoll(); // notifications (cloud)
+            // force a fresh global-settings push from the robot (MQTT) so the settings panel re-syncs too
+            if (this.connection?.isConnected()) this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.SETTINGS_REQUEST), { qos: 2 });
             res.json({ ok: true });
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
@@ -492,6 +518,8 @@ class WebStatusProcessor {
         // Field 2 carries the packed per-day timeblocks as a bytes blob — protobufDecode
         // surfaces it as a string by default, so we must re-byte it before decode walks it.
         // Same shim MonitorProcessor uses; without it the decoder returns an empty schedule.
+        // Stash the raw [2] blocks (hex) so the enable/disable toggle can resend them verbatim.
+        if (decoded[2] !== undefined) this.scheduleBlocks = decoded[2];
         const schedule = elements.decodeRobotScheduleSettings({ ...decoded, 2: stringToBytes(decoded[2] || '') });
         if (schedule) {
             const blocks = [];
@@ -770,6 +798,7 @@ var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t > zoneCutoff))};
 var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() })};
 var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
+var CUTTING_MODE_LABELS = ${JSON.stringify(elements.getCuttingModeLabels())};
 </script>
 <script>${CLIENT_JS}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
@@ -891,10 +920,12 @@ html,body{margin:0;height:100%}
 #cmdbox .cbtn.home{color:#1967d2;border-color:#1967d2}
 #cmdbox .cbtn.reset{color:#c5221f;border-color:#c5221f}
 #cmdbox .cbtn.boot{color:#00838f;border-color:#00838f}
+#cmdbox .cbtn.sched{color:#5f6368;border-color:#c4c7c5}
+#cmdbox .cbtn.sched.on{background:#137333;border-color:#137333;color:#fff}
 #cmdbox .cbtn.cut,#cmdbox .cbtn.edge{color:#b06000;border-color:#b06000}
 #cmdbox .czone{flex:1 1 auto;min-width:0;font:12px system-ui,Segoe UI,Arial,sans-serif;border:1px solid #c4c7c5;border-radius:4px;padding:4px 6px;color:#202124;background:#fff;cursor:pointer}
 #cmdbox .cbtn.busy{opacity:.55;pointer-events:none}
-#cmdbox .cmsg{font-size:11px;color:#80868b;margin-left:auto;min-width:0}
+#cmdbox .cmsg{font-size:11px;color:#9aa0a6;margin-top:2px}
 `;
 
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
@@ -1962,6 +1993,7 @@ function scheduleSchedPanelClose(){
 // the contextually-appropriate verb based on the live robot status; Home is always present.
 // Commands POST to /api/command/:name and the local server publishes via MQTT.
 var commandBusy = false;
+var CMD_IDLE = 'ready · awaiting command'; // shown on the command status line when nothing is in flight
 function isRobotActive(r){
   if(!r) return false;
   var t = (r.statusType || '').toUpperCase();
@@ -1985,10 +2017,13 @@ function renderCommandBox(){
   var intervene = null;
   if(st === 'STARTUP_REQUIRED') intervene = { cmd: 'boot', label: 'Boot', cls: 'boot', title: 'boot the robot out of "startup required"' };
   else if(st === 'ERROR' || (r && r.interventionRequired)) intervene = { cmd: 'reset-error', label: 'Reset', cls: 'reset', title: 'clear a recoverable error (may not work for every fault)' };
+  // Schedule on/off toggle — shown once the robot has reported its schedule; the button shows current state.
+  var schedKnown = !!(r && r.schedule);
+  var schedOn = schedKnown && !!r.schedule.enabled;
   // Only rebuild the controls when something that affects them actually changes — otherwise the 2.5s
   // refresh would snap the zone <select> shut while the user is picking. (The cmsg span is updated
   // in place by setCommandMessage and is intentionally excluded from the signature.)
-  var sig = (active ? 'A' : '_') + (intervene ? intervene.cmd : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
+  var sig = (active ? 'A' : '_') + (intervene ? intervene.cmd : '_') + (schedKnown ? (schedOn ? 'S' : 's') : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
   if(sig === lastCmdSig && box.innerHTML){ return; }
   lastCmdSig = sig;
   var primary = active
@@ -1996,6 +2031,7 @@ function renderCommandBox(){
     : '<span class="cbtn start' + busy + '" data-cmd="start">Start</span>';
   var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
   var reset = intervene ? '<span class="cbtn ' + intervene.cls + busy + '" data-cmd="' + intervene.cmd + '" title="' + intervene.title + '">' + intervene.label + '</span>' : '';
+  var sched = schedKnown ? '<span class="cbtn sched' + (schedOn ? ' on' : '') + busy + '" data-cmd="schedule-' + (schedOn ? 'off' : 'on') + '" title="enable/disable scheduled mowing">Schedule ' + (schedOn ? 'ON' : 'OFF') + '</span>' : '';
   var cut = '';
   if(cutZones.length){
     var opts = '';
@@ -2009,10 +2045,13 @@ function renderCommandBox(){
       '<select class="czone" title="zone">' + opts + '</select>';
   }
   var msg = box.querySelector('.cmsg');
-  var msgHtml = msg ? msg.outerHTML : '<span class="cmsg"></span>';
-  // Zone-targeted commands wrap to their own row so long zone names don't overflow the fixed box width.
-  box.innerHTML = '<div class="crow">' + primary + home + reset + msgHtml + '</div>' +
-    (cut ? '<div class="crow">' + cut + '</div>' : '');
+  var msgHtml = msg ? msg.outerHTML : '<div class="cmsg">' + CMD_IDLE + '</div>';
+  // Buttons on their row(s); the command status/idle line is its own muted third row (same colour/size as
+  // the status box's "status … · position …" line) so transient dispatch messages aren't cramped beside the
+  // buttons. Zone-targeted commands wrap to their own row so long zone names don't overflow the box width.
+  box.innerHTML = '<div class="crow">' + primary + home + sched + reset + '</div>' +
+    (cut ? '<div class="crow">' + cut + '</div>' : '') +
+    msgHtml;
   var sel = box.querySelector('.czone');
   if(sel) sel.addEventListener('change', function(){ cutZone = parseInt(sel.value, 10); lastCmdSig = ''; });
   var btns = box.querySelectorAll('.cbtn');
@@ -2031,8 +2070,8 @@ function setCommandMessage(text, isError){
   if(!box) return;
   var span = box.querySelector('.cmsg');
   if(!span) return;
-  span.textContent = text || '';
-  span.style.color = isError ? '#c5221f' : '#80868b';
+  span.textContent = text || CMD_IDLE; // never blank — fall back to the idle message
+  span.style.color = isError ? '#c5221f' : '#9aa0a6';
 }
 function sendCommand(name, zone){
   if(commandBusy) return;
@@ -2105,10 +2144,14 @@ function humanizeKey(k){
   var s = String(k).replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
 }
-function fmtSettingValue(v){
-  if(v === true) return 'yes';
-  if(v === false) return 'no';
+// Units appended to numeric settings so the panel shows user values, not bare numbers.
+var SETTINGS_UNITS = { rainSensorDelay: ' h', zoneCuttingHeight: ' mm', longExitDistance: ' cm', cuttingHeight: ' mm', customAngle: '°' };
+function fmtSettingValue(k, v){
+  if(k === 'cuttingMode') return (typeof CUTTING_MODE_LABELS !== 'undefined' && CUTTING_MODE_LABELS[v]) || v;
+  if(v === true) return 'on';   // match the CLI (on/off, not yes/no)
+  if(v === false) return 'off';
   if(v === null || v === undefined || v === '') return '-';
+  if(typeof v === 'number' && SETTINGS_UNITS[k] !== undefined) return v + SETTINGS_UNITS[k];
   return String(v);
 }
 // Turn a settings object into [label, value] rows, skipping plumbing keys and any functions.
@@ -2119,7 +2162,7 @@ function settingsRows(obj){
   Object.keys(obj).forEach(function(k){
     if(skip[k]) return;
     if(typeof obj[k] === 'function' || (obj[k] && typeof obj[k] === 'object')) return;
-    rows.push([humanizeKey(k), fmtSettingValue(obj[k])]);
+    rows.push([humanizeKey(k), fmtSettingValue(k, obj[k])]);
   });
   return rows;
 }
@@ -2201,7 +2244,7 @@ function renderStatusBox(){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
     var notifBtn = '<span class="btn' + (notifBoxClosed ? '' : ' on') + '" onclick="toggleNotifBox()" title="show/hide the notifications box">#</span>';
     var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsDirtyFlag ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
-    var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-fetch perimeters and notifications">' + (refreshBusy ? '↻…' : '↻') + '</span>';
+    var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-sync everything: perimeters, zone settings, notifications, robot settings">' + (refreshBusy ? '↻…' : '↻') + '</span>';
     var visBtn = '<span class="btn" onclick="toggleTracksVisible()" title="temporarily hide/show tracks (recording continues)">' + (tracksVisible ? 'HIDE' : 'SHOW') + '</span>';
     var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + '" onclick="toggleAlarmsHighlight()" title="highlight error tracks and reveal deduped alarm log on hover">!</span>';
     trk = '<div class="tracks">' + refreshBtn + ' Tracks:' +

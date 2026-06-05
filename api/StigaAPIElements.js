@@ -618,6 +618,9 @@ function getRainDelaysMap() {
 function getCuttingModesMap() {
     return { denseGrid: 0, chessBoard: 1, northSouth: 5, eastWest: 6 };
 }
+function getCuttingModeLabels() {
+    return { denseGrid: 'dense-grid', chessBoard: 'chessboard', northSouth: 'north-south', eastWest: 'east-west' };
+}
 function getLongExitDistancesMap() {
     return { 1: 200, 2: 50, 3: 100, 4: 150, 5: 250, 6: 300, 7: 350 };
 }
@@ -691,24 +694,27 @@ function encodeRobotSettings(settings) {
     return encoded;
 }
 function decodeRobotSettings(decoded) {
-    return decoded
-        ? upgradeRobotSettings({
-              rainSensorEnabled: Boolean(decoded?.[1]?.[1] === 1),
-              rainSensorDelay: getRainDelaysMap()[decoded?.[1]?.[2] || 0] || 0,
-              keyboardLock: Boolean(decoded?.[2] === 1),
-              zoneCuttingHeightEnabled: decoded?.[4]?.[1],
-              zoneCuttingHeight: getCuttingHeightsMap()[decoded?.[4]?.[2] || 5],
-              // 4.3 is set to 1 when the height is being changed
-              antiTheft: Boolean(decoded?.[6] === 1),
-              smartCutHeight: Boolean(decoded?.[7] === 1),
-              longExitEnabled: Boolean(decoded?.[8]?.[1]),
-              longExitDistance: getLongExitDistancesMap()[decoded?.[8]?.[1]] || 0, // cm; 0 when off
-              zoneCuttingHeightUniform: Boolean(decoded?.[9] === 1),
-              unknown: decoded?.[11] || 110,
-              pushNotifications: Boolean(decoded?.[14]?.[1] === 1),
-              obstacleNotifications: Boolean(decoded?.[15]?.[1] === 1),
-          })
-        : undefined;
+    if (!decoded) return undefined;
+    // The wire carries machine INDEXES; getRainDelaysMap/getCuttingHeightsMap are value->index, so invert
+    // them to surface user values (hours, mm). (The encoder uses them the forward way, value->index.)
+    const rainHoursByIndex = Object.fromEntries(Object.entries(getRainDelaysMap()).map(([hours, index]) => [index, Number(hours)]));
+    const heightMmByIndex = Object.fromEntries(Object.entries(getCuttingHeightsMap()).map(([mm, index]) => [index, Number(mm)]));
+    return upgradeRobotSettings({
+        rainSensorEnabled: Boolean(decoded?.[1]?.[1] === 1),
+        rainSensorDelay: rainHoursByIndex[decoded?.[1]?.[2] || 0] ?? 0, // hours
+        keyboardLock: Boolean(decoded?.[2] === 1),
+        zoneCuttingHeightEnabled: Boolean(decoded?.[4]?.[1] === 1),
+        zoneCuttingHeight: heightMmByIndex[decoded?.[4]?.[2] ?? 5] ?? 45, // mm
+        // 4.3 is set to 1 when the height is being changed
+        antiTheft: Boolean(decoded?.[6] === 1),
+        smartCutHeight: Boolean(decoded?.[7] === 1),
+        longExitEnabled: Boolean(decoded?.[8]?.[1]),
+        longExitDistance: getLongExitDistancesMap()[decoded?.[8]?.[1]] || 0, // cm; 0 when off
+        zoneCuttingHeightUniform: Boolean(decoded?.[9] === 1),
+        unknown: decoded?.[11] || 110,
+        pushNotifications: Boolean(decoded?.[14]?.[1] === 1),
+        obstacleNotifications: Boolean(decoded?.[15]?.[1] === 1),
+    });
 }
 function formatRobotSettings(settings) {
     return formatStruct(settings, 'settings', {
@@ -1444,6 +1450,7 @@ module.exports = {
     encodeRobotSettings,
     decodeRobotSettings,
     formatRobotSettings,
+    getCuttingModeLabels,
     encodeRobotCloudSync,
     decodeRobotCloudSync,
     formatRobotCloudSync,

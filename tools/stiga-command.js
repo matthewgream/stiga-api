@@ -16,6 +16,7 @@ const {
     StigaAPIDeviceConnector,
     StigaAPIBaseConnector,
     StigaAPIConfig,
+    StigaAPIElements,
 } = require('../api/StigaAPI');
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -702,7 +703,8 @@ registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
         if (all.length === 0) display.text('  (no zones)');
         for (const z of all) {
             const angle = z.customAngleActive ? `${z.customAngle}°` : 'off';
-            display.text(`  zone ${z.id} "${z.name}": height=${z.cuttingHeight}mm mode=${z.cuttingMode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
+            const mode = StigaAPIElements.getCuttingModeLabels()[z.cuttingMode] || z.cuttingMode;
+            display.text(`  zone ${z.id} "${z.name}": height=${z.cuttingHeight}mm mode=${mode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
         }
         display.json({
             source: 'cloud',
