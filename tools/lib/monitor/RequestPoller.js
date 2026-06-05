@@ -114,6 +114,7 @@ class RequestPoller {
         if (isRobot && topic.includes('/LOG/STATUS')) flag = 'robot_status';
         else if (isRobot && topic.includes('/LOG/VERSION')) flag = 'robot_version';
         else if (isRobot && topic.includes('/LOG/SCHEDULING_SETTINGS')) flag = 'robot_schedule';
+        else if (isRobot && topic.includes('/LOG/SETTINGS')) flag = 'robot_settings';
         else if (isBase && topic.includes('/LOG/STATUS')) flag = 'base_status';
         else if (isBase && topic.includes('/LOG/VERSION')) flag = 'base_version';
         if (flag && this.ackFlags[flag]) {
@@ -147,6 +148,10 @@ class RequestPoller {
 
     _sendSettingsRequests() {
         if (!this.connection.isConnected()) return;
+        // Global settings (LOG/SETTINGS) — needed for the webstatus settings panel; the robot only
+        // publishes these when solicited, so without this request the panel never populates.
+        this.ackFlags.robot_settings = true;
+        this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.SETTINGS_REQUEST), { qos: 2 });
         this.ackFlags.robot_schedule = true;
         this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS.SCHEDULING_SETTINGS_REQUEST), { qos: 2 });
     }

@@ -207,6 +207,9 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendResetError() {
         return this._cmdViaConnector('sendResetError');
     }
+    async sendBoot() {
+        return this._cmdViaConnector('sendBoot');
+    }
     async sendCalibrateDocking() {
         return this._cmdViaConnector('sendCalibrateDocking');
     }

@@ -394,6 +394,9 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     async sendResetError() {
         return this._commandRequest(ROBOT_COMMAND_IDS.RESET_ERROR, undefined, undefined, 'command');
     }
+    async sendBoot() {
+        return this._commandRequest(ROBOT_COMMAND_IDS.BOOT, undefined, undefined, 'command');
+    }
 
     //
 

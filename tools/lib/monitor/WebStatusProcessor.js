@@ -252,7 +252,7 @@ class WebStatusProcessor {
     // its own commands). Fire-and-forget — the robot's next STATUS will reflect the new state.
     _handleCommandPost(req, res) {
         const name = (req.params.name || '').toLowerCase();
-        const simple = { 'start': 'START', 'stop': 'STOP', 'home': 'GO_HOME', 'reset-error': 'RESET_ERROR' };
+        const simple = { 'start': 'START', 'stop': 'STOP', 'home': 'GO_HOME', 'reset-error': 'RESET_ERROR', 'boot': 'BOOT' };
         const zoned = { 'force-cut': 'FORCE_CUT', 'force-border-cut': 'FORCE_BORDER_CUT' };
         const id = simple[name] || zoned[name];
         if (!id) {
@@ -311,6 +311,17 @@ class WebStatusProcessor {
         else if (topic.includes('/LOG/VERSION')) this.state.robot.version = this._version(decoded);
         else if (topic.includes('/LOG/ROBOT_POSITION')) this._handleRobotPosition(decoded);
         else if (topic.includes('/LOG/SCHEDULING_SETTINGS')) this._handleRobotSchedule(decoded);
+        else if (topic.includes('/LOG/SETTINGS')) this._handleRobotSettings(decoded);
+    }
+    // Global robot settings (LOG/SETTINGS) for the read-only settings panel. Schedule is handled
+    // separately (_handleRobotSchedule) and intentionally NOT part of this. Plain key/value object;
+    // decodeRobotSettings' helper methods are functions and drop out of the JSON sent to the client.
+    _handleRobotSettings(decoded) {
+        const settings = elements.decodeRobotSettings(decoded);
+        if (settings) {
+            this.state.robot.settings = settings;
+            this.state.robot.updatedSettings = new Date().toISOString();
+        }
     }
 
     _handleBaseMessage(topic, decoded) {
@@ -647,6 +658,9 @@ class WebStatusProcessor {
             connectPaths: perimeters.getConnectPaths().map((p) => ({ id: p.getId(), fromZone: p.getFromZone(), toZone: p.getToZone(), path: p.getPath() })),
             dockingPaths: perimeters.getDockingPaths().map((p) => ({ id: p.getId(), fromZone: p.getFromZone(), toZone: p.getToZone(), path: p.getPath() })),
             pickupPoints: perimeters.getPickupPoints(),
+            // Per-zone settings for the read-only settings panel: { id, name, cuttingHeight, cuttingMode,
+            // priority, customAngleActive, customAngle, borderCut }. Cloud-sourced (reloaded on refresh).
+            zoneSettings: perimeters.getAllZoneSettings(),
         };
         if (ref?.latitude && ref?.longitude) {
             this.location = ref;
@@ -746,6 +760,7 @@ class WebStatusProcessor {
 <div id="statusbox" class="pos-lt"><div class="muted">connecting…</div></div>
 <div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
+<div id="settingsbox" class="pos-st empty"></div>
 <div id="zonepanel"></div>
 <div id="schedpanel"></div>
 <script>
@@ -793,6 +808,11 @@ html,body{margin:0;height:100%}
 #statusbox .tracks{margin-top:6px;font-size:11px;color:#80868b}
 #statusbox .btn{cursor:pointer;border:1px solid #c4c7c5;border-radius:3px;padding:0 6px;margin-left:4px;color:#202124;user-select:none}
 #statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
+#statusbox .btn.dirty{background:#ea4335;border-color:#ea4335;color:#fff;animation:wheelDirtyPulse 1.3s ease-in-out infinite}
+@keyframes wheelDirtyPulse{0%,100%{opacity:1}50%{opacity:.5}}
+/* box-level close × shared by the notif + settings boxes (hides the whole box) */
+.boxclose{cursor:pointer;color:#9aa0a6;font-weight:700;margin-right:7px;user-select:none;font-size:13px;line-height:1}
+.boxclose:hover{color:#ea4335}
 #notifbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:560px;color:#202124}
@@ -811,6 +831,20 @@ html,body{margin:0;height:100%}
 #notifbox .nrow:hover .nmeta{display:block}
 #notifbox .ndismiss{cursor:pointer;color:#5f6368;padding:0 4px;user-select:none;font-size:14px;line-height:1}
 #notifbox .ndismiss:hover{color:#ea4335}
+/* Read-only settings panel (stacked below status/command/notifications) */
+#settingsbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
+  border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
+  font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:320px;color:#202124}
+#settingsbox.empty{display:none}
+#settingsbox h2{font-size:10px;margin:0 0 6px;color:#80868b;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+#settingsbox .szsel{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 7px}
+#settingsbox .szchip{cursor:pointer;min-width:16px;text-align:center;border:1px solid #c4c7c5;border-radius:4px;padding:1px 6px;font-weight:600;color:#5f6368;background:#fff;user-select:none}
+#settingsbox .szchip:hover{background:#f1f3f4}
+#settingsbox .szchip.on{background:#1967d2;border-color:#1967d2;color:#fff}
+#settingsbox table{border-collapse:collapse;width:100%}
+#settingsbox td{padding:1px 0;vertical-align:top}
+#settingsbox td.k{color:#80868b;padding-right:14px;white-space:nowrap}
+#settingsbox td.sv{text-align:right;font-weight:600}
 #statusbox h1 .linktag{margin-left:auto;font-size:9px;padding:2px 8px;border-radius:10px;
   font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:#fff;background:#9aa0a6}
 #statusbox h1 .linktag.online{background:#34a853}
@@ -854,6 +888,7 @@ html,body{margin:0;height:100%}
 #cmdbox .cbtn.stop{color:#c5221f;border-color:#c5221f}
 #cmdbox .cbtn.home{color:#1967d2;border-color:#1967d2}
 #cmdbox .cbtn.reset{color:#c5221f;border-color:#c5221f}
+#cmdbox .cbtn.boot{color:#00838f;border-color:#00838f}
 #cmdbox .cbtn.cut,#cmdbox .cbtn.edge{color:#b06000;border-color:#b06000}
 #cmdbox .czone{flex:1 1 auto;min-width:0;font:12px system-ui,Segoe UI,Arial,sans-serif;border:1px solid #c4c7c5;border-radius:4px;padding:4px 6px;color:#202124;background:#fff;cursor:pointer}
 #cmdbox .cbtn.busy{opacity:.55;pointer-events:none}
@@ -874,6 +909,9 @@ var notifications = [], dismissed = {};
 // metadata exposing {latitude,longitude,radius} circles renders the same way.
 var proposalCircles = [], proposalFlash = null;
 var cutZones = [], cutZone = null, lastCmdSig = ''; // force-cut zone selector state ([{id,name}] from perimeters)
+var notifBoxClosed = false, notifClosedUuids = {}; // whole-box hide; reopens when a NEW (unseen) notification arrives
+var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only settings panel state (* = global)
+var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
   if(proposalFlash){ clearInterval(proposalFlash); proposalFlash = null; }
@@ -1023,7 +1061,7 @@ function applyStackedNotifyPosition(){
   var topRef = sb;
   var leftPx = sbRect.left;
   var widthPx = sbRect.width;
-  ['cmdbox', 'notifbox'].forEach(function(id){
+  ['cmdbox', 'notifbox', 'settingsbox'].forEach(function(id){
     var el = document.getElementById(id);
     if(!el || !el.classList.contains('pos-st')) return;
     // hidden boxes (display:none) report 0-size rect and don't push the chain forward
@@ -1037,7 +1075,7 @@ function applyStackedNotifyPosition(){
   });
 }
 if(window.ResizeObserver){
-  ['statusbox', 'cmdbox', 'notifbox'].forEach(function(id){
+  ['statusbox', 'cmdbox', 'notifbox', 'settingsbox'].forEach(function(id){
     var el = document.getElementById(id);
     if(el) new window.ResizeObserver(applyStackedNotifyPosition).observe(el);
   });
@@ -1210,6 +1248,9 @@ function loadPerimeters(){
       var ids = cutZones.map(function(z){ return z.id; });
       if((cutZone === null || ids.indexOf(cutZone) < 0) && cutZones.length) cutZone = cutZones[0].id;
       renderCommandBox();
+      // per-zone settings for the read-only settings panel
+      zoneSettings = p.zoneSettings || [];
+      renderSettingsBox();
       var bounds = new google.maps.LatLngBounds();
       var any = false;
       // Layer order (bottom → top): satellite base → crumb tracks (z=1, semi-transparent so
@@ -1381,8 +1422,10 @@ function refresh(){
       }
       recordCrumb();
       recordBattery();
+      noteSettingsForDirty();
       renderStatusBox();
       renderCommandBox();
+      renderSettingsBox();
       highlightActiveZone();
       if(hovered) infoWindow.setContent(hovered === 'base' ? baseInfo() : robotInfo());
     })
@@ -1914,21 +1957,27 @@ function renderCommandBox(){
   var r = state && state.robot;
   var active = isRobotActive(r);
   var busy = commandBusy ? ' busy' : '';
-  // Reset is offered whenever the robot reports an error state. That is deliberately loose: it also
-  // appears for transient/non-resettable errors (we don't yet know the app's exact gate — RESET_ERROR
-  // is harmless when it doesn't apply). Refine once we can tell resettable errors apart. See elements.
-  var inError = !!(r && (r.statusType || '').toUpperCase() === 'ERROR');
+  // Context-aware intervention button: the action depends on the state the robot needs help out of.
+  //   STARTUP_REQUIRED (252)  -> Boot  (BOOT/9 — clears it, robot proceeds to calibration)
+  //   ERROR (255) / [12] set  -> Reset (RESET_ERROR/37 — clears a recoverable error)
+  // [12] (intervention required) also drives the red status flash; it is set for STARTUP_REQUIRED too,
+  // so STARTUP_REQUIRED must be checked first. Deliberately loose — the button may appear when the
+  // command doesn't actually apply, but that's harmless, and we're still learning the exact gates.
+  var st = r ? (r.statusType || '').toUpperCase() : '';
+  var intervene = null;
+  if(st === 'STARTUP_REQUIRED') intervene = { cmd: 'boot', label: 'Boot', cls: 'boot', title: 'boot the robot out of "startup required"' };
+  else if(st === 'ERROR' || (r && r.interventionRequired)) intervene = { cmd: 'reset-error', label: 'Reset', cls: 'reset', title: 'clear a recoverable error (may not work for every fault)' };
   // Only rebuild the controls when something that affects them actually changes — otherwise the 2.5s
   // refresh would snap the zone <select> shut while the user is picking. (The cmsg span is updated
   // in place by setCommandMessage and is intentionally excluded from the signature.)
-  var sig = (active ? 'A' : '_') + (inError ? 'E' : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
+  var sig = (active ? 'A' : '_') + (intervene ? intervene.cmd : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
   if(sig === lastCmdSig && box.innerHTML){ return; }
   lastCmdSig = sig;
   var primary = active
     ? '<span class="cbtn stop' + busy + '" data-cmd="stop">Stop</span>'
     : '<span class="cbtn start' + busy + '" data-cmd="start">Start</span>';
   var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
-  var reset = inError ? '<span class="cbtn reset' + busy + '" data-cmd="reset-error" title="clear a recoverable error (may not work for every fault)">Reset</span>' : '';
+  var reset = intervene ? '<span class="cbtn ' + intervene.cls + busy + '" data-cmd="' + intervene.cmd + '" title="' + intervene.title + '">' + intervene.label + '</span>' : '';
   var cut = '';
   if(cutZones.length){
     var opts = '';
@@ -2012,6 +2061,85 @@ function triggerRefresh(){
 window.triggerRefresh = triggerRefresh;
 window.sendCommand = sendCommand;
 
+// ---- Read-only settings panel (⚙ in the status box; stacked below status/command/notifications) ----
+// The "dirty" wheel: when the live global settings change while the panel is hidden, the wheel goes red
+// until the panel is opened. Keyed on the global settings only (the live, user-changeable ones); the
+// first non-null value seeds the baseline so the initial load is not flagged as a change.
+function settingsCurrentSig(){ var s = state && state.robot && state.robot.settings; return s ? JSON.stringify(s) : null; }
+function noteSettingsForDirty(){
+  var sig = settingsCurrentSig();
+  if(sig === null) return;
+  if(settingsSeenSig === null){ settingsSeenSig = sig; return; }
+  if(settingsOpen){ settingsSeenSig = sig; settingsDirtyFlag = false; return; }
+  if(sig !== settingsSeenSig) settingsDirtyFlag = true;
+}
+function toggleSettings(){
+  settingsOpen = !settingsOpen;
+  if(settingsOpen){ settingsSeenSig = settingsCurrentSig(); settingsDirtyFlag = false; }
+  renderSettingsBox();
+  renderStatusBox();
+}
+function closeSettings(){ settingsOpen = false; renderSettingsBox(); renderStatusBox(); }
+window.toggleSettings = toggleSettings;
+
+// camelCase / snake_case key -> "Title case" label.
+function humanizeKey(k){
+  var s = String(k).replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+function fmtSettingValue(v){
+  if(v === true) return 'yes';
+  if(v === false) return 'no';
+  if(v === null || v === undefined || v === '') return '-';
+  return String(v);
+}
+// Turn a settings object into [label, value] rows, skipping plumbing keys and any functions.
+function settingsRows(obj){
+  if(!obj) return [];
+  var skip = { id: 1, name: 1, unknown: 1 }; // id/name shown as the panel title; unknown is internal
+  var rows = [];
+  Object.keys(obj).forEach(function(k){
+    if(skip[k]) return;
+    if(typeof obj[k] === 'function' || (obj[k] && typeof obj[k] === 'object')) return;
+    rows.push([humanizeKey(k), fmtSettingValue(obj[k])]);
+  });
+  return rows;
+}
+function renderSettingsBox(){
+  var box = document.getElementById('settingsbox');
+  if(!box) return;
+  if(!settingsOpen){ box.classList.add('empty'); box.innerHTML = ''; applyStackedNotifyPosition(); return; }
+  box.classList.remove('empty');
+  // Zone chips: * (global) then each zone id that has settings, ascending.
+  var ids = zoneSettings.map(function(z){ return z.id; }).filter(function(x){ return typeof x === 'number'; }).sort(function(a, b){ return a - b; });
+  var chips = '<span class="szchip' + (settingsZone === '*' ? ' on' : '') + '" data-z="*" title="global">*</span>';
+  ids.forEach(function(id){ chips += '<span class="szchip' + (settingsZone === id ? ' on' : '') + '" data-z="' + id + '">' + id + '</span>'; });
+  // Rows + title for the current selection.
+  var rows, title;
+  if(settingsZone === '*'){ rows = settingsRows(state && state.robot && state.robot.settings); title = 'Global'; }
+  else {
+    var zs = null;
+    for(var i = 0; i < zoneSettings.length; i++) if(zoneSettings[i].id === settingsZone) zs = zoneSettings[i];
+    rows = settingsRows(zs);
+    title = (zs && zs.name) ? zs.name : ('Zone ' + settingsZone);
+  }
+  var tbl = '<table>';
+  if(rows.length === 0) tbl += '<tr><td class="k">' + (settingsZone === '*' ? 'waiting for settings…' : 'no settings') + '</td><td class="sv"></td></tr>';
+  else for(var j = 0; j < rows.length; j++) tbl += '<tr><td class="k">' + esc(rows[j][0]) + '</td><td class="sv">' + esc(rows[j][1]) + '</td></tr>';
+  tbl += '</table>';
+  box.innerHTML = '<h2><span class="boxclose" title="close (or toggle the ⚙)">×</span>Settings · ' + esc(title) + '</h2>' +
+    '<div class="szsel">' + chips + '</div>' + tbl;
+  var sclose = box.querySelector('.boxclose');
+  if(sclose) sclose.addEventListener('click', closeSettings);
+  var chipsEls = box.querySelectorAll('.szchip');
+  for(var k = 0; k < chipsEls.length; k++){
+    (function(el){
+      el.addEventListener('click', function(){ var z = el.getAttribute('data-z'); settingsZone = (z === '*' ? '*' : parseInt(z, 10)); renderSettingsBox(); });
+    })(chipsEls[k]);
+  }
+  applyStackedNotifyPosition();
+}
+
 function renderStatusBox(){
   var box = document.getElementById('statusbox');
   if(!state){ box.innerHTML = '<div class="muted">connecting…</div>'; return; }
@@ -2053,6 +2181,7 @@ function renderStatusBox(){
   var trk = '';
   if(URL_CONFIG.statusTracksControls !== 'off'){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
+    var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsDirtyFlag ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
     var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-fetch perimeters and notifications">' + (refreshBusy ? '↻…' : '↻') + '</span>';
     var visBtn = '<span class="btn" onclick="toggleTracksVisible()" title="temporarily hide/show tracks (recording continues)">' + (tracksVisible ? 'HIDE' : 'SHOW') + '</span>';
     var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + '" onclick="toggleAlarmsHighlight()" title="highlight error tracks and reveal deduped alarm log on hover">!</span>';
@@ -2061,7 +2190,7 @@ function renderStatusBox(){
       visBtn +
       '<span class="btn" onclick="clearTracks()">CLR</span>' +
       '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
-      alarmBtn +
+      alarmBtn + settingsBtn +
     '</div>';
   }
   box.innerHTML =
@@ -2129,6 +2258,15 @@ function refreshNotifications(){
     .catch(function(){ /* keep last list */ });
 }
 
+// Hide the whole notif box and remember every uuid currently present, so it stays hidden until a
+// notification with an unseen uuid arrives (handled in renderNotifBox). Dismissed-but-present uuids
+// are remembered too, so dismissing then closing doesn't make the box pop back for the same items.
+function closeNotifBox(){
+  notifBoxClosed = true;
+  notifClosedUuids = {};
+  for(var i = 0; i < notifications.length; i++) notifClosedUuids[notifications[i].uuid] = true;
+  renderNotifBox();
+}
 function renderNotifBox(){
   var box = document.getElementById('notifbox');
   if(!box) return;
@@ -2140,6 +2278,13 @@ function renderNotifBox(){
   var total = sorted.length;
   var rankByUuid = {};
   sorted.forEach(function(n, i){ rankByUuid[n.uuid] = i + 1; });
+  // Whole-box hide: stays hidden until a notification arrives that wasn't present when it was closed
+  // (per-uuid), so a stack of old ones can be ignored but anything new brings the box back.
+  if(notifBoxClosed){
+    var hasNew = sorted.some(function(n){ return !notifClosedUuids[n.uuid] && !dismissed[n.uuid]; });
+    if(hasNew) notifBoxClosed = false;
+    else { box.classList.add('empty'); box.innerHTML = ''; applyStackedNotifyPosition(); return; }
+  }
   var visible = sorted.filter(function(n){ return !dismissed[n.uuid]; }).slice(0, 3);
   if(visible.length === 0){ box.classList.add('empty'); box.innerHTML = ''; return; }
   box.classList.remove('empty');
@@ -2147,7 +2292,7 @@ function renderNotifBox(){
   var firstRank = Math.min.apply(null, ranks);
   var lastRank = Math.max.apply(null, ranks);
   var rangeLabel = firstRank === lastRank ? String(firstRank) : firstRank + '-' + lastRank;
-  var html = '<h2>Notifications (' + rangeLabel + ' of ' + total + ')</h2>';
+  var html = '<h2><span class="boxclose" title="hide box (returns when a new notification arrives)">×</span>Notifications (' + rangeLabel + ' of ' + total + ')</h2>';
   for(var i = 0; i < visible.length; i++){
     var n = visible[i];
     var meta = [n.type, n.category].filter(Boolean).join(' · ');
@@ -2160,6 +2305,8 @@ function renderNotifBox(){
     '</div>';
   }
   box.innerHTML = html;
+  var nclose = box.querySelector('.boxclose');
+  if(nclose) nclose.addEventListener('click', closeNotifBox);
   var buttons = box.querySelectorAll('.ndismiss');
   for(var j = 0; j < buttons.length; j++){
     (function(el){

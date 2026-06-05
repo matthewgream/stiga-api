@@ -754,6 +754,15 @@ registerCommand(['reset-error', 'resetError', 'reset'], {
     execute: async (options, context) => executeRobotCommand('reset-error', (d) => d.sendResetError(), context),
 });
 
+registerCommand(['boot', 'startup'], {
+    description: 'Boot the robot out of a "startup required" state (the app\'s "boot" button)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot boot [help]',
+    summary: 'Send BOOT (CMD_ROBOT 9) to clear STARTUP_REQUIRED; the robot then proceeds into calibration.',
+    examples: ['stiga-command --robot boot'],
+    execute: async (options, context) => executeRobotCommand('boot', (d) => d.sendBoot(), context),
+});
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
