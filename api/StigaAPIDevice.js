@@ -30,6 +30,7 @@ class StigaAPIDevice extends StigaAPIComponent {
             isEnabled: { value: undefined, _updated: undefined },
             totalWorkTime: { value: undefined, _updated: undefined },
             lastPosition: { value: undefined, _updated: undefined },
+            autoUpdate: { value: undefined, _updated: undefined }, // cloud-only: automatic firmware update
             // MQTT/Device data
             version: { value: undefined, _updated: undefined, _stale: 24 * 60 * 60 * 1000 },
             statusOperation: { value: undefined, _updated: undefined, _batchedBy: 'statusAll', _stale: 1 * 60 * 1000 },

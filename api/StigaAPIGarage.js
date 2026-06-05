@@ -56,6 +56,10 @@ class DeviceData {
         const settings = this.data?.attributes?.settings;
         return settings?.length > 0 ? settings[0] : undefined;
     }
+    // Automatic firmware update — a CLOUD-ONLY device setting (not in the robot's MQTT LOG/SETTINGS).
+    getAutoUpdate() {
+        return this.getSettings()?.auto_update;
+    }
     getScheduling() {
         return decodeRobotScheduleSettings(this.getSettings()?.scheduling);
     }
