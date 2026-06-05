@@ -251,19 +251,30 @@ class WebStatusProcessor {
     // is published directly on the shared MQTT connection (same path RequestPoller uses for
     // its own commands). Fire-and-forget — the robot's next STATUS will reflect the new state.
     _handleCommandPost(req, res) {
-        const map = { start: 'START', stop: 'STOP', home: 'GO_HOME' };
-        const id = map[(req.params.name || '').toLowerCase()];
+        const name = (req.params.name || '').toLowerCase();
+        const simple = { start: 'START', stop: 'STOP', home: 'GO_HOME' };
+        const zoned = { 'force-cut': 'FORCE_CUT', 'force-border-cut': 'FORCE_BORDER_CUT' };
+        const id = simple[name] || zoned[name];
         if (!id) {
             res.status(400).json({ ok: false, error: `unknown command '${req.params.name}'` });
             return;
+        }
+        let params;
+        if (zoned[name]) {
+            const zone = Number.parseInt(req.query.zone, 10);
+            if (!Number.isInteger(zone) || zone < 1) {
+                res.status(400).json({ ok: false, error: 'force-cut requires a valid zone' });
+                return;
+            }
+            params = elements.encodeRobotForceCut(zone);
         }
         if (!this.connection.isConnected()) {
             res.status(503).json({ ok: false, error: 'MQTT not connected' });
             return;
         }
         try {
-            this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS[id]), { qos: 2 });
-            this.logger(`WebStatus: command ${id} dispatched`);
+            this.connection.publish(`${this.connection.getRobotMac()}/CMD_ROBOT`, elements.encodeRobotCommand(elements.ROBOT_COMMAND_IDS[id], params), { qos: 2 });
+            this.logger(`WebStatus: command ${id} dispatched${params ? ` (zone ${req.query.zone})` : ''}`);
             res.json({ ok: true, command: id });
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
@@ -833,7 +844,8 @@ html,body{margin:0;height:100%}
 #cmdbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;color:#202124;
-  display:flex;gap:8px;align-items:center}
+  display:flex;flex-direction:column;gap:6px;align-items:stretch}
+#cmdbox .crow{display:flex;gap:8px;align-items:center}
 #cmdbox .cbtn{cursor:pointer;border:1px solid #c4c7c5;border-radius:4px;padding:5px 14px;
   font-size:12px;font-weight:600;color:#202124;background:#fff;user-select:none;letter-spacing:.3px}
 #cmdbox .cbtn:hover{background:#f1f3f4}
@@ -841,6 +853,8 @@ html,body{margin:0;height:100%}
 #cmdbox .cbtn.start{color:#137333;border-color:#137333}
 #cmdbox .cbtn.stop{color:#c5221f;border-color:#c5221f}
 #cmdbox .cbtn.home{color:#1967d2;border-color:#1967d2}
+#cmdbox .cbtn.cut,#cmdbox .cbtn.edge{color:#b06000;border-color:#b06000}
+#cmdbox .czone{flex:1 1 auto;min-width:0;font:12px system-ui,Segoe UI,Arial,sans-serif;border:1px solid #c4c7c5;border-radius:4px;padding:4px 6px;color:#202124;background:#fff;cursor:pointer}
 #cmdbox .cbtn.busy{opacity:.55;pointer-events:none}
 #cmdbox .cmsg{font-size:11px;color:#80868b;margin-left:auto;min-width:0}
 `;
@@ -848,7 +862,7 @@ html,body{margin:0;height:100%}
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
 // no backticks, no ${...}) so it can be embedded verbatim into the page template above.
 const CLIENT_JS = `
-var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow, targetMarker, targetLine;
+var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow, robotArrowMarker, targetMarker, targetLine;
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
@@ -858,6 +872,7 @@ var notifications = [], dismissed = {};
 // flashes it on the map — distinct purple, on/off, only while hovered. Generic: any future notification
 // metadata exposing {latitude,longitude,radius} circles renders the same way.
 var proposalCircles = [], proposalFlash = null;
+var cutZones = [], cutZone = null, lastCmdSig = ''; // force-cut zone selector state ([{id,name}] from perimeters)
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
   if(proposalFlash){ clearInterval(proposalFlash); proposalFlash = null; }
@@ -1107,18 +1122,16 @@ function initMap(){
   attachHover(baseMarker, 'base');
 
   robotPin = new google.maps.marker.PinElement({ background:'#34a853', borderColor:'#ffffff', glyphColor:'#ffffff', glyphText:'R' });
-  // Wrap the pin so we can overlay a heading arrow that pivots to the robot's reported orientation.
-  // The wrapper's bottom-centre (the pin tip = the robot's location) stays the marker anchor; the
-  // arrow box is centred on that point via negative margins and rotated by orientationCompass (0=N, CW).
-  var robotEl = document.createElement('div');
-  robotEl.style.position = 'relative';
-  robotEl.appendChild(robotPin.element);
+  robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotPin });
+  attachHover(robotMarker, 'robot');
+  // Heading arrow is its own overlay marker (sharing the robot's position) rather than a wrapper around
+  // the pin — that lets the pin stay a plain PinElement (no deprecated .element access). The arrow box is
+  // centred on the marker anchor (= the robot's location) via negative margins and rotated by
+  // orientationCompass (0=N, clockwise).
   robotArrow = document.createElement('div');
   robotArrow.style.cssText = 'position:absolute; left:50%; bottom:0; width:40px; height:40px; margin-left:-20px; margin-bottom:-20px; transform-origin:50% 50%; transition:transform .25s ease; pointer-events:none; display:none;';
   robotArrow.innerHTML = '<svg viewBox="0 0 40 40" width="40" height="40" style="overflow:visible; filter:drop-shadow(0 1px 1px rgba(0,0,0,.45))"><path d="M20 6 L26 16 L20 13 L14 16 Z" fill="currentColor" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/></svg>';
-  robotEl.appendChild(robotArrow);
-  robotMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Robot', content: robotEl });
-  attachHover(robotMarker, 'robot');
+  robotArrowMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: '', content: robotArrow, zIndex: 1 });
 
   // experimental (?experimental=on): a reticle at the current mowing target + a line from the robot to it
   targetLine = new google.maps.Polyline({ path: [], strokeColor:'#fbbc04', strokeOpacity:0.85, strokeWeight:2, clickable:false, zIndex:1 });
@@ -1191,6 +1204,11 @@ function loadPerimeters(){
       perimetersLoading = false;
       if(!p.zones || p.zones.length === 0) return; // server still fetching from cloud — retried on next poll
       perimetersDrawn = true;
+      // valid zones for the force-cut selector (id + name)
+      cutZones = p.zones.filter(function(z){ return typeof z.id === 'number'; }).map(function(z){ return { id: z.id, name: z.name }; });
+      var ids = cutZones.map(function(z){ return z.id; });
+      if((cutZone === null || ids.indexOf(cutZone) < 0) && cutZones.length) cutZone = cutZones[0].id;
+      renderCommandBox();
       var bounds = new google.maps.LatLngBounds();
       var any = false;
       // Layer order (bottom → top): satellite base → crumb tracks (z=1, semi-transparent so
@@ -1330,13 +1348,16 @@ function refresh(){
         var pos = { lat: r.latitude, lng: r.longitude };
         robotMarker.position = pos;
         if(!robotMarker.map) robotMarker.map = map;
+        robotArrowMarker.position = pos;
         robotPin.background = robotColor(r);
         if(typeof r.orientationCompass === 'number'){
+          if(!robotArrowMarker.map) robotArrowMarker.map = map;
           robotArrow.style.display = 'block';
           robotArrow.style.color = robotColor(r);
           robotArrow.style.transform = 'rotate(' + r.orientationCompass + 'deg)';
         } else {
           robotArrow.style.display = 'none';
+          if(robotArrowMarker.map) robotArrowMarker.map = null;
         }
         // experimental: show the mowing target reticle + robot->target line (?experimental=on)
         var tgt = (URL_CONFIG.experimental === 'on' && r.mowing && r.mowing.target && typeof r.mowing.target.latitude === 'number') ? r.mowing.target : null;
@@ -1892,16 +1913,44 @@ function renderCommandBox(){
   var r = state && state.robot;
   var active = isRobotActive(r);
   var busy = commandBusy ? ' busy' : '';
+  // Only rebuild the controls when something that affects them actually changes — otherwise the 2.5s
+  // refresh would snap the zone <select> shut while the user is picking. (The cmsg span is updated
+  // in place by setCommandMessage and is intentionally excluded from the signature.)
+  var sig = (active ? 'A' : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
+  if(sig === lastCmdSig && box.innerHTML){ return; }
+  lastCmdSig = sig;
   var primary = active
     ? '<span class="cbtn stop' + busy + '" data-cmd="stop">Stop</span>'
     : '<span class="cbtn start' + busy + '" data-cmd="start">Start</span>';
   var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
+  var cut = '';
+  if(cutZones.length){
+    var opts = '';
+    for(var z = 0; z < cutZones.length; z++){
+      var zid = cutZones[z].id, zname = cutZones[z].name;
+      var zlabel = zname ? (zid + ' · ' + zname) : ('Zone ' + zid);
+      opts += '<option value="' + zid + '"' + (zid === cutZone ? ' selected' : '') + '>' + esc(zlabel) + '</option>';
+    }
+    cut = '<span class="cbtn cut' + busy + '" data-cmd="force-cut" title="mow the selected zone now">Cut</span>' +
+      '<span class="cbtn edge' + busy + '" data-cmd="force-border-cut" title="cut the border of the selected zone now">Edge</span>' +
+      '<select class="czone" title="zone">' + opts + '</select>';
+  }
   var msg = box.querySelector('.cmsg');
   var msgHtml = msg ? msg.outerHTML : '<span class="cmsg"></span>';
-  box.innerHTML = primary + home + msgHtml;
+  // Zone-targeted commands wrap to their own row so long zone names don't overflow the fixed box width.
+  box.innerHTML = '<div class="crow">' + primary + home + msgHtml + '</div>' +
+    (cut ? '<div class="crow">' + cut + '</div>' : '');
+  var sel = box.querySelector('.czone');
+  if(sel) sel.addEventListener('change', function(){ cutZone = parseInt(sel.value, 10); lastCmdSig = ''; });
   var btns = box.querySelectorAll('.cbtn');
   for(var i = 0; i < btns.length; i++){
-    (function(el){ el.addEventListener('click', function(){ sendCommand(el.getAttribute('data-cmd')); }); })(btns[i]);
+    (function(el){
+      el.addEventListener('click', function(){
+        var cmd = el.getAttribute('data-cmd');
+        if(cmd === 'force-cut' || cmd === 'force-border-cut') sendCommand(cmd, cutZone);
+        else sendCommand(cmd);
+      });
+    })(btns[i]);
   }
 }
 function setCommandMessage(text, isError){
@@ -1912,23 +1961,25 @@ function setCommandMessage(text, isError){
   span.textContent = text || '';
   span.style.color = isError ? '#c5221f' : '#80868b';
 }
-function sendCommand(name){
+function sendCommand(name, zone){
   if(commandBusy) return;
   commandBusy = true;
   renderCommandBox();
-  setCommandMessage('sending ' + name + '…', false);
-  fetch('api/command/' + encodeURIComponent(name), { method: 'POST', cache: 'no-store' })
+  var label = name + (zone != null ? ' zone ' + zone : '');
+  setCommandMessage('sending ' + label + '…', false);
+  var url = 'api/command/' + encodeURIComponent(name) + (zone != null ? '?zone=' + encodeURIComponent(zone) : '');
+  fetch(url, { method: 'POST', cache: 'no-store' })
     .then(function(r){ return r.json().then(function(j){ return { ok: r.ok, body: j }; }); })
     .then(function(rsp){
       commandBusy = false;
-      if(rsp.ok) setCommandMessage(name + ' dispatched', false);
-      else setCommandMessage(name + ' failed: ' + ((rsp.body && rsp.body.error) || 'unknown'), true);
+      if(rsp.ok) setCommandMessage(label + ' dispatched', false);
+      else setCommandMessage(label + ' failed: ' + ((rsp.body && rsp.body.error) || 'unknown'), true);
       renderCommandBox();
       setTimeout(function(){ setCommandMessage('', false); }, 4000);
     })
     .catch(function(e){
       commandBusy = false;
-      setCommandMessage(name + ' error: ' + e.message, true);
+      setCommandMessage(label + ' error: ' + e.message, true);
       renderCommandBox();
     });
 }
