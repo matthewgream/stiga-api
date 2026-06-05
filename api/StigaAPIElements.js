@@ -183,6 +183,7 @@ const ROBOT_COMMAND_TYPES = {
     20: 'SCHEDULING_SETTINGS_UPDATE',
     21: 'VERSION_REQUEST',
     22: 'POSITION_REQUEST',
+    25: 'CALIBRATE_DOCKING',
     26: 'CALIBRATE_BLADES',
     28: 'STATUS_REQUEST',
     // 31 and 32 carry an identical payload [2] = { 1: "Bearer <jwt>", 2: cloud resource URL } and both
@@ -283,8 +284,9 @@ const ROBOT_STATUS_TYPES = {
     8: 'LID_OPEN',
     13: 'GOING_HOME', // ? duplicate
     18: 'CALIBRATION',
-    20: 'BLADES_CALIBRATING',
+    20: 'BLADES_CALIBRATION',
     // 24: 'UNKNOWN_24',
+    25: 'DOCKING_CALIBRATION',
     27: 'STORING_DATA',
     28: 'PLANNING_ONGOING',
     29: 'REACHING_FIRST_POINT',
@@ -403,6 +405,16 @@ function decodeRobotStatusDocking(decoded) {
 }
 function formatRobotStatusDocking(statusDocking) {
     return formatBoolean(statusDocking);
+}
+
+// Status [9] — present while the robot runs CALIBRATE_DOCKING (status type 25 = DOCKING_CALIBRATION).
+// The value's meaning is unknown (only sample seen is 1; possibly a phase/step or a simple flag); kept
+// as a raw number and surfaced as dockingCalibration so it is captured rather than dropped as unknown.
+function decodeRobotDockingCalibration(decoded) {
+    return decoded === undefined ? undefined : Number(decoded);
+}
+function formatRobotDockingCalibration(dockingCalibration) {
+    return dockingCalibration === undefined ? '-' : String(dockingCalibration);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1290,6 +1302,8 @@ module.exports = {
     formatRobotStatusInfo,
     decodeRobotStatusDocking,
     formatRobotStatusDocking,
+    decodeRobotDockingCalibration,
+    formatRobotDockingCalibration,
     decodeRobotMowingStatus,
     formatRobotMowingStatus,
     decodeRobotBatteryStatus,

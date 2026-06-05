@@ -367,6 +367,9 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     async sendGoHome() {
         return this._commandRequest(ROBOT_COMMAND_IDS.GO_HOME, undefined, undefined, 'command');
     }
+    async sendCalibrateDocking() {
+        return this._commandRequest(ROBOT_COMMAND_IDS.CALIBRATE_DOCKING, undefined, undefined, 'command');
+    }
     async sendCalibrateBlades() {
         return this._commandRequest(ROBOT_COMMAND_IDS.CALIBRATE_BLADES, undefined, undefined, 'command');
     }

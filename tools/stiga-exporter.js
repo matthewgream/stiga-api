@@ -84,8 +84,10 @@ class StigaDatabaseExporter {
         return { name, device };
     }
 
-    // A message is "undecoded" if it has no handler (unknown topic), failed protobuf decode, or
-    // carries protobuf fields the interpreter did not recognise (the "Unknown: [..]" summary line).
+    // A message is "undecoded" if it has no handler (unknown topic), failed protobuf decode, carries
+    // protobuf fields the interpreter did not recognise (the "Unknown: [..]" summary line), or decodes a
+    // value to the unknown-enum sentinel "UNKNOWN(0xNN)" — e.g. an unmapped command/status type, which
+    // otherwise hides mid-line (e.g. "[1] Command Type: UNKNOWN(0x19) (25)") and would slip through.
     _isUndecoded(topic, data, mac_device, mac_base) {
         let lines;
         try {
@@ -93,7 +95,7 @@ class StigaDatabaseExporter {
         } catch {
             return true;
         }
-        return lines.some((line) => line.startsWith('UNKNOWN::') || line.startsWith('Failed to decode message:') || line.startsWith('Unknown: '));
+        return lines.some((line) => line.startsWith('UNKNOWN::') || line.startsWith('Failed to decode message:') || line.startsWith('Unknown: ') || line.includes('UNKNOWN(0x'));
     }
 
     // Build a row predicate from a comma-separated filter spec, e.g. "undecoded" or

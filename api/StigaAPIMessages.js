@@ -65,6 +65,7 @@ function message_robot_LOG_STATUS(decoded, { interpretation, fieldTracker }) {
     fieldTracker.add(addField(interpretation, 3, 'Status Type', elements.formatRobotStatusType(elements.decodeRobotStatusType(decoded[3]))));
     fieldTracker.add(addField(interpretation, 4, 'Status Error', elements.formatRobotStatusError(elements.decodeRobotStatusError(decoded[4]))));
     fieldTracker.add(addField(interpretation, 5, 'Status Flag[5]', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[5])))); // omnipresent
+    if (decoded[9] !== undefined) fieldTracker.add(addField(interpretation, 9, 'Docking Calibration', elements.formatRobotDockingCalibration(elements.decodeRobotDockingCalibration(decoded[9]))));
     fieldTracker.add(addField(interpretation, 10, 'Status Info', elements.formatRobotStatusInfo(elements.decodeRobotStatusInfo(decoded[10]))));
     fieldTracker.add(addField(interpretation, 12, 'Intervention Required', elements.formatRobotStatusFlag(elements.decodeRobotStatusFlag(decoded[12]))));
     fieldTracker.add(addField(interpretation, 13, 'Docked', elements.formatRobotStatusDocking(elements.decodeRobotStatusDocking(decoded[13]))));

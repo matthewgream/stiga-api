@@ -710,6 +710,15 @@ registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
     execute: async (options, context) => executeRobotCommand('calibrate-blades', (d) => d.sendCalibrateBlades(), context),
 });
 
+registerCommand(['calibrate-docking', 'calibrateDocking', 'docking'], {
+    description: 'Calibrate the docking/charging alignment',
+    targets: ['robot'],
+    usage: 'stiga-command --robot calibrate-docking [help]',
+    summary: 'Trigger docking calibration on the robot (the app\'s "docking calibration"). Robot reports status type 25 while running.',
+    examples: ['stiga-command --robot calibrate-docking'],
+    execute: async (options, context) => executeRobotCommand('calibrate-docking', (d) => d.sendCalibrateDocking(), context),
+});
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 registerCommand(['cloud-sync', 'cloudSync', 'sync'], {

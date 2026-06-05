@@ -252,7 +252,7 @@ class WebStatusProcessor {
     // its own commands). Fire-and-forget — the robot's next STATUS will reflect the new state.
     _handleCommandPost(req, res) {
         const name = (req.params.name || '').toLowerCase();
-        const simple = { start: 'START', stop: 'STOP', home: 'GO_HOME', 'reset-error': 'RESET_ERROR' };
+        const simple = { 'start': 'START', 'stop': 'STOP', 'home': 'GO_HOME', 'reset-error': 'RESET_ERROR' };
         const zoned = { 'force-cut': 'FORCE_CUT', 'force-border-cut': 'FORCE_BORDER_CUT' };
         const id = simple[name] || zoned[name];
         if (!id) {
