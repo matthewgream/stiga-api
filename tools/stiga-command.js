@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+/* eslint-disable unicorn/no-null */
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -637,6 +639,9 @@ registerCommand('settings', {
         '  antiTheft, smartCutHeight, longExitEnabled, longExitDistance,',
         '  pushNotifications, obstacleNotifications',
         '',
+        'Cloud settings (from the garage, not MQTT):',
+        '  autoUpdate   (--debug also dumps the raw cloud blob incl. unverified fields)',
+        '',
         'Base settings:',
         '  led',
     ],
@@ -648,6 +653,14 @@ registerCommand('settings', {
             const settings = await device.getSettings({ refresh: 'force' });
             displaySettings('Robot Settings:', settings.value);
             display.json({ source: 'robot', kind: 'settings', value: plainSettings(settings.value) });
+
+            // Cloud-only device settings (from the garage, not MQTT). Only the supported ones are shown;
+            // the rest of the raw cloud blob (unverified / possibly model-specific) is dumped under --debug.
+            const autoUpdate = await device.getAutoUpdate();
+            displaySettings('Cloud Settings:', { autoUpdate: autoUpdate.value });
+            display.json({ source: 'cloud', kind: 'settings', value: { autoUpdate: autoUpdate.value ?? null } });
+            const cloudRaw = (await device.getCloudSettingsRaw()).value;
+            if (cloudRaw) display.debug('Cloud settings (raw, incl. unverified fields): ' + JSON.stringify(cloudRaw));
         }
         if (target === 'both' || target === 'base') {
             await connectToBase(base, connectors);
@@ -682,7 +695,7 @@ registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
         const perimeters = new StigaAPIPerimeters(server, device);
         if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
 
-        const wanted = params[0] !== undefined ? Number.parseInt(params[0], 10) : undefined;
+        const wanted = params[0] === undefined ? undefined : Number.parseInt(params[0], 10);
         let all = perimeters.getAllZoneSettings();
         if (wanted !== undefined) {
             if (!Number.isInteger(wanted)) throw throwExit(`invalid zone id: ${params[0]}`, 2);
@@ -1547,7 +1560,7 @@ async function main() {
         // Framework load only reaches the CLOUD (auth + garage) — no device MQTT session is opened here.
         // The actual robot/base MQTT connect happens lazily in connectToRobot/connectToBase (and is logged
         // there), so cloud-only commands (zone-settings, notifications, …) never connect to MQTT at all.
-        display.verbose(`Cloud: robot/${device.getMacAddress()} '${(await device.getName()).value}'${base ? `, base/${base.getMacAddress()}` : ''}`);
+        display.verbose(`Cloud: robot/${device.getMacAddress()} '${(await device.getName()).value}'${base ? ', base/' + base.getMacAddress() : ''}`);
 
         const connectors = {
             auth: framework.auth,

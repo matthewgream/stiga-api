@@ -254,7 +254,10 @@ class WebStatusProcessor {
         const name = (req.params.name || '').toLowerCase();
         // Schedule on/off is a write that must resend the FULL current schedule (time blocks preserved)
         // with only [1] flipped — exactly what the app sends. Handled specially (see _handleScheduleToggle).
-        if (name === 'schedule-on' || name === 'schedule-off') return this._handleScheduleToggle(name === 'schedule-on', res);
+        if (name === 'schedule-on' || name === 'schedule-off') {
+            this._handleScheduleToggle(name === 'schedule-on', res);
+            return;
+        }
         const simple = { 'start': 'START', 'stop': 'STOP', 'home': 'GO_HOME', 'reset-error': 'RESET_ERROR', 'boot': 'BOOT' };
         const zoned = { 'force-cut': 'FORCE_CUT', 'force-border-cut': 'FORCE_BORDER_CUT' };
         const id = simple[name] || zoned[name];
@@ -673,6 +676,8 @@ class WebStatusProcessor {
         // Falls back to undefined; client renders "Stiga Robot" when absent.
         const deviceName = (await device.getName())?.value;
         if (deviceName) this.state.robot.name = deviceName;
+        // Cloud-only settings (from the garage, not MQTT) for the settings panel. Only the supported ones.
+        this.state.robot.cloudSettings = { autoUpdate: (await device.getAutoUpdate())?.value };
         const perimeters = new StigaAPIPerimeters(server, device);
         if (!(await perimeters.load())) throw new Error('perimeter load failed');
 
@@ -876,6 +881,7 @@ html,body{margin:0;height:100%}
 #settingsbox td{padding:1px 0;vertical-align:top}
 #settingsbox td.k{color:#80868b;padding-right:14px;white-space:nowrap}
 #settingsbox td.sv{text-align:right;font-weight:600}
+#settingsbox .cloudtag{color:#1a73e8;font-size:11px;margin-left:4px}
 #statusbox h1 .linktag{margin-left:auto;font-size:9px;padding:2px 8px;border-radius:10px;
   font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:#fff;background:#9aa0a6}
 #statusbox h1 .linktag.online{background:#34a853}
@@ -2177,7 +2183,19 @@ function renderSettingsBox(){
   ids.forEach(function(id){ chips += '<span class="szchip' + (settingsZone === id ? ' on' : '') + '" data-z="' + id + '">' + id + '</span>'; });
   // Rows + title for the current selection.
   var rows, title;
-  if(settingsZone === '*'){ rows = settingsRows(state && state.robot && state.robot.settings); title = 'Global'; }
+  if(settingsZone === '*'){
+    rows = settingsRows(state && state.robot && state.robot.settings);
+    // Cloud-only settings (from the garage, not the robot) stack at the bottom, each tagged with a cloud icon.
+    var cloud = state && state.robot && state.robot.cloudSettings;
+    if(cloud){
+      var cloudLabels = { autoUpdate: 'Firmware automatic update' };
+      Object.keys(cloud).forEach(function(ck){
+        if(cloud[ck] === undefined || cloud[ck] === null) return;
+        rows.push([ cloudLabels[ck] || humanizeKey(ck), fmtSettingValue(ck, cloud[ck]), 'cloud' ]);
+      });
+    }
+    title = 'Global';
+  }
   else {
     var zs = null;
     for(var i = 0; i < zoneSettings.length; i++) if(zoneSettings[i].id === settingsZone) zs = zoneSettings[i];
@@ -2186,7 +2204,10 @@ function renderSettingsBox(){
   }
   var tbl = '<table>';
   if(rows.length === 0) tbl += '<tr><td class="k">' + (settingsZone === '*' ? 'waiting for settings…' : 'no settings') + '</td><td class="sv"></td></tr>';
-  else for(var j = 0; j < rows.length; j++) tbl += '<tr><td class="k">' + esc(rows[j][0]) + '</td><td class="sv">' + esc(rows[j][1]) + '</td></tr>';
+  else for(var j = 0; j < rows.length; j++){
+    var klab = esc(rows[j][0]) + (rows[j][2] === 'cloud' ? ' <span class="cloudtag" title="cloud setting (read-only, not stored on the robot)">☁</span>' : '');
+    tbl += '<tr><td class="k">' + klab + '</td><td class="sv">' + esc(rows[j][1]) + '</td></tr>';
+  }
   tbl += '</table>';
   box.innerHTML = '<h2><span class="boxclose" title="close (or toggle the ⚙)">×</span>Settings · ' + esc(title) + '</h2>' +
     '<div class="szsel">' + chips + '</div>' + tbl;

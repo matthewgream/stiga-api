@@ -31,6 +31,7 @@ class StigaAPIDevice extends StigaAPIComponent {
             totalWorkTime: { value: undefined, _updated: undefined },
             lastPosition: { value: undefined, _updated: undefined },
             autoUpdate: { value: undefined, _updated: undefined }, // cloud-only: automatic firmware update
+            cloudSettingsRaw: { value: undefined, _updated: undefined }, // raw cloud settings blob (debug/exploration only — incl. unverified fields)
             // MQTT/Device data
             version: { value: undefined, _updated: undefined, _stale: 24 * 60 * 60 * 1000 },
             statusOperation: { value: undefined, _updated: undefined, _batchedBy: 'statusAll', _stale: 1 * 60 * 1000 },
@@ -102,6 +103,12 @@ class StigaAPIDevice extends StigaAPIComponent {
     }
     async getLastPosition(options = {}) {
         return this._dataGet('lastPosition', options);
+    }
+    async getAutoUpdate(options = {}) {
+        return this._dataGet('autoUpdate', options);
+    }
+    async getCloudSettingsRaw(options = {}) {
+        return this._dataGet('cloudSettingsRaw', options);
     }
     async getVersion(options = {}) {
         return this._dataGet('version', options);
@@ -230,6 +237,8 @@ class StigaAPIDevice extends StigaAPIComponent {
         if ((value = data.getIsEnabled()) !== undefined) this._dataUpdate('isEnabled', value, name);
         if ((value = data.getTotalWorkTime()) !== undefined) this._dataUpdate('totalWorkTime', value, name);
         if ((value = data.getLastPosition()) !== undefined) this._dataUpdate('lastPosition', value, name);
+        if ((value = data.getAutoUpdate()) !== undefined) this._dataUpdate('autoUpdate', value, name);
+        if ((value = data.getSettings()) !== undefined) this._dataUpdate('cloudSettingsRaw', value, name);
     }
     _dataUpdate(key, value, source) {
         const oldValue = this.storage[key]?.value;
@@ -416,7 +425,9 @@ class StigaAPIDevice extends StigaAPIComponent {
             case 'isEnabled':
             case 'totalWorkTime':
             case 'lastPosition':
-                // These come from garage/cloud
+            case 'autoUpdate':
+            case 'cloudSettingsRaw':
+                // These come from garage/cloud (populated at install via _dataUpdateAll; not per-key refreshable)
                 break;
             default:
                 throw new Error(`Don't know how to request ${key} from connector`);
