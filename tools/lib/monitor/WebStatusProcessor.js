@@ -948,6 +948,7 @@ var notifications = [], dismissed = {};
 // metadata exposing {latitude,longitude,radius} circles renders the same way.
 var proposalCircles = [], proposalFlash = null;
 var cutZones = [], cutZone = null, lastCmdSig = ''; // force-cut zone selector state ([{id,name}] from perimeters)
+var CMD_IDLE = 'ready · awaiting command'; // command status line text when nothing is in flight (used by renderCommandBox at init)
 var notifBoxClosed = false, notifClosedUuids = {}; // whole-box hide; reopens when a NEW (unseen) notification arrives
 var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only settings panel state (* = global)
 var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
@@ -1999,7 +2000,6 @@ function scheduleSchedPanelClose(){
 // the contextually-appropriate verb based on the live robot status; Home is always present.
 // Commands POST to /api/command/:name and the local server publishes via MQTT.
 var commandBusy = false;
-var CMD_IDLE = 'ready · awaiting command'; // shown on the command status line when nothing is in flight
 function isRobotActive(r){
   if(!r) return false;
   var t = (r.statusType || '').toUpperCase();
