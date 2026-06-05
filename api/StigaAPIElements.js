@@ -193,7 +193,7 @@ const ROBOT_COMMAND_TYPES = {
     // "sync now" from the app. Exact functional difference beyond trigger is still unconfirmed. (2026-06-04)
     31: 'CLOUDSYNC_DOWNLOAD',
     32: 'CLOUDSYNC_REQUEST',
-    //  37:
+    37: 'RESET_ERROR',
     38: 'FORCE_CUT',
     40: 'GO_AWAY',
     47: 'ZONE_ORDER_UPDATE',
@@ -323,6 +323,12 @@ const ROBOT_STATUS_ERROR_MESSAGES = {
     '2,20': 'GPS_SEARCHING',
     '2,22': 'STUCK',
 };
+// NB: there is no reliable "user can reset this error" predicate yet. RESET_ERROR (CMD_ROBOT 37) clears a
+// recoverable fault (confirmed 2026-06-05 on a STUCK/2,22), but the same STUCK code also occurs when the
+// robot is stuck in a way the user cannot reset, and state [3]=255 additionally covers transient,
+// self-resolving states (NAVIGATION_INITIALISING 2,18 / GPS_SEARCHING 2,20). So neither the state nor the
+// [4] code alone gates the app's "reset error" button — the real discriminator is still unknown and needs
+// a non-resettable-stuck status capture to diff against the resettable one. See [[reset-error-command]].
 
 function decodeRobotStatusError(decoded) {
     if (!decoded) return undefined;

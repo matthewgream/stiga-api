@@ -382,6 +382,9 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     async sendGoAway(auth, url, { east, north, radius, expirySeconds }) {
         return this._commandRequest(ROBOT_COMMAND_IDS.GO_AWAY, encodeRobotGoAway({ east, north, radius, expirySeconds, auth, url }), undefined, 'command');
     }
+    async sendResetError() {
+        return this._commandRequest(ROBOT_COMMAND_IDS.RESET_ERROR, undefined, undefined, 'command');
+    }
 
     //
 

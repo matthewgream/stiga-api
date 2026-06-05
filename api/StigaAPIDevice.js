@@ -201,6 +201,9 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendGoAway(auth, url, placement) {
         return this._cmdViaConnector('sendGoAway', auth, url, placement);
     }
+    async sendResetError() {
+        return this._cmdViaConnector('sendResetError');
+    }
 
     //
 

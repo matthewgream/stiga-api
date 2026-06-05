@@ -252,7 +252,7 @@ class WebStatusProcessor {
     // its own commands). Fire-and-forget — the robot's next STATUS will reflect the new state.
     _handleCommandPost(req, res) {
         const name = (req.params.name || '').toLowerCase();
-        const simple = { start: 'START', stop: 'STOP', home: 'GO_HOME' };
+        const simple = { start: 'START', stop: 'STOP', home: 'GO_HOME', 'reset-error': 'RESET_ERROR' };
         const zoned = { 'force-cut': 'FORCE_CUT', 'force-border-cut': 'FORCE_BORDER_CUT' };
         const id = simple[name] || zoned[name];
         if (!id) {
@@ -853,6 +853,7 @@ html,body{margin:0;height:100%}
 #cmdbox .cbtn.start{color:#137333;border-color:#137333}
 #cmdbox .cbtn.stop{color:#c5221f;border-color:#c5221f}
 #cmdbox .cbtn.home{color:#1967d2;border-color:#1967d2}
+#cmdbox .cbtn.reset{color:#c5221f;border-color:#c5221f}
 #cmdbox .cbtn.cut,#cmdbox .cbtn.edge{color:#b06000;border-color:#b06000}
 #cmdbox .czone{flex:1 1 auto;min-width:0;font:12px system-ui,Segoe UI,Arial,sans-serif;border:1px solid #c4c7c5;border-radius:4px;padding:4px 6px;color:#202124;background:#fff;cursor:pointer}
 #cmdbox .cbtn.busy{opacity:.55;pointer-events:none}
@@ -1913,16 +1914,21 @@ function renderCommandBox(){
   var r = state && state.robot;
   var active = isRobotActive(r);
   var busy = commandBusy ? ' busy' : '';
+  // Reset is offered whenever the robot reports an error state. That is deliberately loose: it also
+  // appears for transient/non-resettable errors (we don't yet know the app's exact gate — RESET_ERROR
+  // is harmless when it doesn't apply). Refine once we can tell resettable errors apart. See elements.
+  var inError = !!(r && (r.statusType || '').toUpperCase() === 'ERROR');
   // Only rebuild the controls when something that affects them actually changes — otherwise the 2.5s
   // refresh would snap the zone <select> shut while the user is picking. (The cmsg span is updated
   // in place by setCommandMessage and is intentionally excluded from the signature.)
-  var sig = (active ? 'A' : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
+  var sig = (active ? 'A' : '_') + (inError ? 'E' : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
   if(sig === lastCmdSig && box.innerHTML){ return; }
   lastCmdSig = sig;
   var primary = active
     ? '<span class="cbtn stop' + busy + '" data-cmd="stop">Stop</span>'
     : '<span class="cbtn start' + busy + '" data-cmd="start">Start</span>';
   var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
+  var reset = inError ? '<span class="cbtn reset' + busy + '" data-cmd="reset-error" title="clear a recoverable error (may not work for every fault)">Reset</span>' : '';
   var cut = '';
   if(cutZones.length){
     var opts = '';
@@ -1938,7 +1944,7 @@ function renderCommandBox(){
   var msg = box.querySelector('.cmsg');
   var msgHtml = msg ? msg.outerHTML : '<span class="cmsg"></span>';
   // Zone-targeted commands wrap to their own row so long zone names don't overflow the fixed box width.
-  box.innerHTML = '<div class="crow">' + primary + home + msgHtml + '</div>' +
+  box.innerHTML = '<div class="crow">' + primary + home + reset + msgHtml + '</div>' +
     (cut ? '<div class="crow">' + cut + '</div>' : '');
   var sel = box.querySelector('.czone');
   if(sel) sel.addEventListener('change', function(){ cutZone = parseInt(sel.value, 10); lastCmdSig = ''; });

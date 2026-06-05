@@ -690,6 +690,15 @@ registerCommand(['go-home', 'goHome', 'home'], {
     execute: async (options, context) => executeRobotCommand('go-home', (d) => d.sendGoHome(), context),
 });
 
+registerCommand(['reset-error', 'resetError', 'reset'], {
+    description: 'Clear a recoverable latched error (the app\'s "reset error" button)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot reset-error [help]',
+    summary: 'Send RESET_ERROR (CMD_ROBOT 37) to clear a recoverable error. Note: not every error is resettable — some stuck conditions need physical intervention.',
+    examples: ['stiga-command --robot reset-error'],
+    execute: async (options, context) => executeRobotCommand('reset-error', (d) => d.sendResetError(), context),
+});
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
