@@ -930,7 +930,10 @@ html,body{margin:0;height:100%}
 #cmdbox .cbtn.sched{color:#5f6368;border-color:#c4c7c5}
 #cmdbox .cbtn.sched.on{background:#137333;border-color:#137333;color:#fff}
 #cmdbox .cbtn.cut,#cmdbox .cbtn.edge{color:#b06000;border-color:#b06000}
-#cmdbox .czone{flex:1 1 auto;min-width:0;font:12px system-ui,Segoe UI,Arial,sans-serif;border:1px solid #c4c7c5;border-radius:4px;padding:4px 6px;color:#202124;background:#fff;cursor:pointer}
+#cmdbox .cbtn.zgo{color:#137333;border-color:#137333;font-size:13px;line-height:1}
+#cmdbox .czone,#cmdbox .zcmd{min-width:0;font:12px system-ui,Segoe UI,Arial,sans-serif;border:1px solid #c4c7c5;border-radius:4px;padding:4px 6px;color:#202124;background:#fff;cursor:pointer}
+#cmdbox .czone{flex:1 1 auto}
+#cmdbox .zcmd{flex:0 1 auto}
 #cmdbox .cbtn.busy{opacity:.55;pointer-events:none}
 #cmdbox .cmsg{font-size:11px;color:#9aa0a6;margin-top:2px}
 `;
@@ -949,7 +952,10 @@ var notifications = [], dismissed = {};
 // flashes it on the map — distinct purple, on/off, only while hovered. Generic: any future notification
 // metadata exposing {latitude,longitude,radius} circles renders the same way.
 var proposalCircles = [], proposalFlash = null;
-var cutZones = [], cutZone = null, lastCmdSig = ''; // force-cut zone selector state ([{id,name}] from perimeters)
+var cutZones = [], cutZone = null, lastCmdSig = ''; // zone selector state ([{id,name}] from perimeters)
+var zoneCmd = 'force-cut'; // selected zone-action command (extensible: force-cut, force-border-cut, …)
+// Zone-action commands offered in the command dropdown (extend here to add enable/disable/etc later).
+var ZONE_COMMANDS = [{ cmd: 'force-cut', label: 'Force cut' }, { cmd: 'force-border-cut', label: 'Force edge' }];
 var CMD_IDLE = 'ready · awaiting command'; // command status line text when nothing is in flight (used by renderCommandBox at init)
 var notifBoxClosed = false, notifClosedUuids = {}; // whole-box hide; reopens when a NEW (unseen) notification arrives
 var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only settings panel state (* = global)
@@ -2050,7 +2056,7 @@ function renderCommandBox(){
   // Only rebuild the controls when something that affects them actually changes — otherwise the 2.5s
   // refresh would snap the zone <select> shut while the user is picking. (The cmsg span is updated
   // in place by setCommandMessage and is intentionally excluded from the signature.)
-  var sig = (active ? 'A' : '_') + (intervene ? intervene.cmd : '_') + (schedKnown ? (schedOn ? 'S' : 's') : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone;
+  var sig = (active ? 'A' : '_') + (intervene ? intervene.cmd : '_') + (schedKnown ? (schedOn ? 'S' : 's') : '_') + busy + '|' + cutZones.map(function(z){ return z.id + ':' + (z.name || ''); }).join(',') + '|' + cutZone + '|' + zoneCmd;
   if(sig === lastCmdSig && box.innerHTML){ return; }
   lastCmdSig = sig;
   var primary = active
@@ -2059,17 +2065,20 @@ function renderCommandBox(){
   var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
   var reset = intervene ? '<span class="cbtn ' + intervene.cls + busy + '" data-cmd="' + intervene.cmd + '" title="' + intervene.title + '">' + intervene.label + '</span>' : '';
   var sched = schedKnown ? '<span class="cbtn sched' + (schedOn ? ' on' : '') + busy + '" data-cmd="schedule-' + (schedOn ? 'off' : 'on') + '" title="enable/disable scheduled mowing (📅)">📅 ' + (schedOn ? 'ON' : 'OFF') + '</span>' : '';
+  // Extensible zone-action row: [command ▾] [zone ▾] [▶] — pick a command + zone, then Go.
   var cut = '';
   if(cutZones.length){
+    var cmdOpts = '';
+    for(var c = 0; c < ZONE_COMMANDS.length; c++) cmdOpts += '<option value="' + ZONE_COMMANDS[c].cmd + '"' + (ZONE_COMMANDS[c].cmd === zoneCmd ? ' selected' : '') + '>' + esc(ZONE_COMMANDS[c].label) + '</option>';
     var opts = '';
     for(var z = 0; z < cutZones.length; z++){
       var zid = cutZones[z].id, zname = cutZones[z].name;
       var zlabel = zname ? (zid + ' · ' + zname) : ('Zone ' + zid);
       opts += '<option value="' + zid + '"' + (zid === cutZone ? ' selected' : '') + '>' + esc(zlabel) + '</option>';
     }
-    cut = '<span class="cbtn cut' + busy + '" data-cmd="force-cut" title="mow the selected zone now">Cut</span>' +
-      '<span class="cbtn edge' + busy + '" data-cmd="force-border-cut" title="cut the border of the selected zone now">Edge</span>' +
-      '<select class="czone" title="zone">' + opts + '</select>';
+    cut = '<select class="zcmd" title="zone command">' + cmdOpts + '</select>' +
+      '<select class="czone" title="zone">' + opts + '</select>' +
+      '<span class="cbtn zgo' + busy + '" data-cmd="zone-go" title="run the selected command on the selected zone">▶</span>';
   }
   var msg = box.querySelector('.cmsg');
   var msgHtml = msg ? msg.outerHTML : '<div class="cmsg">' + CMD_IDLE + '</div>';
@@ -2081,12 +2090,14 @@ function renderCommandBox(){
     msgHtml;
   var sel = box.querySelector('.czone');
   if(sel) sel.addEventListener('change', function(){ cutZone = parseInt(sel.value, 10); lastCmdSig = ''; });
+  var cmdSel = box.querySelector('.zcmd');
+  if(cmdSel) cmdSel.addEventListener('change', function(){ zoneCmd = cmdSel.value; lastCmdSig = ''; });
   var btns = box.querySelectorAll('.cbtn');
   for(var i = 0; i < btns.length; i++){
     (function(el){
       el.addEventListener('click', function(){
         var cmd = el.getAttribute('data-cmd');
-        if(cmd === 'force-cut' || cmd === 'force-border-cut') sendCommand(cmd, cutZone);
+        if(cmd === 'zone-go') sendCommand(zoneCmd, cutZone); // run the chosen zone command on the chosen zone
         else sendCommand(cmd);
       });
     })(btns[i]);
