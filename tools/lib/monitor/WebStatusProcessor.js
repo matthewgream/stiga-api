@@ -2189,6 +2189,8 @@ function settingsRows(obj){
   Object.keys(obj).forEach(function(k){
     if(skip[k]) return;
     if(typeof obj[k] === 'function' || (obj[k] && typeof obj[k] === 'object')) return;
+    // zone 'enabled' reads better as yes/no than the on/off used for the other booleans
+    if(k === 'enabled'){ rows.push(['Enabled', obj[k] ? 'yes' : 'no']); return; }
     rows.push([humanizeKey(k), fmtSettingValue(k, obj[k])]);
   });
   return rows;

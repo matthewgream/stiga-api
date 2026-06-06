@@ -979,7 +979,17 @@ registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
         display.json({
             source: 'cloud',
             kind: 'zoneSettings',
-            value: all.map((z) => ({ id: z.id, name: z.name, enabled: z.enabled !== false, cuttingHeight: z.cuttingHeight, cuttingMode: z.cuttingMode, priority: z.priority, customAngleActive: z.customAngleActive, customAngle: z.customAngle, borderCut: z.borderCut })),
+            value: all.map((z) => ({
+                id: z.id,
+                name: z.name,
+                enabled: z.enabled !== false,
+                cuttingHeight: z.cuttingHeight,
+                cuttingMode: z.cuttingMode,
+                priority: z.priority,
+                customAngleActive: z.customAngleActive,
+                customAngle: z.customAngle,
+                borderCut: z.borderCut,
+            })),
         });
     },
 });

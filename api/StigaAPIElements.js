@@ -714,34 +714,34 @@ function decodeRobotSettings(decoded) {
     const rainHoursByIndex = Object.fromEntries(Object.entries(getRainDelaysMap()).map(([hours, index]) => [index, Number(hours)]));
     const heightMmByIndex = Object.fromEntries(Object.entries(getCuttingHeightsMap()).map(([mm, index]) => [index, Number(mm)]));
     return upgradeRobotSettings({
+        antiTheft: Boolean(decoded?.[6] === 1),
+        keyboardLock: Boolean(decoded?.[2] === 1),
+        longExitEnabled: Boolean(decoded?.[8]?.[1]),
+        longExitDistance: getLongExitDistancesMap()[decoded?.[8]?.[1]] || 0, // cm; 0 when off
         rainSensorEnabled: Boolean(decoded?.[1]?.[1] === 1),
         rainSensorDelay: rainHoursByIndex[decoded?.[1]?.[2] || 0] ?? 0, // hours
-        keyboardLock: Boolean(decoded?.[2] === 1),
         zoneCuttingHeightEnabled: Boolean(decoded?.[4]?.[1] === 1),
         zoneCuttingHeight: heightMmByIndex[decoded?.[4]?.[2] ?? 5] ?? 45, // mm
         // 4.3 is set to 1 when the height is being changed
-        antiTheft: Boolean(decoded?.[6] === 1),
-        smartCutHeight: Boolean(decoded?.[7] === 1),
-        longExitEnabled: Boolean(decoded?.[8]?.[1]),
-        longExitDistance: getLongExitDistancesMap()[decoded?.[8]?.[1]] || 0, // cm; 0 when off
         zoneCuttingHeightUniform: Boolean(decoded?.[9] === 1),
-        unknown: decoded?.[11] || 110,
+        smartCutHeight: Boolean(decoded?.[7] === 1),
         pushNotifications: Boolean(decoded?.[14]?.[1] === 1),
         obstacleNotifications: Boolean(decoded?.[15]?.[1] === 1),
+        unknown: decoded?.[11] || 110,
     });
 }
 function formatRobotSettings(settings) {
     return formatStruct(settings, 'settings', {
+        antiTheft: { onoff: true },
+        keyboardLock: { onoff: true },
+        longExitEnabled: { onoff: true },
+        longExitDistance: { units: 'cm' },
+        rainSensorEnabled: { onoff: true },
         rainSensorDelay: { units: 'h' },
         zoneCuttingHeightEnabled: { onoff: true },
         zoneCuttingHeight: { units: 'mm' },
-        rainSensorEnabled: { onoff: true },
-        keyboardLock: { onoff: true },
         zoneCuttingHeightUniform: { onoff: true },
-        antiTheft: { onoff: true },
         smartCutHeight: { onoff: true },
-        longExitEnabled: { onoff: true },
-        longExitDistance: { units: 'cm' },
         pushNotifications: { onoff: true },
         obstacleNotifications: { onoff: true },
     });
@@ -1159,9 +1159,9 @@ function decodePerimeterZoneSettings(zoneEntry) {
         id: zoneEntry[1],
         name: _decodePerimeterZoneName(zoneEntry[15]) || '',
         enabled: !zoneEntry[12], // [12]=1 means the zone is disabled in the app (absent/0 = enabled)
+        priority: zoneEntry[13] ?? 0, // ordered right after enabled so the UI/JSON lead with them
         cuttingMode: cuttingModesByValue[modeValue] ?? modeValue,
         cuttingHeight: cuttingHeightsByValue[heightValue] ?? heightValue, // mm
-        priority: zoneEntry[13] ?? 0,
         customAngleActive: Boolean(zoneEntry[17]),
         customAngle: zoneEntry[18] ?? 0, // degrees
         borderCut: Boolean(zoneEntry[19]),
