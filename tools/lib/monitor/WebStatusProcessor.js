@@ -987,7 +987,7 @@ function showProposalCrosshair(lat, lng){
   function arm(path){ return new google.maps.Polyline({ path: path, strokeColor: '#ea4335', strokeOpacity: 1, strokeWeight: 2, clickable: false, zIndex: 8, map: map }); }
   proposalCircles.push(arm([{ lat: lat, lng: lng - dLng }, { lat: lat, lng: lng + dLng }]));
   proposalCircles.push(arm([{ lat: lat - dLat, lng: lng }, { lat: lat + dLat, lng: lng }]));
-  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R, fillOpacity: 0, strokeColor: '#ea4335', strokeOpacity: 0.6, strokeWeight: 1, clickable: false, zIndex: 8, map: map }));
+  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R * 0.55, fillOpacity: 0, strokeColor: '#ea4335', strokeOpacity: 0.9, strokeWeight: 2, clickable: false, zIndex: 8, map: map }));
   var on = true;
   proposalFlash = setInterval(function(){ on = !on; for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setVisible(on); }, 450);
 }
@@ -2058,7 +2058,7 @@ function renderCommandBox(){
     : '<span class="cbtn start' + busy + '" data-cmd="start">Start</span>';
   var home = '<span class="cbtn home' + busy + '" data-cmd="home">Home</span>';
   var reset = intervene ? '<span class="cbtn ' + intervene.cls + busy + '" data-cmd="' + intervene.cmd + '" title="' + intervene.title + '">' + intervene.label + '</span>' : '';
-  var sched = schedKnown ? '<span class="cbtn sched' + (schedOn ? ' on' : '') + busy + '" data-cmd="schedule-' + (schedOn ? 'off' : 'on') + '" title="enable/disable scheduled mowing">Schedule ' + (schedOn ? 'ON' : 'OFF') + '</span>' : '';
+  var sched = schedKnown ? '<span class="cbtn sched' + (schedOn ? ' on' : '') + busy + '" data-cmd="schedule-' + (schedOn ? 'off' : 'on') + '" title="enable/disable scheduled mowing (📅)">📅 ' + (schedOn ? 'ON' : 'OFF') + '</span>' : '';
   var cut = '';
   if(cutZones.length){
     var opts = '';
