@@ -427,49 +427,52 @@ function decodeRobotMowingStatus(decoded, location) {
         zone: decoded[1],
         zoneCompleted: decoded[2],
         gardenCompleted: decoded[3],
-        target: decodeRobotMowingTarget(decoded[4], location),
+        strategy: decodeRobotMowingStrategy(decoded[4], location),
     });
 }
-// [18][4] — the mowing PLAN + progress (reverse engineered; full field table in api/status.txt).
-// Set once at (re)plan time and constant for the whole run: [5] = anchor/reference point ({1:east,
-// 2:north} doubles on a 0.5 m grid — NOT a live target and NOT where the robot starts), [6] = cutting
-// direction (radians, rotates each run), [2] = 4-state orientation class, [4] = an opaque per-plan
-// quantity (NOT the zone work-total). [1] is the only live value: cumulative work/length mowed, whose
-// per-zone ceiling approximates the zone's total work. [3]/[7] = constant-when-present markers.
-// omitted == 0. Only surfaced when an anchor [5] is present. (Field name `target` kept for now.)
-function decodeRobotMowingTarget(decoded, location) {
+// [18][4] — the mowing STRATEGY: the per-run plan (set at (re)plan time, constant for the run) plus the
+// one live value. Reverse engineered; full field table in api/status.txt. Fields ([4][n], omitted == 0):
+//   [1] cutEffortProgress  live cumulative work/length mowed (per-zone ceiling ~ zone total work)
+//   [2] cutAttitude        4-state orientation class (45deg steps), companion to [6] -> pattern
+//   [3] cutUnknown1        flag (1 when present) — unknown
+//   [4] cutEffortMaximum   per-plan planned total work (pattern/density/border dependent) — formula TBD
+//   [5] cutPosition        anchor/reference point {east,north} doubles on a 0.5 m grid (NOT live target)
+//   [6] cutDirection       cutting direction in degrees (from radians; rotates each run)
+//   [7] cutUnknown2        marker (=2 when [5] present) — unknown
+// Only surfaced when an anchor [5] is present. (At least one of [3]/[7] may relate to cut-height encoding.)
+function decodeRobotMowingStrategy(decoded, location) {
     if (!decoded || decoded[5] === undefined) return undefined;
     const east = hexToDouble(decoded[5][1] || '0000000000000000'),
         north = hexToDouble(decoded[5][2] || '0000000000000000');
-    const headingDegrees = ((decoded[6] || 0) * 180) / Math.PI;
-    return upgradeRobotMowingTarget({
-        east,
-        north,
-        ...calculateLocationFromOffset(location, [east, north]),
-        headingDegrees,
-        headingCompass: (450 - headingDegrees) % 360,
-        // raw [18][4] counters/markers, surfaced for correlation eyeballing (meaning TBD; omitted == 0)
-        raw: { 1: decoded[1] || 0, 2: decoded[2] || 0, 3: decoded[3] || 0, 4: decoded[4] || 0, 7: decoded[7] || 0 },
+    return upgradeRobotMowingStrategy({
+        cutEffortProgress: decoded[1] || 0,
+        cutAttitude: decoded[2] || 0,
+        cutUnknown1: decoded[3] || 0,
+        cutEffortMaximum: decoded[4] || 0,
+        cutPosition: { east, north, ...calculateLocationFromOffset(location, [east, north]) },
+        cutDirection: ((decoded[6] || 0) * 180) / Math.PI, // degrees
+        cutUnknown2: decoded[7] || 0,
     });
 }
 function formatRobotMowingStatus(mowing) {
     if (!mowing) return undefined;
     return (
         formatStruct({ zone: mowing.zone, zoneCompleted: mowing.zoneCompleted, gardenCompleted: mowing.gardenCompleted }, 'mowing', { zoneCompleted: { units: '%' }, gardenCompleted: { units: '%' } }) +
-        (mowing.target ? ', ' + formatRobotMowingTarget(mowing.target) : '')
+        (mowing.strategy ? ', ' + formatRobotMowingStrategy(mowing.strategy) : '')
     );
 }
-function formatRobotMowingTarget(target) {
-    const where = target.latitude !== undefined && target.longitude !== undefined ? `${target.latitude.toFixed(7)},${target.longitude.toFixed(7)}` : `${target.east.toFixed(1)},${target.north.toFixed(1)}m`;
-    return `target=${where} heading=${Math.round(target.headingCompass)}°`;
+function formatRobotMowingStrategy(s) {
+    const cp = s.cutPosition;
+    const where = cp.latitude !== undefined && cp.longitude !== undefined ? `${cp.latitude.toFixed(7)},${cp.longitude.toFixed(7)}` : `${cp.east.toFixed(1)},${cp.north.toFixed(1)}m`;
+    return `effort=${s.cutEffortProgress}/${s.cutEffortMaximum} direction=${Math.round(s.cutDirection)}°/${s.cutAttitude}° position=${where} unknown=${s.cutUnknown1}/${s.cutUnknown2}`;
 }
 function upgradeRobotMowingStatus(mowing) {
     mowing.toString = () => formatRobotMowingStatus(mowing);
     return mowing;
 }
-function upgradeRobotMowingTarget(target) {
-    target.toString = () => formatRobotMowingTarget(target);
-    return target;
+function upgradeRobotMowingStrategy(strategy) {
+    strategy.toString = () => formatRobotMowingStrategy(strategy);
+    return strategy;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------

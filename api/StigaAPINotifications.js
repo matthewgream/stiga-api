@@ -60,6 +60,7 @@ class StigaAPINotification {
     }
 
     isRead() {
+        // eslint-disable-next-line unicorn/no-null
         return this.data?.attributes?.read_at != null;
     }
 

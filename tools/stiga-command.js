@@ -337,240 +337,6 @@ async function runWatch(options, context) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand('version', {
-    description: 'Get firmware/hardware version',
-    targets: ['robot', 'base'],
-    usage: 'stiga-command [--robot|--base] version [help]',
-    summary: 'Get version information for the selected target.',
-    examples: ['stiga-command --robot version', 'stiga-command --base version'],
-    execute: async (options, context) => {
-        const { target, device, base, connectors } = context;
-        if (target === 'both' || target === 'robot') {
-            await connectToRobot(device, connectors);
-            const version = await device.getVersion({ refresh: 'force' });
-            display.text('Robot Version:');
-            display.text(version.value.toString({ compressed: false }));
-            display.json({ source: 'robot', kind: 'version', value: version.value ?? null });
-        }
-        if (target === 'both' || target === 'base') {
-            await connectToBase(base, connectors);
-            const version = await base.getVersion({ refresh: 'force' });
-            display.text('Base Version:');
-            display.text(version.value.toString({ compressed: false }));
-            display.json({ source: 'base', kind: 'version', value: version.value ?? null });
-        }
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand('status', {
-    description: 'Get operation/battery/mowing/location/network status',
-    targets: ['robot', 'base'],
-    args: '[types...]',
-    usage: 'stiga-command [--robot|--base] status [types] [help]',
-    summary: 'Get status information for the selected target.',
-    details: [
-        '',
-        'Robot status types:',
-        '  operation - Operational status (type, valid, docking)',
-        '  battery   - Battery status (charge level, capacity)',
-        '  mowing    - Mowing status (zone, completion)',
-        '  location  - GPS/location status',
-        '  network   - Network connectivity status',
-        '',
-        'Base status types:',
-        '  operation - Operational status (type, flag)',
-        '  location  - GPS/RTK location status',
-        '  network   - Network connectivity status',
-    ],
-    examples: ['stiga-command --robot status', 'stiga-command --robot status battery,operation', 'stiga-command --base status'],
-    execute: async (options, context) => {
-        const { target, params, device, base, connectors } = context;
-        if (target === 'both' || target === 'robot') {
-            await connectToRobot(device, connectors);
-            if (params.length === 0) {
-                const status = await device.getStatusAll({ refresh: 'force' });
-                display.text('Robot Status:');
-                if (status.operation) display.text(`  Operation: ${status.operation.type}, valid=${status.operation.valid}, docking=${status.operation.docking}`);
-                if (status.battery) display.text(`  Battery: ${status.battery.toString()}`);
-                if (status.mowing) display.text(`  Mowing: ${status.mowing.toString()}`);
-                if (status.location) display.text(`  Location: ${status.location.toString()}`);
-                if (status.network) display.text(`  Network: ${status.network.toString()}`);
-                display.json({
-                    source: 'robot',
-                    kind: 'status',
-                    value: { operation: status.operation, battery: status.battery, mowing: status.mowing, location: status.location, network: status.network },
-                });
-            } else
-                for (const type of params[0].split(','))
-                    switch (type.trim().toLowerCase()) {
-                        case 'operation':
-                            const opStatus = await device.getStatusOperation({ refresh: 'force' });
-                            display.text(`Operation: ${opStatus.value?.type || 'unknown'}, valid=${opStatus.value?.valid}, docking=${opStatus.value?.docking}`);
-                            display.json({ source: 'robot', kind: 'operation', value: opStatus.value ?? null });
-                            break;
-                        case 'battery':
-                            const batStatus = await device.getStatusBattery({ refresh: 'force' });
-                            display.text(`Battery: ${batStatus.value?.toString() || 'unknown'}`);
-                            display.json({ source: 'robot', kind: 'battery', value: batStatus.value ?? null });
-                            break;
-                        case 'mowing':
-                            const mowStatus = await device.getStatusMowing({ refresh: 'force' });
-                            display.text(`Mowing: ${mowStatus.value?.toString() || 'unknown'}`);
-                            display.json({ source: 'robot', kind: 'mowing', value: mowStatus.value ?? null });
-                            break;
-                        case 'location':
-                            const locStatus = await device.getStatusLocation({ refresh: 'force' });
-                            display.text(`Location: ${locStatus.value?.toString() || 'unknown'}`);
-                            display.json({ source: 'robot', kind: 'location', value: locStatus.value ?? null });
-                            break;
-                        case 'network':
-                            const netStatus = await device.getStatusNetwork({ refresh: 'force' });
-                            display.text(`Network: ${netStatus.value?.toString() || 'unknown'}`);
-                            display.json({ source: 'robot', kind: 'network', value: netStatus.value ?? null });
-                            break;
-                        default:
-                            display.text(`Unknown status type: ${type}`);
-                    }
-        }
-        if (target === 'both' || target === 'base') {
-            await connectToBase(base, connectors);
-            if (params.length === 0) {
-                const status = await base.getStatusAll({ refresh: 'force' });
-                display.text('Base Status:');
-                if (status.operation) display.text(`  Operation: type=${status.operation.type}, flag=${status.operation.flag}`);
-                if (status.location) display.text(`  Location: ${status.location.toString()}`);
-                if (status.network) display.text(`  Network: ${status.network.toString()}`);
-                display.json({
-                    source: 'base',
-                    kind: 'status',
-                    value: { operation: status.operation, location: status.location, network: status.network },
-                });
-            } else
-                for (const type of params[0].split(','))
-                    switch (type.trim().toLowerCase()) {
-                        case 'operation':
-                            const opStatus = await base.getStatusOperation({ refresh: 'force' });
-                            display.text(`Operation: type=${opStatus.value?.type}, flag=${opStatus.value?.flag}`);
-                            display.json({ source: 'base', kind: 'operation', value: opStatus.value ?? null });
-                            break;
-                        case 'location':
-                            const locStatus = await base.getStatusLocation({ refresh: 'force' });
-                            display.text(`Location: ${locStatus.value?.toString() || 'unknown'}`);
-                            display.json({ source: 'base', kind: 'location', value: locStatus.value ?? null });
-                            break;
-                        case 'network':
-                            const netStatus = await base.getStatusNetwork({ refresh: 'force' });
-                            display.text(`Network: ${netStatus.value?.toString() || 'unknown'}`);
-                            display.json({ source: 'base', kind: 'network', value: netStatus.value ?? null });
-                            break;
-                        default:
-                            display.text(`Unknown status type for base: ${type}`);
-                    }
-        }
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-async function scheduleUpdateAndDisplay(device, subCommand, value) {
-    await device.setScheduleSettings(value);
-    display.text(`Schedule ${subCommand}d`);
-    const updated = await device.getScheduleSettings({ refresh: 'force' });
-    displaySchedule(updated.value);
-}
-
-registerCommand('schedule', {
-    description: 'Display/enable/disable/insert/remove mowing schedule',
-    targets: ['robot'],
-    args: '[subcommand]',
-    usage: 'stiga-command --robot schedule [subcommand] [params...] [help]',
-    summary: "Manage the robot's mowing schedule.",
-    details: [
-        '',
-        'Subcommands:',
-        '  (none)               - Display current schedule',
-        '  enable               - Enable the schedule',
-        '  disable              - Disable the schedule',
-        '  insert|add <specs>   - Insert time blocks',
-        '  remove <specs>       - Remove time blocks',
-        '',
-        'Schedule specification format:',
-        '  days:HH:MM-HH:MM',
-        '',
-        'Days can be:',
-        '  Mon, Tue, Wed, Thu, Fri, Sat, Sun (or full names)',
-        '  Multiple days separated by commas: Mon,Wed,Fri',
-        '',
-        'Times must be on half-hour boundaries (00 or 30 minutes)',
-    ],
-    examples: [
-        'stiga-command --robot schedule',
-        'stiga-command --robot schedule enable',
-        'stiga-command --robot schedule add Mon,Wed,Fri:09:00-11:30',
-        'stiga-command --robot schedule insert Sat,Sun:08:00-10:00 Sat,Sun:14:00-16:00',
-        'stiga-command --robot schedule remove Tue:14:00-16:00',
-    ],
-    execute: async (options, context) => {
-        const { params, device, connectors } = context;
-        await connectToRobot(device, connectors);
-        if (params.length === 0) {
-            const schedule = await device.getScheduleSettings({ refresh: 'force' });
-            displaySchedule(schedule.value);
-            return;
-        }
-        const subCommand = params[0].toLowerCase();
-        switch (subCommand) {
-            case 'enable':
-            case 'disable': {
-                const schedule = await device.getScheduleSettings({ refresh: 'force' });
-                schedule.value.enabled = subCommand === 'enable';
-                await scheduleUpdateAndDisplay(device, subCommand, schedule.value);
-                break;
-            }
-
-            case 'remove': {
-                if (params.length < 2) throw new Error('Remove requires schedule specifications');
-                const schedule = await device.getScheduleSettings({ refresh: 'force' });
-                for (const spec of parseScheduleSpecs(params.slice(1))) {
-                    try {
-                        schedule.value.removeTimeBlock(spec.dayIndex, spec.startTime);
-                        display.text(`Removed ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')} from day ${spec.dayIndex}`);
-                    } catch (e) {
-                        display.error(`Failed to remove time block, aborting without saving: ${e.message}`);
-                        return;
-                    }
-                }
-                await scheduleUpdateAndDisplay(device, 'updated', schedule.value);
-                break;
-            }
-
-            case 'add':
-            case 'insert': {
-                if (params.length < 2) throw new Error('Insert requires schedule specifications');
-                const schedule = await device.getScheduleSettings({ refresh: 'force' });
-                for (const spec of parseScheduleSpecs(params.slice(1))) {
-                    try {
-                        schedule.value.insertTimeBlock(spec.dayIndex, spec.startTime, spec.endTime);
-                        display.text(`Inserted ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')}-${spec.endTime.hour}:${spec.endTime.minute.toString().padStart(2, '0')} to day ${spec.dayIndex}`);
-                    } catch (e) {
-                        display.error(`Failed to insert time block, aborting without saving: ${e.message}`);
-                        return;
-                    }
-                }
-                await scheduleUpdateAndDisplay(device, 'updated', schedule.value);
-                break;
-            }
-
-            default:
-                throw new Error(`Unknown schedule subcommand: ${subCommand}`);
-        }
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
 function throwExit(message, exitCode) {
     const err = new Error(message);
     err.exitCode = exitCode;
@@ -600,423 +366,6 @@ async function executeRobotCommand(name, fn, context) {
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-function formatSettingValue(value) {
-    if (typeof value === 'boolean') return value ? 'on' : 'off';
-    if (value === undefined || value === null) return '-';
-    if (typeof value === 'object') return JSON.stringify(value);
-    return String(value);
-}
-
-function sortedSettingEntries(value) {
-    if (!value || typeof value !== 'object') return [];
-    return Object.entries(value)
-        .filter(([k, v]) => !k.startsWith('_') && typeof v !== 'function')
-        .sort(([a], [b]) => a.localeCompare(b));
-}
-
-function displaySettings(header, value) {
-    display.text(header);
-    if (value == undefined) display.text('  (none)');
-    else for (const [k, v] of sortedSettingEntries(value)) display.text(`  ${k}: ${formatSettingValue(v)}`);
-}
-
-function plainSettings(value) {
-    if (!value || typeof value !== 'object') return value ?? null;
-    return Object.fromEntries(sortedSettingEntries(value));
-}
-
-registerCommand('settings', {
-    description: 'Display device settings',
-    targets: ['robot', 'base'],
-    usage: 'stiga-command [--robot|--base] settings [help]',
-    summary: 'Display the current settings for the selected target(s).',
-    details: [
-        '',
-        'Robot settings include:',
-        '  rainSensorEnabled, rainSensorDelay, keyboardLock,',
-        '  zoneCuttingHeightEnabled, zoneCuttingHeight, zoneCuttingHeightUniform,',
-        '  antiTheft, smartCutHeight, longExitEnabled, longExitDistance,',
-        '  pushNotifications, obstacleNotifications',
-        '',
-        'Cloud settings (from the garage, not MQTT):',
-        '  autoUpdate   (--debug also dumps the raw cloud blob incl. unverified fields)',
-        '',
-        'Base settings:',
-        '  led',
-    ],
-    examples: ['stiga-command --robot settings', 'stiga-command --base settings', 'stiga-command settings --format json | jq .'],
-    execute: async (options, context) => {
-        const { target, device, base, connectors } = context;
-        if (target === 'both' || target === 'robot') {
-            await connectToRobot(device, connectors);
-            const settings = await device.getSettings({ refresh: 'force' });
-            displaySettings('Robot Settings:', settings.value);
-            display.json({ source: 'robot', kind: 'settings', value: plainSettings(settings.value) });
-
-            // Cloud-only device settings (from the garage, not MQTT). Only the supported ones are shown;
-            // the rest of the raw cloud blob (unverified / possibly model-specific) is dumped under --debug.
-            const autoUpdate = await device.getAutoUpdate();
-            displaySettings('Cloud Settings:', { autoUpdate: autoUpdate.value });
-            display.json({ source: 'cloud', kind: 'settings', value: { autoUpdate: autoUpdate.value ?? null } });
-            const cloudRaw = (await device.getCloudSettingsRaw()).value;
-            if (cloudRaw) display.debug('Cloud settings (raw, incl. unverified fields): ' + JSON.stringify(cloudRaw));
-        }
-        if (target === 'both' || target === 'base') {
-            await connectToBase(base, connectors);
-            const led = await base.getLedSetting({ refresh: 'force' });
-            displaySettings('Base Settings:', { led: led.value });
-            display.json({ source: 'base', kind: 'settings', value: { led: led.value ?? null } });
-        }
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
-    description: 'Display per-zone settings (cutting height, mode, priority, angle, border cut)',
-    targets: ['robot'],
-    usage: 'stiga-command --robot zone-settings [zone] [help]',
-    summary: 'Read the per-zone settings from the cloud perimeter (the canonical store). Optionally pass a zone id to show just one zone.',
-    details: [
-        '',
-        'Per-zone settings are stored in the cloud perimeter, not over MQTT.',
-        'Each zone reports: name, cuttingHeight (mm), cuttingMode, priority,',
-        'customAngle (deg, when customAngleActive), borderCut.',
-        '',
-        'Read-only for now.',
-    ],
-    examples: ['stiga-command --robot zone-settings', 'stiga-command --robot zone-settings 2', 'stiga-command --robot zone-settings --format json | jq .'],
-    execute: async (options, context) => {
-        const { device, connectors, params } = context;
-        const { auth } = connectors;
-        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
-        const server = new StigaAPIConnectionServer(auth);
-        const perimeters = new StigaAPIPerimeters(server, device);
-        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
-
-        const wanted = params[0] === undefined ? undefined : Number.parseInt(params[0], 10);
-        let all = perimeters.getAllZoneSettings();
-        if (wanted !== undefined) {
-            if (!Number.isInteger(wanted)) throw throwExit(`invalid zone id: ${params[0]}`, 2);
-            all = all.filter((z) => z.id === wanted);
-            if (all.length === 0)
-                throw throwExit(
-                    `zone ${wanted} not found (zones: ${
-                        perimeters
-                            .getAllZoneSettings()
-                            .map((z) => z.id)
-                            .join(', ') || 'none'
-                    })`,
-                    2
-                );
-        }
-
-        display.text('Zone Settings:');
-        if (all.length === 0) display.text('  (no zones)');
-        for (const z of all) {
-            const angle = z.customAngleActive ? `${z.customAngle}°` : 'off';
-            const mode = StigaAPIElements.getCuttingModeLabels()[z.cuttingMode] || z.cuttingMode;
-            display.text(`  zone ${z.id} "${z.name}": height=${z.cuttingHeight}mm mode=${mode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
-        }
-        display.json({
-            source: 'cloud',
-            kind: 'zoneSettings',
-            value: all.map((z) => ({ id: z.id, name: z.name, cuttingHeight: z.cuttingHeight, cuttingMode: z.cuttingMode, priority: z.priority, customAngleActive: z.customAngleActive, customAngle: z.customAngle, borderCut: z.borderCut })),
-        });
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand('start', {
-    description: 'Start mowing',
-    targets: ['robot'],
-    usage: 'stiga-command --robot start [help]',
-    summary: 'Start the robot mowing.',
-    examples: ['stiga-command --robot start'],
-    execute: async (options, context) => executeRobotCommand('start', (d) => d.sendStart(), context),
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand('stop', {
-    description: 'Stop the robot',
-    targets: ['robot'],
-    usage: 'stiga-command --robot stop [help]',
-    summary: 'Stop the robot.',
-    examples: ['stiga-command --robot stop'],
-    execute: async (options, context) => executeRobotCommand('stop', (d) => d.sendStop(), context),
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['go-home', 'goHome', 'home'], {
-    description: 'Send the robot home to dock',
-    targets: ['robot'],
-    usage: 'stiga-command --robot go-home [help]',
-    summary: 'Send the robot back to its docking station.',
-    examples: ['stiga-command --robot go-home'],
-    execute: async (options, context) => executeRobotCommand('go-home', (d) => d.sendGoHome(), context),
-});
-
-registerCommand(['reset-error', 'resetError', 'reset'], {
-    description: 'Clear a recoverable latched error (the app\'s "reset error" button)',
-    targets: ['robot'],
-    usage: 'stiga-command --robot reset-error [help]',
-    summary: 'Send RESET_ERROR (CMD_ROBOT 37) to clear a recoverable error. Note: not every error is resettable — some stuck conditions need physical intervention.',
-    examples: ['stiga-command --robot reset-error'],
-    execute: async (options, context) => executeRobotCommand('reset-error', (d) => d.sendResetError(), context),
-});
-
-registerCommand(['boot', 'startup'], {
-    description: 'Boot the robot out of a "startup required" state (the app\'s "boot" button)',
-    targets: ['robot'],
-    usage: 'stiga-command --robot boot [help]',
-    summary: 'Send BOOT (CMD_ROBOT 9) to clear STARTUP_REQUIRED; the robot then proceeds into calibration.',
-    examples: ['stiga-command --robot boot'],
-    execute: async (options, context) => executeRobotCommand('boot', (d) => d.sendBoot(), context),
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
-    description: 'Calibrate the cutting blades',
-    targets: ['robot'],
-    usage: 'stiga-command --robot calibrate-blades [help]',
-    summary: 'Trigger blade calibration on the robot.',
-    examples: ['stiga-command --robot calibrate-blades'],
-    execute: async (options, context) => executeRobotCommand('calibrate-blades', (d) => d.sendCalibrateBlades(), context),
-});
-
-registerCommand(['calibrate-docking', 'calibrateDocking', 'docking'], {
-    description: 'Calibrate the docking/charging alignment',
-    targets: ['robot'],
-    usage: 'stiga-command --robot calibrate-docking [help]',
-    summary: 'Trigger docking calibration on the robot (the app\'s "docking calibration"). Robot reports status type 25 while running.',
-    examples: ['stiga-command --robot calibrate-docking'],
-    execute: async (options, context) => executeRobotCommand('calibrate-docking', (d) => d.sendCalibrateDocking(), context),
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['cloud-sync', 'cloudSync', 'sync'], {
-    description: 'Tell the robot to re-sync its perimeter from the cloud',
-    targets: ['robot'],
-    usage: 'stiga-command --robot cloud-sync [help]',
-    summary: 'Trigger the robot to download and apply the current cloud perimeter (CLOUDSYNC_DOWNLOAD).',
-    examples: ['stiga-command --robot cloud-sync'],
-    execute: async (options, context) => {
-        const { device, connectors } = context;
-        const { auth } = connectors;
-        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
-        const server = new StigaAPIConnectionServer(auth);
-        const perimeters = new StigaAPIPerimeters(server, device);
-        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
-        const url = perimeters.getResourceUrl();
-        if (!url) throw throwExit('no perimeter resource url available', 2);
-        return executeRobotCommand('cloud-sync', (d) => d.sendCloudSync(`Bearer ${auth.token}`, url), context);
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['force-cut', 'forceCut', 'cut'], {
-    description: 'Force the robot to mow a specific zone now',
-    targets: ['robot'],
-    usage: 'stiga-command --robot force-cut <zone> [help]',
-    summary: 'Send the robot to mow the given zone number immediately (FORCE_CUT).',
-    examples: ['stiga-command --robot force-cut 2'],
-    execute: async (options, context) => {
-        const zone = Number.parseInt(context.params[0], 10);
-        if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-cut requires a zone number, e.g. force-cut 2', 2);
-        return executeRobotCommand('force-cut', (d) => d.sendForceCut(zone), context);
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['force-border-cut', 'forceBorderCut', 'border-cut'], {
-    description: "Force the robot to cut a specific zone's border now",
-    targets: ['robot'],
-    usage: 'stiga-command --robot force-border-cut <zone> [help]',
-    summary: "Send the robot to cut the given zone's border immediately (FORCE_BORDER_CUT).",
-    examples: ['stiga-command --robot force-border-cut 2'],
-    execute: async (options, context) => {
-        const zone = Number.parseInt(context.params[0], 10);
-        if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-border-cut requires a zone number, e.g. force-border-cut 2', 2);
-        return executeRobotCommand('force-border-cut', (d) => d.sendForceBorderCut(zone), context);
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-registerCommand(['go-away', 'goAway', 'avoid'], {
-    description: 'Push a temporary circular GO_AWAY obstacle to the robot (real-time avoid)',
-    targets: ['robot'],
-    usage: 'stiga-command --robot go-away <lat> <lng> <radius_m> [expiry_days]',
-    summary: 'Tell the robot to avoid a circle at lat/lng now (MQTT push only).',
-    details: [
-        '',
-        'NOTE: this only pushes the real-time GO_AWAY command over MQTT. It does NOT add the obstacle',
-        'to the cloud perimeter (tempObstacles), so it will not persist across a full re-sync. To make',
-        'it permanent the caller must also update the cloud perimeter — left to the API client.',
-    ],
-    examples: ['stiga-command --robot go-away 59.6620665 12.9959925 2 30'],
-    execute: async (options, context) => {
-        const { device, connectors, params } = context;
-        const { auth } = connectors;
-        const lat = Number.parseFloat(params[0]),
-            lng = Number.parseFloat(params[1]),
-            radius = Number.parseFloat(params[2]);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radius)) throw throwExit('go-away requires <lat> <lng> <radius_m>, e.g. go-away 59.662 12.996 2', 2);
-        const days = Number.isFinite(Number.parseFloat(params[3])) ? Number.parseFloat(params[3]) : 30;
-        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
-        const server = new StigaAPIConnectionServer(auth);
-        const perimeters = new StigaAPIPerimeters(server, device);
-        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
-        const url = perimeters.getResourceUrl();
-        const ref = perimeters.getReferencePosition();
-        if (!url || !ref) throw throwExit('no perimeter / reference position available', 2);
-        // lat/lng -> ENU east/north metres, relative to the perimeter reference position
-        const placement = {
-            east: (lng - ref.longitude) * (111320 * Math.cos((ref.latitude * Math.PI) / 180)),
-            north: (lat - ref.latitude) * 111320,
-            radius,
-            expirySeconds: Math.round(days * 86400),
-        };
-        return executeRobotCommand('go-away', (d) => d.sendGoAway(`Bearer ${auth.token}`, url, placement), context);
-    },
-});
-
-// ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-async function safeAwait(label, fn) {
-    try {
-        return await fn();
-    } catch (e) {
-        display.verbose(`info: ${label} failed: ${e.message}`);
-        return undefined;
-    }
-}
-
-async function gatherRobotInfo(device) {
-    const cloudKeys = ['name', 'productCode', 'serialNumber', 'firmwareVersion', 'deviceType', 'brokerId', 'totalWorkTime', 'isEnabled', 'lastPosition'];
-    const getterMap = {
-        name: () => device.getName(),
-        productCode: () => device.getProductCode(),
-        serialNumber: () => device.getSerialNumber(),
-        firmwareVersion: () => device.getFirmwareVersion(),
-        deviceType: () => device.getDeviceType(),
-        brokerId: () => device.getBrokerId(),
-        totalWorkTime: () => device.getTotalWorkTime(),
-        isEnabled: () => device.getIsEnabled(),
-        lastPosition: () => device.getLastPosition(),
-    };
-    const info = { macAddress: device.getMacAddress() };
-    for (const key of cloudKeys) {
-        const v = await safeAwait(key, getterMap[key]);
-        info[key] = v?.value;
-    }
-    const version = await safeAwait('version', () => device.getVersion({ refresh: 'force' }));
-    info.version = version?.value;
-    const status = await safeAwait('statusAll', () => device.getStatusAll({ refresh: 'force' }));
-    if (status) info.status = { operation: status.operation, battery: status.battery, mowing: status.mowing, location: status.location, network: status.network };
-    const settings = await safeAwait('settings', () => device.getSettings({ refresh: 'force' }));
-    info.settings = settings?.value;
-    const schedule = await safeAwait('schedule', () => device.getScheduleSettings({ refresh: 'force' }));
-    info.schedule = schedule?.value;
-    return info;
-}
-
-async function gatherBaseInfo(base) {
-    const cloudKeys = ['productCode', 'serialNumber', 'firmwareVersion', 'createdAt'];
-    const getterMap = {
-        productCode: () => base.getProductCode(),
-        serialNumber: () => base.getSerialNumber(),
-        firmwareVersion: () => base.getFirmwareVersion(),
-        createdAt: () => base.getCreatedAt(),
-    };
-    const info = { macAddress: base.getMacAddress() };
-    for (const key of cloudKeys) {
-        const v = await safeAwait(key, getterMap[key]);
-        info[key] = v?.value;
-    }
-    const version = await safeAwait('version', () => base.getVersion({ refresh: 'force' }));
-    info.version = version?.value;
-    const status = await safeAwait('statusAll', () => base.getStatusAll({ refresh: 'force' }));
-    if (status) info.status = { operation: status.operation, location: status.location, network: status.network, led: status.led };
-    return info;
-}
-
-function displayRobotInfoText(info) {
-    display.text('Robot Info:');
-    display.text('  Identity:');
-    display.text(`    mac=${info.macAddress}`);
-    display.text(`    name='${info.name ?? '-'}'`);
-    display.text(`    serial=${info.serialNumber ?? '-'}`);
-    display.text(`    product=${info.productCode ?? '-'}`);
-    display.text(`    type=${info.deviceType ?? '-'}`);
-    display.text(`    firmware=${info.firmwareVersion ?? '-'}`);
-    display.text(`    enabled=${info.isEnabled}`);
-    display.text(`    totalWorkTime=${info.totalWorkTime ?? 0}h`);
-    display.text(`    brokerId=${info.brokerId ?? '-'}`);
-    const lastPos = info.lastPosition ? `${info.lastPosition.latitude},${info.lastPosition.longitude}` : '-';
-    display.text(`    lastPosition=${lastPos}`);
-    if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
-    if (info.status) {
-        display.text('  Status:');
-        if (info.status.operation) display.text(`    operation: ${info.status.operation.type}, valid=${info.status.operation.valid}, docking=${info.status.operation.docking}`);
-        if (info.status.battery) display.text(`    battery: ${info.status.battery.toString()}`);
-        if (info.status.mowing) display.text(`    mowing: ${info.status.mowing.toString()}`);
-        if (info.status.location) display.text(`    location: ${info.status.location.toString()}`);
-        if (info.status.network) display.text(`    network: ${info.status.network.toString()}`);
-    }
-    if (info.settings) display.text(`  Settings: ${info.settings.toString()}`);
-    if (info.schedule) display.text(`  Schedule: ${info.schedule.enabled ? 'enabled' : 'disabled'}, ${info.schedule.totalBlocks} blocks (${Math.floor(info.schedule.totalMinutes / 60)}h${info.schedule.totalMinutes % 60}m)`);
-}
-
-function displayBaseInfoText(info) {
-    display.text('Base Info:');
-    display.text('  Identity:');
-    display.text(`    mac=${info.macAddress}`);
-    display.text(`    serial=${info.serialNumber ?? '-'}`);
-    display.text(`    product=${info.productCode ?? '-'}`);
-    display.text(`    firmware=${info.firmwareVersion ?? '-'}`);
-    display.text(`    createdAt=${info.createdAt ? (info.createdAt.toISOString?.() ?? info.createdAt) : '-'}`);
-    if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
-    if (info.status) {
-        display.text('  Status:');
-        if (info.status.operation) display.text(`    operation: type=${info.status.operation.type}, flag=${info.status.operation.flag}`);
-        if (info.status.location) display.text(`    location: ${info.status.location.toString()}`);
-        if (info.status.network) display.text(`    network: ${info.status.network.toString()}`);
-        if (info.status.led !== undefined) display.text(`    led: ${info.status.led}`);
-    }
-}
-
-registerCommand(['info', 'describe'], {
-    description: 'Dump all known information for the selected target(s)',
-    targets: ['robot', 'base'],
-    usage: 'stiga-command [--robot|--base] info [help]',
-    summary: 'Gather cloud metadata, firmware version, status, settings, and schedule into a single report.',
-    examples: ['stiga-command --robot info', 'stiga-command --robot info --format json | jq .', 'stiga-command --base info'],
-    execute: async (options, context) => {
-        const { target, device, base, connectors } = context;
-        if (target === 'both' || target === 'robot') {
-            await connectToRobot(device, connectors);
-            const info = await gatherRobotInfo(device);
-            displayRobotInfoText(info);
-            display.json({ source: 'robot', kind: 'info', value: info });
-        }
-        if (target === 'both' || target === 'base') {
-            await connectToBase(base, connectors);
-            const info = await gatherBaseInfo(base);
-            displayBaseInfoText(info);
-            display.json({ source: 'base', kind: 'info', value: info });
-        }
-    },
-});
-
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function runChecks(credentials, target) {
@@ -1154,7 +503,6 @@ async function runChecks(credentials, target) {
     // Some robots report a brokerId — e.g. 'broker1' — whose hostname doesn't actually accept
     // connections, even though the unsuffixed 'broker' (or 'broker2') endpoint works. Rather
     // than silently remap (which could break other accounts), point the user at the override.
-    // See issue #7.
     if (failures.has('mqtt connect')) {
         const reportedBroker = (await state.device?.getBrokerId?.())?.value;
         const reported = reportedBroker || '(empty — fallback)';
@@ -1180,6 +528,557 @@ registerCommand('check', {
     examples: ['stiga-command check', 'stiga-command --robot check', 'stiga-command check --format json | jq .'],
     skipDefaultSetup: true,
     execute: async (options, context) => runChecks(context.credentials, context.target),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function safeAwait(label, fn) {
+    try {
+        return await fn();
+    } catch (e) {
+        display.verbose(`info: ${label} failed: ${e.message}`);
+        return undefined;
+    }
+}
+
+async function gatherRobotInfo(device) {
+    const cloudKeys = ['name', 'productCode', 'serialNumber', 'firmwareVersion', 'deviceType', 'brokerId', 'totalWorkTime', 'isEnabled', 'lastPosition'];
+    const getterMap = {
+        name: () => device.getName(),
+        productCode: () => device.getProductCode(),
+        serialNumber: () => device.getSerialNumber(),
+        firmwareVersion: () => device.getFirmwareVersion(),
+        deviceType: () => device.getDeviceType(),
+        brokerId: () => device.getBrokerId(),
+        totalWorkTime: () => device.getTotalWorkTime(),
+        isEnabled: () => device.getIsEnabled(),
+        lastPosition: () => device.getLastPosition(),
+    };
+    const info = { macAddress: device.getMacAddress() };
+    for (const key of cloudKeys) {
+        const v = await safeAwait(key, getterMap[key]);
+        info[key] = v?.value;
+    }
+    const version = await safeAwait('version', () => device.getVersion({ refresh: 'force' }));
+    info.version = version?.value;
+    const status = await safeAwait('statusAll', () => device.getStatusAll({ refresh: 'force' }));
+    if (status) info.status = { operation: status.operation, battery: status.battery, mowing: status.mowing, location: status.location, network: status.network };
+    const settings = await safeAwait('settings', () => device.getSettings({ refresh: 'force' }));
+    info.settings = settings?.value;
+    const schedule = await safeAwait('schedule', () => device.getScheduleSettings({ refresh: 'force' }));
+    info.schedule = schedule?.value;
+    return info;
+}
+
+async function gatherBaseInfo(base) {
+    const cloudKeys = ['productCode', 'serialNumber', 'firmwareVersion', 'createdAt'];
+    const getterMap = {
+        productCode: () => base.getProductCode(),
+        serialNumber: () => base.getSerialNumber(),
+        firmwareVersion: () => base.getFirmwareVersion(),
+        createdAt: () => base.getCreatedAt(),
+    };
+    const info = { macAddress: base.getMacAddress() };
+    for (const key of cloudKeys) {
+        const v = await safeAwait(key, getterMap[key]);
+        info[key] = v?.value;
+    }
+    const version = await safeAwait('version', () => base.getVersion({ refresh: 'force' }));
+    info.version = version?.value;
+    const status = await safeAwait('statusAll', () => base.getStatusAll({ refresh: 'force' }));
+    if (status) info.status = { operation: status.operation, location: status.location, network: status.network, led: status.led };
+    return info;
+}
+
+function displayRobotInfoText(info) {
+    display.text('Robot Info:');
+    display.text('  Identity:');
+    display.text(`    mac=${info.macAddress}`);
+    display.text(`    name='${info.name ?? '-'}'`);
+    display.text(`    serial=${info.serialNumber ?? '-'}`);
+    display.text(`    product=${info.productCode ?? '-'}`);
+    display.text(`    type=${info.deviceType ?? '-'}`);
+    display.text(`    firmware=${info.firmwareVersion ?? '-'}`);
+    display.text(`    enabled=${info.isEnabled}`);
+    display.text(`    totalWorkTime=${info.totalWorkTime ?? 0}h`);
+    display.text(`    brokerId=${info.brokerId ?? '-'}`);
+    const lastPos = info.lastPosition ? `${info.lastPosition.latitude},${info.lastPosition.longitude}` : '-';
+    display.text(`    lastPosition=${lastPos}`);
+    if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
+    if (info.status) {
+        display.text('  Status:');
+        if (info.status.operation) display.text(`    operation: ${info.status.operation.type}, valid=${info.status.operation.valid}, docking=${info.status.operation.docking}`);
+        if (info.status.battery) display.text(`    battery: ${info.status.battery.toString()}`);
+        if (info.status.mowing) display.text(`    mowing: ${info.status.mowing.toString()}`);
+        if (info.status.location) display.text(`    location: ${info.status.location.toString()}`);
+        if (info.status.network) display.text(`    network: ${info.status.network.toString()}`);
+    }
+    if (info.settings) display.text(`  Settings: ${info.settings.toString()}`);
+    if (info.schedule) display.text(`  Schedule: ${info.schedule.enabled ? 'enabled' : 'disabled'}, ${info.schedule.totalBlocks} blocks (${Math.floor(info.schedule.totalMinutes / 60)}h${info.schedule.totalMinutes % 60}m)`);
+}
+
+function displayBaseInfoText(info) {
+    display.text('Base Info:');
+    display.text('  Identity:');
+    display.text(`    mac=${info.macAddress}`);
+    display.text(`    serial=${info.serialNumber ?? '-'}`);
+    display.text(`    product=${info.productCode ?? '-'}`);
+    display.text(`    firmware=${info.firmwareVersion ?? '-'}`);
+    display.text(`    createdAt=${info.createdAt ? (info.createdAt.toISOString?.() ?? info.createdAt) : '-'}`);
+    if (info.version) display.text(`  Version: ${info.version.toString({ compressed: true })}`);
+    if (info.status) {
+        display.text('  Status:');
+        if (info.status.operation) display.text(`    operation: type=${info.status.operation.type}, flag=${info.status.operation.flag}`);
+        if (info.status.location) display.text(`    location: ${info.status.location.toString()}`);
+        if (info.status.network) display.text(`    network: ${info.status.network.toString()}`);
+        if (info.status.led !== undefined) display.text(`    led: ${info.status.led}`);
+    }
+}
+
+// Account- and cloud-level info (complements the per-device robot/base sections): the Stiga account
+// profile, cloud-only device settings (auto-update etc.), and garden/notification summaries.
+async function gatherCloudInfo(context) {
+    const { connectors, device } = context;
+    const server = new StigaAPIConnectionServer(connectors.auth);
+    const info = {};
+    try {
+        const user = new StigaAPIUser(server);
+        if (await user.load()) info.account = { name: user.getFullName(), email: user.getEmail(), country: user.getCountry(), language: user.getLanguage(), verified: user.isVerified(), lastLogin: user.getLastLogin(), uuid: user.getUuid() };
+    } catch {
+        /* cloud account unavailable */
+    }
+    info.autoUpdate = (await safeAwait('autoUpdate', () => device.getAutoUpdate()))?.value;
+    const cloudRaw = (await safeAwait('cloudSettingsRaw', () => device.getCloudSettingsRaw()))?.value;
+    if (cloudRaw)
+        info.cloudSettings = {
+            ecomode: cloudRaw.ecomode,
+            hasGarden: cloudRaw.has_garden,
+            hibernated: cloudRaw.hibernated,
+            footballFieldMode: cloudRaw.parsedSettings?.football_field_mode,
+            dockingType: cloudRaw.docking_type,
+            dockingVersion: cloudRaw.docking_version,
+        };
+    try {
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (await perimeters.load()) info.garden = { zones: perimeters.getZoneCount(), obstacles: perimeters.getObstacleCount(), area: perimeters.getTotalArea() };
+    } catch {
+        /* perimeters unavailable */
+    }
+    try {
+        const notifications = new StigaAPINotifications(server);
+        if (await notifications.load()) info.notifications = { total: notifications.getCount(), unread: notifications.getUnreadCount() };
+    } catch {
+        /* notifications unavailable */
+    }
+    return info;
+}
+
+function displayCloudInfoText(info) {
+    display.text('Cloud Info:');
+    if (info.account) {
+        display.text('  Account:');
+        display.text(`    name='${info.account.name ?? '-'}'  email=${info.account.email ?? '-'}`);
+        display.text(`    language=${info.account.language ?? '-'}  verified=${info.account.verified}`);
+        const ll = info.account.lastLogin ? (info.account.lastLogin.toISOString?.() ?? info.account.lastLogin) : '-';
+        display.text(`    lastLogin=${ll}  uuid=${info.account.uuid ?? '-'}`);
+    }
+    // eslint-disable-next-line unicorn/no-nested-ternary,sonarjs/no-nested-conditional
+    display.text(`  Firmware auto-update: ${info.autoUpdate === undefined ? '-' : info.autoUpdate ? 'on' : 'off'}`);
+    if (info.cloudSettings) {
+        const cs = info.cloudSettings;
+        display.text(`  Cloud-only settings: ecomode=${cs.ecomode}, hasGarden=${cs.hasGarden}, hibernated=${cs.hibernated}, footballFieldMode=${cs.footballFieldMode}, docking=${cs.dockingType ?? '-'}/${cs.dockingVersion ?? '-'}`);
+    }
+    if (info.garden) display.text(`  Garden: ${info.garden.zones} zones, ${info.garden.obstacles} obstacles, ${Number(info.garden.area).toFixed(1)} m²`);
+    if (info.notifications) display.text(`  Notifications: ${info.notifications.total} total, ${info.notifications.unread} unread`);
+}
+
+registerCommand(['info', 'describe'], {
+    description: 'Dump all known information for the selected target(s)',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command [--robot|--base] info [help]',
+    summary: 'Gather robot, base and cloud versions, status, settings, and data into a single report.',
+    examples: ['stiga-command --robot info', 'stiga-command --robot info --format json | jq .', 'stiga-command --base info'],
+    execute: async (options, context) => {
+        const { target, device, base, connectors } = context;
+        if (target === 'both' || target === 'robot') {
+            await connectToRobot(device, connectors);
+            const info = await gatherRobotInfo(device);
+            displayRobotInfoText(info);
+            display.json({ source: 'robot', kind: 'info', value: info });
+        }
+        if (target === 'both' || target === 'base') {
+            await connectToBase(base, connectors);
+            const info = await gatherBaseInfo(base);
+            displayBaseInfoText(info);
+            display.json({ source: 'base', kind: 'info', value: info });
+        }
+        // Cloud summary — account + cloud-only settings + garden/notification counts (shown once, any target).
+        const cloud = await gatherCloudInfo(context);
+        displayCloudInfoText(cloud);
+        display.json({ source: 'cloud', kind: 'info', value: cloud });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand('version', {
+    description: 'Get firmware/hardware version',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command [--robot|--base] version [help]',
+    summary: 'Get version information for the selected target.',
+    examples: ['stiga-command --robot version', 'stiga-command --base version'],
+    execute: async (options, context) => {
+        const { target, device, base, connectors } = context;
+        if (target === 'both' || target === 'robot') {
+            await connectToRobot(device, connectors);
+            const version = await device.getVersion({ refresh: 'force' });
+            display.text('Robot Version:');
+            display.text(version.value.toString({ compressed: false }));
+            display.json({ source: 'robot', kind: 'version', value: version.value ?? null });
+        }
+        if (target === 'both' || target === 'base') {
+            await connectToBase(base, connectors);
+            const version = await base.getVersion({ refresh: 'force' });
+            display.text('Base Version:');
+            display.text(version.value.toString({ compressed: false }));
+            display.json({ source: 'base', kind: 'version', value: version.value ?? null });
+        }
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand('status', {
+    description: 'Get operation/battery/mowing/location/network status',
+    targets: ['robot', 'base'],
+    args: '[types...]',
+    usage: 'stiga-command [--robot|--base] status [types] [help]',
+    summary: 'Get status information for the selected target.',
+    details: [
+        '',
+        'Robot status types:',
+        '  operation - Operational status (type, valid, docking)',
+        '  battery   - Battery status (charge level, capacity)',
+        '  mowing    - Mowing status (zone, completion)',
+        '  location  - GPS/location status',
+        '  network   - Network connectivity status',
+        '',
+        'Base status types:',
+        '  operation - Operational status (type, flag)',
+        '  location  - GPS/RTK location status',
+        '  network   - Network connectivity status',
+    ],
+    examples: ['stiga-command --robot status', 'stiga-command --robot status battery,operation', 'stiga-command --base status'],
+    execute: async (options, context) => {
+        const { target, params, device, base, connectors } = context;
+        if (target === 'both' || target === 'robot') {
+            await connectToRobot(device, connectors);
+            if (params.length === 0) {
+                const status = await device.getStatusAll({ refresh: 'force' });
+                display.text('Robot Status:');
+                if (status.operation) display.text(`  Operation: ${status.operation.type}, valid=${status.operation.valid}, docking=${status.operation.docking}`);
+                if (status.battery) display.text(`  Battery: ${status.battery.toString()}`);
+                if (status.mowing) display.text(`  Mowing: ${status.mowing.toString()}`);
+                if (status.location) display.text(`  Location: ${status.location.toString()}`);
+                if (status.network) display.text(`  Network: ${status.network.toString()}`);
+                display.json({
+                    source: 'robot',
+                    kind: 'status',
+                    value: { operation: status.operation, battery: status.battery, mowing: status.mowing, location: status.location, network: status.network },
+                });
+            } else
+                for (const type of params[0].split(','))
+                    switch (type.trim().toLowerCase()) {
+                        case 'operation':
+                            const opStatus = await device.getStatusOperation({ refresh: 'force' });
+                            display.text(`Operation: ${opStatus.value?.type || 'unknown'}, valid=${opStatus.value?.valid}, docking=${opStatus.value?.docking}`);
+                            display.json({ source: 'robot', kind: 'operation', value: opStatus.value ?? null });
+                            break;
+                        case 'battery':
+                            const batStatus = await device.getStatusBattery({ refresh: 'force' });
+                            display.text(`Battery: ${batStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'battery', value: batStatus.value ?? null });
+                            break;
+                        case 'mowing':
+                            const mowStatus = await device.getStatusMowing({ refresh: 'force' });
+                            display.text(`Mowing: ${mowStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'mowing', value: mowStatus.value ?? null });
+                            break;
+                        case 'location':
+                            const locStatus = await device.getStatusLocation({ refresh: 'force' });
+                            display.text(`Location: ${locStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'location', value: locStatus.value ?? null });
+                            break;
+                        case 'network':
+                            const netStatus = await device.getStatusNetwork({ refresh: 'force' });
+                            display.text(`Network: ${netStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'robot', kind: 'network', value: netStatus.value ?? null });
+                            break;
+                        default:
+                            display.text(`Unknown status type: ${type}`);
+                    }
+        }
+        if (target === 'both' || target === 'base') {
+            await connectToBase(base, connectors);
+            if (params.length === 0) {
+                const status = await base.getStatusAll({ refresh: 'force' });
+                display.text('Base Status:');
+                if (status.operation) display.text(`  Operation: type=${status.operation.type}, flag=${status.operation.flag}`);
+                if (status.location) display.text(`  Location: ${status.location.toString()}`);
+                if (status.network) display.text(`  Network: ${status.network.toString()}`);
+                display.json({
+                    source: 'base',
+                    kind: 'status',
+                    value: { operation: status.operation, location: status.location, network: status.network },
+                });
+            } else
+                for (const type of params[0].split(','))
+                    switch (type.trim().toLowerCase()) {
+                        case 'operation':
+                            const opStatus = await base.getStatusOperation({ refresh: 'force' });
+                            display.text(`Operation: type=${opStatus.value?.type}, flag=${opStatus.value?.flag}`);
+                            display.json({ source: 'base', kind: 'operation', value: opStatus.value ?? null });
+                            break;
+                        case 'location':
+                            const locStatus = await base.getStatusLocation({ refresh: 'force' });
+                            display.text(`Location: ${locStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'base', kind: 'location', value: locStatus.value ?? null });
+                            break;
+                        case 'network':
+                            const netStatus = await base.getStatusNetwork({ refresh: 'force' });
+                            display.text(`Network: ${netStatus.value?.toString() || 'unknown'}`);
+                            display.json({ source: 'base', kind: 'network', value: netStatus.value ?? null });
+                            break;
+                        default:
+                            display.text(`Unknown status type for base: ${type}`);
+                    }
+        }
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function formatSettingValue(value) {
+    if (typeof value === 'boolean') return value ? 'on' : 'off';
+    if (value === undefined || value === null) return '-';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+}
+
+function sortedSettingEntries(value) {
+    if (!value || typeof value !== 'object') return [];
+    return Object.entries(value)
+        .filter(([k, v]) => !k.startsWith('_') && typeof v !== 'function')
+        .sort(([a], [b]) => a.localeCompare(b));
+}
+
+function displaySettings(header, value) {
+    display.text(header);
+    if (value == undefined) display.text('  (none)');
+    else for (const [k, v] of sortedSettingEntries(value)) display.text(`  ${k}: ${formatSettingValue(v)}`);
+}
+
+function plainSettings(value) {
+    if (!value || typeof value !== 'object') return value ?? null;
+    return Object.fromEntries(sortedSettingEntries(value));
+}
+
+registerCommand('settings', {
+    description: 'Display device settings',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command [--robot|--base] settings [help]',
+    summary: 'Display the current settings for the selected target(s).',
+    details: [
+        '',
+        'Robot settings include:',
+        '  rainSensorEnabled, rainSensorDelay, keyboardLock,',
+        '  zoneCuttingHeightEnabled, zoneCuttingHeight, zoneCuttingHeightUniform,',
+        '  antiTheft, smartCutHeight, longExitEnabled, longExitDistance,',
+        '  pushNotifications, obstacleNotifications',
+        '',
+        'Cloud settings (from the garage, not MQTT):',
+        '  autoUpdate   (--debug also dumps the raw cloud blob incl. unverified fields)',
+        '',
+        'Base settings:',
+        '  led',
+    ],
+    examples: ['stiga-command --robot settings', 'stiga-command --base settings', 'stiga-command settings --format json | jq .'],
+    execute: async (options, context) => {
+        const { target, device, base, connectors } = context;
+        if (target === 'both' || target === 'robot') {
+            await connectToRobot(device, connectors);
+            const settings = await device.getSettings({ refresh: 'force' });
+            displaySettings('Robot Settings:', settings.value);
+            display.json({ source: 'robot', kind: 'settings', value: plainSettings(settings.value) });
+
+            // Cloud-only device settings (from the garage, not MQTT). Only the supported ones are shown;
+            // the rest of the raw cloud blob (unverified / possibly model-specific) is dumped under --debug.
+            const autoUpdate = await device.getAutoUpdate();
+            displaySettings('Cloud Settings:', { autoUpdate: autoUpdate.value });
+            display.json({ source: 'cloud', kind: 'settings', value: { autoUpdate: autoUpdate.value ?? null } });
+            const cloudRaw = (await device.getCloudSettingsRaw()).value;
+            if (cloudRaw) display.debug('Cloud settings (raw, incl. unverified fields): ' + JSON.stringify(cloudRaw));
+        }
+        if (target === 'both' || target === 'base') {
+            await connectToBase(base, connectors);
+            const led = await base.getLedSetting({ refresh: 'force' });
+            displaySettings('Base Settings:', { led: led.value });
+            display.json({ source: 'base', kind: 'settings', value: { led: led.value ?? null } });
+        }
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
+    description: 'Display per-zone settings (cutting height, mode, priority, angle, border cut)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot zone-settings [zone] [help]',
+    summary: 'Read the per-zone settings from the cloud perimeter (the canonical store). Optionally pass a zone id to show just one zone.',
+    details: [
+        '',
+        'Per-zone settings are stored in the cloud perimeter, not over MQTT.',
+        'Each zone reports: name, cuttingHeight (mm), cuttingMode, priority,',
+        'customAngle (deg, when customAngleActive), borderCut.',
+        '',
+        'Read-only for now.',
+    ],
+    examples: ['stiga-command --robot zone-settings', 'stiga-command --robot zone-settings 2', 'stiga-command --robot zone-settings --format json | jq .'],
+    execute: async (options, context) => {
+        const { device, connectors, params } = context;
+        const { auth } = connectors;
+        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+        const server = new StigaAPIConnectionServer(auth);
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+
+        const wanted = params[0] === undefined ? undefined : Number.parseInt(params[0], 10);
+        let all = perimeters.getAllZoneSettings();
+        if (wanted !== undefined) {
+            if (!Number.isInteger(wanted)) throw throwExit(`invalid zone id: ${params[0]}`, 2);
+            all = all.filter((z) => z.id === wanted);
+            if (all.length === 0)
+                throw throwExit(
+                    `zone ${wanted} not found (zones: ${
+                        perimeters
+                            .getAllZoneSettings()
+                            .map((z) => z.id)
+                            .join(', ') || 'none'
+                    })`,
+                    2
+                );
+        }
+
+        display.text('Zone Settings:');
+        if (all.length === 0) display.text('  (no zones)');
+        for (const z of all) {
+            const angle = z.customAngleActive ? `${z.customAngle}°` : 'off';
+            const mode = StigaAPIElements.getCuttingModeLabels()[z.cuttingMode] || z.cuttingMode;
+            display.text(`  zone ${z.id} "${z.name}": height=${z.cuttingHeight}mm mode=${mode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
+        }
+        display.json({
+            source: 'cloud',
+            kind: 'zoneSettings',
+            value: all.map((z) => ({ id: z.id, name: z.name, cuttingHeight: z.cuttingHeight, cuttingMode: z.cuttingMode, priority: z.priority, customAngleActive: z.customAngleActive, customAngle: z.customAngle, borderCut: z.borderCut })),
+        });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function scheduleUpdateAndDisplay(device, subCommand, value) {
+    await device.setScheduleSettings(value);
+    display.text(`Schedule ${subCommand}d`);
+    const updated = await device.getScheduleSettings({ refresh: 'force' });
+    displaySchedule(updated.value);
+}
+
+registerCommand('schedule', {
+    description: 'Display/enable/disable/insert/remove mowing schedule',
+    targets: ['robot'],
+    args: '[subcommand]',
+    usage: 'stiga-command --robot schedule [subcommand] [params...] [help]',
+    summary: "Manage the robot's mowing schedule.",
+    details: [
+        '',
+        'Subcommands:',
+        '  (none)               - Display current schedule',
+        '  enable               - Enable the schedule',
+        '  disable              - Disable the schedule',
+        '  insert|add <specs>   - Insert time blocks',
+        '  remove <specs>       - Remove time blocks',
+        '',
+        'Schedule specification format:',
+        '  days:HH:MM-HH:MM',
+        '',
+        'Days can be:',
+        '  Mon, Tue, Wed, Thu, Fri, Sat, Sun (or full names)',
+        '  Multiple days separated by commas: Mon,Wed,Fri',
+        '',
+        'Times must be on half-hour boundaries (00 or 30 minutes)',
+    ],
+    examples: [
+        'stiga-command --robot schedule',
+        'stiga-command --robot schedule enable',
+        'stiga-command --robot schedule add Mon,Wed,Fri:09:00-11:30',
+        'stiga-command --robot schedule insert Sat,Sun:08:00-10:00 Sat,Sun:14:00-16:00',
+        'stiga-command --robot schedule remove Tue:14:00-16:00',
+    ],
+    execute: async (options, context) => {
+        const { params, device, connectors } = context;
+        await connectToRobot(device, connectors);
+        if (params.length === 0) {
+            const schedule = await device.getScheduleSettings({ refresh: 'force' });
+            displaySchedule(schedule.value);
+            return;
+        }
+        const subCommand = params[0].toLowerCase();
+        switch (subCommand) {
+            case 'enable':
+            case 'disable': {
+                const schedule = await device.getScheduleSettings({ refresh: 'force' });
+                schedule.value.enabled = subCommand === 'enable';
+                await scheduleUpdateAndDisplay(device, subCommand, schedule.value);
+                break;
+            }
+
+            case 'remove': {
+                if (params.length < 2) throw new Error('Remove requires schedule specifications');
+                const schedule = await device.getScheduleSettings({ refresh: 'force' });
+                for (const spec of parseScheduleSpecs(params.slice(1))) {
+                    try {
+                        schedule.value.removeTimeBlock(spec.dayIndex, spec.startTime);
+                        display.text(`Removed ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')} from day ${spec.dayIndex}`);
+                    } catch (e) {
+                        display.error(`Failed to remove time block, aborting without saving: ${e.message}`);
+                        return;
+                    }
+                }
+                await scheduleUpdateAndDisplay(device, 'updated', schedule.value);
+                break;
+            }
+
+            case 'add':
+            case 'insert': {
+                if (params.length < 2) throw new Error('Insert requires schedule specifications');
+                const schedule = await device.getScheduleSettings({ refresh: 'force' });
+                for (const spec of parseScheduleSpecs(params.slice(1))) {
+                    try {
+                        schedule.value.insertTimeBlock(spec.dayIndex, spec.startTime, spec.endTime);
+                        display.text(`Inserted ${spec.startTime.hour}:${spec.startTime.minute.toString().padStart(2, '0')}-${spec.endTime.hour}:${spec.endTime.minute.toString().padStart(2, '0')} to day ${spec.dayIndex}`);
+                    } catch (e) {
+                        display.error(`Failed to insert time block, aborting without saving: ${e.message}`);
+                        return;
+                    }
+                }
+                await scheduleUpdateAndDisplay(device, 'updated', schedule.value);
+                break;
+            }
+
+            default:
+                throw new Error(`Unknown schedule subcommand: ${subCommand}`);
+        }
+    },
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1283,56 +1182,174 @@ registerCommand('perimeters', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-async function runUser(credentials) {
-    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
-    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
-    const server = new StigaAPIConnectionServer(auth);
-    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
-    const user = new StigaAPIUser(server);
-    if (!(await user.load())) throw throwExit('failed to load user account', 2);
-
-    const lastLogin = user.getLastLogin();
-    display.text('User Account:');
-    display.text(`  Name:       ${user.getFullName() || '-'}`);
-    display.text(`  Email:      ${user.getEmail() || '-'}`);
-    display.text(`  Mobile:     ${user.getMobile() || '-'}`);
-    display.text(`  Country:    ${user.getCountry() || '-'}`);
-    display.text(`  Language:   ${user.getLanguage() || '-'}`);
-    display.text(`  Verified:   ${user.isVerified() ? 'yes' : 'no'}`);
-    display.text(`  Last login: ${lastLogin ? lastLogin.toISOString() : '-'}`);
-    display.text(`  Consent:    terms=${user.hasAcceptedTerms() ? 'yes' : 'no'}, marketing=${user.hasMarketingConsent() ? 'yes' : 'no'}, dataAnalysis=${user.hasDataAnalysisConsent() ? 'yes' : 'no'}`);
-    display.json({
-        source: 'cloud',
-        kind: 'user',
-        value: {
-            uuid: user.getUuid() ?? null,
-            name: user.getFullName() ?? null,
-            email: user.getEmail() ?? null,
-            mobile: user.getMobile() ?? null,
-            country: user.getCountry() ?? null,
-            language: user.getLanguage() ?? null,
-            verified: user.isVerified(),
-            lastLogin: lastLogin ? lastLogin.toISOString() : null,
-            termsAccepted: user.hasAcceptedTerms(),
-            marketingConsent: user.hasMarketingConsent(),
-            dataAnalysisConsent: user.hasDataAnalysisConsent(),
-        },
-    });
-}
-
-registerCommand('user', {
-    description: 'Display the cloud account profile',
-    targets: ['robot', 'base'],
-    usage: 'stiga-command user [help]',
-    summary: 'Fetch the Stiga Cloud account profile (name, email, verification, consents).',
-    examples: ['stiga-command user', 'stiga-command user --format json | jq .'],
-    skipDefaultSetup: true,
-    execute: async (options, context) => runUser(context.credentials),
+registerCommand('start', {
+    description: 'Start mowing',
+    targets: ['robot'],
+    usage: 'stiga-command --robot start [help]',
+    summary: 'Start the robot mowing.',
+    examples: ['stiga-command --robot start'],
+    execute: async (options, context) => executeRobotCommand('start', (d) => d.sendStart(), context),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// build a predicate for one --select qualifier; multiple qualifiers combine with AND
+registerCommand('stop', {
+    description: 'Stop the robot',
+    targets: ['robot'],
+    usage: 'stiga-command --robot stop [help]',
+    summary: 'Stop the robot.',
+    examples: ['stiga-command --robot stop'],
+    execute: async (options, context) => executeRobotCommand('stop', (d) => d.sendStop(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['go-home', 'goHome', 'home'], {
+    description: 'Send the robot home to dock',
+    targets: ['robot'],
+    usage: 'stiga-command --robot go-home [help]',
+    summary: 'Send the robot back to its docking station.',
+    examples: ['stiga-command --robot go-home'],
+    execute: async (options, context) => executeRobotCommand('go-home', (d) => d.sendGoHome(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['force-cut', 'forceCut', 'cut'], {
+    description: 'Force the robot to mow a specific zone now',
+    targets: ['robot'],
+    usage: 'stiga-command --robot force-cut <zone> [help]',
+    summary: 'Send the robot to mow the given zone number immediately (FORCE_CUT).',
+    examples: ['stiga-command --robot force-cut 2'],
+    execute: async (options, context) => {
+        const zone = Number.parseInt(context.params[0], 10);
+        if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-cut requires a zone number, e.g. force-cut 2', 2);
+        return executeRobotCommand('force-cut', (d) => d.sendForceCut(zone), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['force-border-cut', 'forceBorderCut', 'border-cut'], {
+    description: "Force the robot to cut a specific zone's border now",
+    targets: ['robot'],
+    usage: 'stiga-command --robot force-border-cut <zone> [help]',
+    summary: "Send the robot to cut the given zone's border immediately (FORCE_BORDER_CUT).",
+    examples: ['stiga-command --robot force-border-cut 2'],
+    execute: async (options, context) => {
+        const zone = Number.parseInt(context.params[0], 10);
+        if (!Number.isInteger(zone) || zone < 1) throw throwExit('force-border-cut requires a zone number, e.g. force-border-cut 2', 2);
+        return executeRobotCommand('force-border-cut', (d) => d.sendForceBorderCut(zone), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['reset-error', 'resetError', 'reset'], {
+    description: 'Clear a recoverable latched error (the app\'s "reset error" button)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot reset-error [help]',
+    summary: 'Send RESET_ERROR (CMD_ROBOT 37) to clear a recoverable error. Note: not every error is resettable — some stuck conditions need physical intervention.',
+    examples: ['stiga-command --robot reset-error'],
+    execute: async (options, context) => executeRobotCommand('reset-error', (d) => d.sendResetError(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['boot', 'startup'], {
+    description: 'Boot the robot out of a "startup required" state (the app\'s "boot" button)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot boot [help]',
+    summary: 'Send BOOT (CMD_ROBOT 9) to clear STARTUP_REQUIRED; the robot then proceeds into calibration.',
+    examples: ['stiga-command --robot boot'],
+    execute: async (options, context) => executeRobotCommand('boot', (d) => d.sendBoot(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
+    description: 'Calibrate the cutting blades',
+    targets: ['robot'],
+    usage: 'stiga-command --robot calibrate-blades [help]',
+    summary: 'Trigger blade calibration on the robot.',
+    examples: ['stiga-command --robot calibrate-blades'],
+    execute: async (options, context) => executeRobotCommand('calibrate-blades', (d) => d.sendCalibrateBlades(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['calibrate-docking', 'calibrateDocking', 'docking'], {
+    description: 'Calibrate the docking/charging alignment',
+    targets: ['robot'],
+    usage: 'stiga-command --robot calibrate-docking [help]',
+    summary: 'Trigger docking calibration on the robot (the app\'s "docking calibration"). Robot reports status type 25 while running.',
+    examples: ['stiga-command --robot calibrate-docking'],
+    execute: async (options, context) => executeRobotCommand('calibrate-docking', (d) => d.sendCalibrateDocking(), context),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['cloud-sync', 'cloudSync', 'sync'], {
+    description: 'Tell the robot to re-sync its perimeter from the cloud',
+    targets: ['robot'],
+    usage: 'stiga-command --robot cloud-sync [help]',
+    summary: 'Trigger the robot to download and apply the current cloud perimeter (CLOUDSYNC_DOWNLOAD).',
+    examples: ['stiga-command --robot cloud-sync'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        const { auth } = connectors;
+        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+        const server = new StigaAPIConnectionServer(auth);
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+        const url = perimeters.getResourceUrl();
+        if (!url) throw throwExit('no perimeter resource url available', 2);
+        return executeRobotCommand('cloud-sync', (d) => d.sendCloudSync(`Bearer ${auth.token}`, url), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+registerCommand(['go-away', 'goAway', 'avoid'], {
+    description: 'Push a temporary circular GO_AWAY obstacle to the robot (real-time avoid)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot go-away <lat> <lng> <radius_m> [expiry_days]',
+    summary: 'Tell the robot to avoid a circle at lat/lng now (MQTT push only).',
+    details: [
+        '',
+        'NOTE: this only pushes the real-time GO_AWAY command over MQTT. It does NOT add the obstacle',
+        'to the cloud perimeter (tempObstacles), so it will not persist across a full re-sync. To make',
+        'it permanent the caller must also update the cloud perimeter — left to the API client.',
+    ],
+    examples: ['stiga-command --robot go-away 59.6620665 12.9959925 2 30'],
+    execute: async (options, context) => {
+        const { device, connectors, params } = context;
+        const { auth } = connectors;
+        const lat = Number.parseFloat(params[0]),
+            lng = Number.parseFloat(params[1]),
+            radius = Number.parseFloat(params[2]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radius)) throw throwExit('go-away requires <lat> <lng> <radius_m>, e.g. go-away 59.662 12.996 2', 2);
+        const days = Number.isFinite(Number.parseFloat(params[3])) ? Number.parseFloat(params[3]) : 30;
+        if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+        const server = new StigaAPIConnectionServer(auth);
+        const perimeters = new StigaAPIPerimeters(server, device);
+        if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+        const url = perimeters.getResourceUrl();
+        const ref = perimeters.getReferencePosition();
+        if (!url || !ref) throw throwExit('no perimeter / reference position available', 2);
+        // lat/lng -> ENU east/north metres, relative to the perimeter reference position
+        const placement = {
+            east: (lng - ref.longitude) * (111320 * Math.cos((ref.latitude * Math.PI) / 180)),
+            north: (lat - ref.latitude) * 111320,
+            radius,
+            expirySeconds: Math.round(days * 86400),
+        };
+        return executeRobotCommand('go-away', (d) => d.sendGoAway(`Bearer ${auth.token}`, url, placement), context);
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 function notificationPredicate(selector) {
     const sel = selector.toLowerCase();
     if (sel === 'unread') return (n) => !n.isRead();
@@ -1428,16 +1445,17 @@ async function runNotifications(credentials, selectors) {
 //   YYYY-MM[-DD]  -> created on that date prefix
 //   <N>           -> the last N (most recent)        <uuid> -> that exact notification
 function notificationDeleteTargets(all, selector) {
-    if (!selector) return all.slice();
+    if (!selector) return [...all];
     const sel = selector.toLowerCase();
     if (sel === 'read') return all.filter((n) => n.isRead());
     if (sel === 'unread') return all.filter((n) => !n.isRead());
-    const dur = sel.match(/^(\d+)([smhd])$/);
+    const dur = sel.match(/^(\d+)([dhms])$/);
     if (dur) {
         const mult = { s: 1e3, m: 60e3, h: 3600e3, d: 86400e3 }[dur[2]];
         const cutoff = Date.now() - Number(dur[1]) * mult;
         return all.filter((n) => (n.getCreatedAt()?.getTime() ?? 0) > cutoff);
     }
+    // eslint-disable-next-line regexp/no-unused-capturing-group
     if (/^\d{4}-\d{2}(-\d{2})?$/.test(sel)) return all.filter((n) => (n.getCreatedAt()?.toISOString() ?? '').startsWith(sel));
     if (/^\d+$/.test(sel)) return all.slice(0, Number(sel)); // last N (newest-first)
     return all.filter((n) => n.getUuid() === selector); // uuid (case-sensitive)
@@ -1511,6 +1529,55 @@ registerCommand('notifications', {
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function runUser(credentials) {
+    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+    const server = new StigaAPIConnectionServer(auth);
+    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
+    const user = new StigaAPIUser(server);
+    if (!(await user.load())) throw throwExit('failed to load user account', 2);
+
+    const lastLogin = user.getLastLogin();
+    display.text('User Account:');
+    display.text(`  Name:       ${user.getFullName() || '-'}`);
+    display.text(`  Email:      ${user.getEmail() || '-'}`);
+    display.text(`  Mobile:     ${user.getMobile() || '-'}`);
+    display.text(`  Country:    ${user.getCountry() || '-'}`);
+    display.text(`  Language:   ${user.getLanguage() || '-'}`);
+    display.text(`  Verified:   ${user.isVerified() ? 'yes' : 'no'}`);
+    display.text(`  Last login: ${lastLogin ? lastLogin.toISOString() : '-'}`);
+    display.text(`  Consent:    terms=${user.hasAcceptedTerms() ? 'yes' : 'no'}, marketing=${user.hasMarketingConsent() ? 'yes' : 'no'}, dataAnalysis=${user.hasDataAnalysisConsent() ? 'yes' : 'no'}`);
+    display.json({
+        source: 'cloud',
+        kind: 'user',
+        value: {
+            uuid: user.getUuid() ?? null,
+            name: user.getFullName() ?? null,
+            email: user.getEmail() ?? null,
+            mobile: user.getMobile() ?? null,
+            country: user.getCountry() ?? null,
+            language: user.getLanguage() ?? null,
+            verified: user.isVerified(),
+            lastLogin: lastLogin ? lastLogin.toISOString() : null,
+            termsAccepted: user.hasAcceptedTerms(),
+            marketingConsent: user.hasMarketingConsent(),
+            dataAnalysisConsent: user.hasDataAnalysisConsent(),
+        },
+    });
+}
+
+registerCommand('user', {
+    description: 'Display the cloud account profile',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command user [help]',
+    summary: 'Fetch the Stiga Cloud account profile (name, email, verification, consents).',
+    examples: ['stiga-command user', 'stiga-command user --format json | jq .'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runUser(context.credentials),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function showGeneralHelp() {
@@ -1541,12 +1608,24 @@ async function showGeneralHelp() {
     for (const { label, cmd } of labels) display.log(`  ${label.padEnd(labelWidth)} ${cmd.description} (${cmd.targets.join(', ')})`);
     display.log('\nFor command-specific help:');
     display.log('  stiga-command <command> help');
-    display.log('\nExamples:');
-    for (const cmd of Object.values(commands).filter((cmd) => cmd.examples?.[0])) display.log(`  ${cmd.examples[0]}`);
-    display.log('  stiga-command --robot --watch');
-    display.log('  stiga-command --robot --watch 0 --debug');
-    display.log('  stiga-command --robot --watch 0 --format json --level quiet | jq .');
-    display.log('  stiga-command --robot status --format json --level quiet | jq .');
+    display.log('\nFor all or command-specific examples:');
+    display.log('  stiga-command examples');
+    display.log('  stiga-command <command> help');
+}
+
+// Dedicated examples view (`stiga-command examples`): every command's examples plus the global/watch ones.
+function showExamples() {
+    display.log('Examples:');
+    for (const [name, cmd] of Object.entries(commands)) {
+        if (!cmd.examples?.length) continue;
+        display.log(`\n  ${name}:`);
+        for (const ex of cmd.examples) display.log(`    ${ex}`);
+    }
+    display.log('\n  global / watch:');
+    display.log('    stiga-command --robot --watch');
+    display.log('    stiga-command --robot --watch 0 --debug');
+    display.log('    stiga-command --robot --watch 0 --format json --level quiet | jq .');
+    display.log('    stiga-command --robot status --format json --level quiet | jq .');
 }
 
 async function main() {
@@ -1561,6 +1640,11 @@ async function main() {
     if (!options.command && options.watch === undefined) {
         await showGeneralHelp();
         process.exit(1);
+    }
+
+    if (['examples', 'example'].includes(options.command)) {
+        showExamples();
+        process.exit(0);
     }
 
     let cmd;

@@ -384,7 +384,7 @@ class WebStatusProcessor {
         }
         if (decoded[18]) {
             const mowing = elements.decodeRobotMowingStatus(decoded[18], this.location);
-            r.mowing = mowing ? { zone: mowing.zone, zoneCompleted: mowing.zoneCompleted, gardenCompleted: mowing.gardenCompleted, target: mowing.target } : undefined;
+            r.mowing = mowing ? { zone: mowing.zone, zoneCompleted: mowing.zoneCompleted, gardenCompleted: mowing.gardenCompleted, strategy: mowing.strategy } : undefined;
         }
         if (decoded[19]) r.location = this._rtk(decoded[19]);
         if (decoded[20]) r.network = this._network(decoded[20]);
@@ -831,6 +831,7 @@ html,body{margin:0;height:100%}
 #statusbox .row{display:flex;justify-content:space-between;gap:18px}
 #statusbox .k{color:#80868b}
 #statusbox .v{font-weight:600;text-align:right}
+#statusbox .v.mowstrat{font-weight:400;font-size:11px;color:#80868b;cursor:default}
 #statusbox .v.alert{animation:statusAlertFlash 1.1s ease-in-out infinite;padding:1px 7px;border-radius:5px}
 @keyframes statusAlertFlash{0%,100%{background:#ffffff;color:#202124}50%{background:#ea4335;color:#ffffff}}
 #statusbox .muted{color:#9aa0a6;font-size:11px;margin-top:5px}
@@ -937,7 +938,8 @@ html,body{margin:0;height:100%}
 // Client-side script. Uses only quoted strings and concatenation (no template literals,
 // no backticks, no ${...}) so it can be embedded verbatim into the page template above.
 const CLIENT_JS = `
-var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow, robotArrowMarker, targetMarker, targetLine;
+var map, infoWindow, baseMarker, robotMarker, robotPin, robotArrow, robotArrowMarker;
+var mowTargetMarker = null, mowTargetEl = null, mowTargetFlash = null; // yellow cut-position reticle, shown only on hover
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
@@ -1228,12 +1230,13 @@ function initMap(){
   robotArrow.innerHTML = '<svg viewBox="0 0 40 40" width="40" height="40" style="overflow:visible; filter:drop-shadow(0 1px 1px rgba(0,0,0,.45))"><path d="M20 6 L26 16 L20 13 L14 16 Z" fill="currentColor" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/></svg>';
   robotArrowMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: '', content: robotArrow, zIndex: 1 });
 
-  // experimental (?experimental=on): a reticle at the current mowing target + a line from the robot to it
-  targetLine = new google.maps.Polyline({ path: [], strokeColor:'#fbbc04', strokeOpacity:0.85, strokeWeight:2, clickable:false, zIndex:1 });
-  var targetEl = document.createElement('div');
-  targetEl.style.cssText = 'position:relative;width:0;height:0;';
-  targetEl.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" style="position:absolute;left:-12px;top:-12px;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,.4))"><circle cx="12" cy="12" r="8" fill="none" stroke="#fbbc04" stroke-width="2.5"/><circle cx="12" cy="12" r="2.5" fill="#fbbc04"/></svg>';
-  targetMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, title: 'Mowing target', content: targetEl });
+  // Yellow cut-position reticle (the old "Mowing target" symbol) — created hidden; shown + flashed only
+  // while the status-box strategy line is hovered (showMowTarget/clearMowTarget).
+  mowTargetEl = document.createElement('div');
+  mowTargetEl.style.cssText = 'position:relative;width:0;height:0;';
+  mowTargetEl.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" style="position:absolute;left:-12px;top:-12px;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,.4))"><circle cx="12" cy="12" r="8" fill="none" stroke="#fbbc04" stroke-width="2.5"/><circle cx="12" cy="12" r="2.5" fill="#fbbc04"/></svg>';
+  mowTargetMarker = new google.maps.marker.AdvancedMarkerElement({ position: base, content: mowTargetEl, zIndex: 8 });
+  mowTargetMarker.map = null;
 
   hydrateInitialCrumbs();
 
@@ -1457,17 +1460,8 @@ function refresh(){
           robotArrow.style.display = 'none';
           if(robotArrowMarker.map) robotArrowMarker.map = null;
         }
-        // experimental: show the mowing target reticle + robot->target line (?experimental=on)
-        var tgt = (URL_CONFIG.experimental === 'on' && r.mowing && r.mowing.target && typeof r.mowing.target.latitude === 'number') ? r.mowing.target : null;
-        if(tgt){
-          var tp = { lat: tgt.latitude, lng: tgt.longitude };
-          targetMarker.position = tp; if(!targetMarker.map) targetMarker.map = map;
-          targetMarker.title = 'Mowing target ' + tp.lat.toFixed(6) + ',' + tp.lng.toFixed(6) + ' · heading ' + Math.round(tgt.headingCompass) + '°' + (tgt.raw ? ' · [4] 1=' + tgt.raw[1] + ' 2=' + tgt.raw[2] + ' 3=' + tgt.raw[3] + ' 4=' + tgt.raw[4] + ' 7=' + tgt.raw[7] : '');
-          targetLine.setPath([pos, tp]); if(!targetLine.getMap()) targetLine.setMap(map);
-        } else {
-          if(targetMarker.map) targetMarker.map = null;
-          if(targetLine.getMap()) targetLine.setMap(null);
-        }
+        // the mowing strategy's cut position is no longer drawn on the map; it flashes only on hover of
+        // the status-box strategy line (attachMowFlashHover -> showProposalCircles).
         if(!didFit && !userMoved){
           didFit = true;
           var b = new google.maps.LatLngBounds();
@@ -1896,6 +1890,33 @@ function positionHoverPanel(panel, box){
 }
 
 var zonePanelCloseTimer = null;
+// Show/flash the yellow cut-position reticle at lat/lng (flashing on/off so it stands out); hide on clear.
+function showMowTarget(lat, lng){
+  clearMowTarget();
+  if(!mowTargetMarker || typeof map === 'undefined' || !map) return;
+  if(typeof lat !== 'number' || typeof lng !== 'number') return;
+  mowTargetMarker.position = { lat: lat, lng: lng };
+  mowTargetMarker.map = map;
+  var on = true;
+  mowTargetFlash = setInterval(function(){ on = !on; if(mowTargetEl) mowTargetEl.style.visibility = on ? 'visible' : 'hidden'; }, 450);
+}
+function clearMowTarget(){
+  if(mowTargetFlash){ clearInterval(mowTargetFlash); mowTargetFlash = null; }
+  if(mowTargetEl) mowTargetEl.style.visibility = 'visible';
+  if(mowTargetMarker) mowTargetMarker.map = null;
+}
+// Hovering the mowing-strategy sub-line flashes its cut position on the map as the yellow target reticle,
+// then clears on leave. The point itself is otherwise not drawn.
+function attachMowFlashHover(){
+  var box = document.getElementById('statusbox');
+  var trigger = box && box.querySelector('[data-mowflash]');
+  if(!trigger) return;
+  trigger.addEventListener('mouseenter', function(){
+    var cp = state && state.robot && state.robot.mowing && state.robot.mowing.strategy && state.robot.mowing.strategy.cutPosition;
+    if(cp && typeof cp.latitude === 'number') showMowTarget(cp.latitude, cp.longitude);
+  });
+  trigger.addEventListener('mouseleave', clearMowTarget);
+}
 function attachZonePanelHover(){
   var box = document.getElementById('statusbox');
   var trigger = box && box.querySelector('.zonelast');
@@ -2239,18 +2260,17 @@ function renderStatusBox(){
   var schedRow = '<div class="row"><span class="k">Schedule</span><span class="v sched-trigger" data-schedpanel="1">' + esc(sched) + '</span></div>';
   var mow = '-';
   if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
-  // experimental: current mowing target waypoint (from LOG/STATUS [18][4]); gated on ?experimental=on
+  // The mowing STRATEGY [18][4] as a single label-less sub-line of Mowing (always shown when present):
+  //   <progress>/<maximum> · <±orientation>° · <startX,startY> · <unknown1>/<unknown2>
+  // Hovering it flashes the cut position on the map (showMowTarget, via attachMowFlashHover). The
+  // absolute target lat/lng + heading are intentionally not surfaced. (URL_CONFIG.experimental kept for future use.)
   var tgtRow = '';
-  if(URL_CONFIG.experimental === 'on' && r.mowing && r.mowing.target){
-    var tg = r.mowing.target;
-    var tw = (typeof tg.latitude === 'number') ? (tg.latitude.toFixed(6) + ',' + tg.longitude.toFixed(6)) : (fmt(tg.east,1) + ',' + fmt(tg.north,1) + 'm');
-    var dist = '';
-    if(typeof tg.latitude === 'number' && typeof r.latitude === 'number'){
-      var mLat = 111320, mLng = 111320 * Math.cos(r.latitude * Math.PI / 180);
-      dist = ' · ' + Math.hypot((tg.latitude - r.latitude) * mLat, (tg.longitude - r.longitude) * mLng).toFixed(1) + 'm';
-    }
-    tgtRow = row('Target', tw + ' · ' + Math.round(tg.headingCompass) + '°' + dist);
-    if(tg.raw) tgtRow += row('Mow[4]', 'en=(' + fmt(tg.east,1) + ',' + fmt(tg.north,1) + ') · 1=' + tg.raw[1] + ' 2=' + tg.raw[2] + ' 3=' + tg.raw[3] + ' 4=' + tg.raw[4] + ' 7=' + tg.raw[7]);
+  if(r.mowing && r.mowing.strategy){
+    var s = r.mowing.strategy;
+    var ori = ((s.cutDirection % 360) + 540) % 360 - 180; // normalise to (-180,180] so the sign is meaningful
+    var oriStr = (ori >= 0 ? '+' : '') + Math.round(ori) + '°';
+    var line = s.cutEffortProgress + '/' + s.cutEffortMaximum + 'ε · ' + oriStr + ' · ' + fmt(s.cutPosition.east,1) + ',' + fmt(s.cutPosition.north,1) + 'm · ' + s.cutUnknown1 + '/' + s.cutUnknown2;
+    tgtRow = '<div class="row" data-mowflash="1"><span class="k"></span><span class="v mowstrat">' + esc(line) + '</span></div>';
   }
   var zoneLastRow = '';
   var zc = state.zoneCompletions;
@@ -2282,6 +2302,7 @@ function renderStatusBox(){
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
   attachZonePanelHover();
   attachSchedPanelHover();
+  attachMowFlashHover();
 }
 
 function table(rows){
