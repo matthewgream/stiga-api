@@ -1158,6 +1158,7 @@ function decodePerimeterZoneSettings(zoneEntry) {
     return {
         id: zoneEntry[1],
         name: _decodePerimeterZoneName(zoneEntry[15]) || '',
+        enabled: !zoneEntry[12], // [12]=1 means the zone is disabled in the app (absent/0 = enabled)
         cuttingMode: cuttingModesByValue[modeValue] ?? modeValue,
         cuttingHeight: cuttingHeightsByValue[heightValue] ?? heightValue, // mm
         priority: zoneEntry[13] ?? 0,

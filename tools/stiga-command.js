@@ -974,12 +974,12 @@ registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
         for (const z of all) {
             const angle = z.customAngleActive ? `${z.customAngle}°` : 'off';
             const mode = StigaAPIElements.getCuttingModeLabels()[z.cuttingMode] || z.cuttingMode;
-            display.text(`  zone ${z.id} "${z.name}": height=${z.cuttingHeight}mm mode=${mode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
+            display.text(`  zone ${z.id} "${z.name}": enabled=${z.enabled === false ? 'no' : 'yes'} height=${z.cuttingHeight}mm mode=${mode} priority=${z.priority} angle=${angle} borderCut=${z.borderCut ? 'on' : 'off'}`);
         }
         display.json({
             source: 'cloud',
             kind: 'zoneSettings',
-            value: all.map((z) => ({ id: z.id, name: z.name, cuttingHeight: z.cuttingHeight, cuttingMode: z.cuttingMode, priority: z.priority, customAngleActive: z.customAngleActive, customAngle: z.customAngle, borderCut: z.borderCut })),
+            value: all.map((z) => ({ id: z.id, name: z.name, enabled: z.enabled !== false, cuttingHeight: z.cuttingHeight, cuttingMode: z.cuttingMode, priority: z.priority, customAngleActive: z.customAngleActive, customAngle: z.customAngle, borderCut: z.borderCut })),
         });
     },
 });
