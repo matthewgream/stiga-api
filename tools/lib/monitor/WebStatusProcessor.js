@@ -2259,7 +2259,7 @@ function renderStatusBox(){
   var sched = formatScheduleSummary();
   var schedRow = '<div class="row"><span class="k">Schedule</span><span class="v sched-trigger" data-schedpanel="1">' + esc(sched) + '</span></div>';
   var mow = '-';
-  if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' · ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
+  if(r.mowing) mow = zoneLabel(r.mowing.zone) + ' ' + fmt(r.mowing.zoneCompleted,0) + '% · garden ' + fmt(r.mowing.gardenCompleted,0) + '%';
   // The mowing STRATEGY [18][4] as a single label-less sub-line of Mowing (always shown when present):
   //   <progress>/<maximum> · <±orientation>° · <startX,startY> · <unknown1>/<unknown2>
   // Hovering it flashes the cut position on the map (showMowTarget, via attachMowFlashHover). The
@@ -2267,10 +2267,11 @@ function renderStatusBox(){
   var tgtRow = '';
   if(r.mowing && r.mowing.strategy){
     var s = r.mowing.strategy;
-    var ori = ((s.cutDirection % 360) + 540) % 360 - 180; // normalise to (-180,180] so the sign is meaningful
-    var oriStr = (ori >= 0 ? '+' : '') + Math.round(ori) + '°';
-    var line = s.cutEffortProgress + '/' + s.cutEffortMaximum + 'ε · ' + oriStr + ' · ' + fmt(s.cutPosition.east,1) + ',' + fmt(s.cutPosition.north,1) + 'm · ' + s.cutUnknown1 + '/' + s.cutUnknown2;
-    tgtRow = '<div class="row" data-mowflash="1"><span class="k"></span><span class="v mowstrat">' + esc(line) + '</span></div>';
+    var parts = [s.cutEffortProgress + '/' + s.cutEffortMaximum + 'ε'];
+    if(typeof s.cutDirection === 'number'){ var ori = ((s.cutDirection % 360) + 540) % 360 - 180; parts.push((ori >= 0 ? '+' : '') + Math.round(ori) + '°'); } // normalise to (-180,180]
+    if(s.cutPosition) parts.push(fmt(s.cutPosition.east,1) + ',' + fmt(s.cutPosition.north,1) + 'm');
+    parts.push(s.cutUnknown1 + '/' + s.cutUnknown2);
+    tgtRow = '<div class="row" data-mowflash="1"><span class="k"></span><span class="v mowstrat">' + esc(parts.join(' · ')) + '</span></div>';
   }
   var zoneLastRow = '';
   var zc = state.zoneCompletions;

@@ -136,31 +136,41 @@ class StigaDatabaseExporter {
         };
     }
 
-    exportToLog({ startTime, endTime, head, tail }, outputFile, filterFn) {
-        const output = fs.createWriteStream(outputFile);
-        let count = 0;
+    // outputFile '-' means stdout (for piping); otherwise a file. Progress/completion go to stderr when
+    // streaming to stdout so the data stream stays clean.
+    _openLogOutput(outputFile) {
+        const toStdout = outputFile === '-';
+        return { output: toStdout ? process.stdout : fs.createWriteStream(outputFile), toStdout };
+    }
+    _finishLogOutput(output, toStdout, count, outputFile) {
+        if (toStdout) console.error(`Export complete: ${count} messages`);
+        else {
+            output.end();
+            console.log(`Export complete: ${count} messages written to ${outputFile}`);
+        }
+    }
 
+    exportToLog({ startTime, endTime, head, tail }, outputFile, filterFn) {
+        const { output, toStdout } = this._openLogOutput(outputFile);
+        let count = 0;
         for (const row of this.getRowsData(startTime, endTime, head, tail)) {
             if (filterFn && !filterFn(row)) continue;
             this._writeLogRow(output, row);
-            if (++count % 10000 === 0) console.log(`Exported ${count} messages...`);
+            if (++count % 10000 === 0 && !toStdout) console.log(`Exported ${count} messages...`);
         }
-
-        output.end();
-        console.log(`Export complete: ${count} messages written to ${outputFile}`);
+        this._finishLogOutput(output, toStdout, count, outputFile);
         return count;
     }
 
     async exportToLogVerbose({ startTime, endTime, head, tail }, outputFile, mac_device, mac_base, filterFn) {
-        const output = fs.createWriteStream(outputFile);
+        const { output, toStdout } = this._openLogOutput(outputFile);
         let count = 0;
         for (const row of this.getRowsData(startTime, endTime, head, tail)) {
             if (filterFn && !filterFn(row)) continue;
             this._writeLogVerboseRow(output, row, mac_device, mac_base);
-            if (++count % 1000 === 0) console.log(`Exported ${count} messages...`);
+            if (++count % 1000 === 0 && !toStdout) console.log(`Exported ${count} messages...`);
         }
-        output.end();
-        console.log(`Export complete: ${count} messages written to ${outputFile}`);
+        this._finishLogOutput(output, toStdout, count, outputFile);
         return count;
     }
 
@@ -168,21 +178,52 @@ class StigaDatabaseExporter {
         output.write(`${row.timestamp}|${row.topic}|${row.data.toString('hex')}\n`);
     }
 
-    _writeLogVerboseRow(output, row, mac_device, mac_base) {
-        const direction = this._getDirection(row.topic, mac_device, mac_base);
-        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${direction} PUBLISH\n`);
-        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Time:       ${row.timestamp}\n`);
-        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Topic:      ${row.topic}\n`);
-        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Length:     ${row.data.length} bytes\n`);
-        if (row.data.length > 0) {
-            formatHexDump(row.data, 'Payload:    ').forEach((line) => output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${line}\n`));
-            try {
-                interpretMessage(row.topic, row.data, { MAC_ROBOT: mac_device, MAC_BASE: mac_base }).forEach((line) => output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Decode:     ${line}\n`));
-            } catch (e) {
-                output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} Decode:     Error - ${e.message}\n`);
+    // Which verbose sections to print. Default: just the human 'decoded' interpretation. The --display
+    // spec is a comma list of section names that ADD, or `no-<name>` that REMOVE, from that default:
+    //   payload  = raw hex dump   ·   protobuf (alias raw) = raw nested protobuf decode   ·   decoded = interpretation
+    // e.g. --display payload,protobuf   /   --display no-decoded,protobuf   /   --display payload
+    _resolveDisplaySections(spec) {
+        const ALIAS = { payload: 'payload', protobuf: 'protobuf', raw: 'protobuf', decoded: 'decoded', decode: 'decoded' };
+        const sections = new Set(['decoded']);
+        if (spec)
+            for (const token of spec
+                .split(',')
+                .map((t) => t.trim())
+                .filter(Boolean)) {
+                const remove = token.startsWith('no-');
+                const canon = ALIAS[(remove ? token.slice(3) : token).toLowerCase()];
+                if (!canon) throw new Error(`Unknown --display section '${token}' (expected payload, protobuf, decoded; optional no- prefix)`);
+                if (remove) sections.delete(canon);
+                else sections.add(canon);
             }
+        return sections;
+    }
+
+    _writeLogVerboseRow(output, row, mac_device, mac_base) {
+        const sections = this._display || new Set(['decoded']);
+        const pre = `${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} `;
+        output.write(`${pre}${this._getDirection(row.topic, mac_device, mac_base)} PUBLISH\n`);
+        output.write(`${pre}Time:       ${row.timestamp}\n`);
+        output.write(`${pre}Topic:      ${row.topic}\n`);
+        output.write(`${pre}Length:     ${row.data.length} bytes\n`);
+        if (row.data.length > 0) {
+            if (sections.has('payload')) formatHexDump(row.data, 'Payload:    ').forEach((line) => output.write(`${pre}${line}\n`));
+            if (sections.has('protobuf'))
+                try {
+                    JSON.stringify(protobufDecode(row.data), undefined, 2)
+                        .split('\n')
+                        .forEach((line) => output.write(`${pre}Protobuf:   ${line}\n`));
+                } catch (e) {
+                    output.write(`${pre}Protobuf:   Error - ${e.message}\n`);
+                }
+            if (sections.has('decoded'))
+                try {
+                    interpretMessage(row.topic, row.data, { MAC_ROBOT: mac_device, MAC_BASE: mac_base }).forEach((line) => output.write(`${pre}Decoded:    ${line}\n`));
+                } catch (e) {
+                    output.write(`${pre}Decoded:    Error - ${e.message}\n`);
+                }
         }
-        output.write(`${row.timestamp} COMMAND=${row.topic.padEnd(48, ' ')} ${'═'.repeat(70)}\n`);
+        output.write(`${pre}${'═'.repeat(70)}\n`);
     }
 
     // Follow capture.db as the monitor writes to it: start at the current max rowid and poll for
@@ -459,7 +500,8 @@ Usage:
     
 Options:
   --format <log|csv|sheets>     Output format (default: log)
-  --output <filename>           Output file (for log/csv formats)
+  --output <filename>           Output file (for log/csv formats); use - for stdout (log format,
+                                diagnostics then go to stderr so the stream stays pipeable)
   --credentials <file>          Google service account JSON file (required for sheets)
   --sheet-name <name>           Name for the Google Sheet (optional)
   --mac_device=MAC              Device MAC address (default: D0:EF:76:64:32:BA) (for verbose format)
@@ -476,6 +518,12 @@ Options:
                                                     no-CMD_REFERENCE, no-LOG (drops all LOG/*)
   --stats                       Show database statistics only
   --verbose                     For log format: output in listen.log format with full decoding
+  --display <list>              Verbose sections to show (default: decoded). Comma list; bare name adds,
+                                no-<name> removes, from the default:
+                                  payload   raw hex dump
+                                  protobuf  raw nested protobuf decode (alias: raw)
+                                  decoded   the human interpretation (shown by default)
+                                e.g. --display payload,protobuf  /  --display no-decoded,protobuf
   --follow, -f                  Follow capture.db: stream new messages as the monitor writes them
                                 (log format only; honours --filter/--verbose; runs until Ctrl-C).
                                 Output defaults to stdout; use --output - explicitly or a filename.
@@ -516,6 +564,7 @@ Google Sheets Setup:
     let verbose = false;
     let follow = false;
     let filter;
+    let display;
     let mac_device = 'D0:EF:76:64:32:BA';
     let mac_base = 'FC:E8:C0:72:EC:62';
 
@@ -547,6 +596,9 @@ Google Sheets Setup:
                 break;
             case '--filter':
                 filter = args[i + 1];
+                break;
+            case '--display':
+                display = args[i + 1];
                 break;
             case '--mac_device':
                 mac_device = args[i + 1];
@@ -581,7 +633,8 @@ Google Sheets Setup:
     const exporter = new StigaDatabaseExporter(dbPath);
     try {
         exporter.open();
-        (follow ? console.error : console.log)(`Opened database: ${dbPath} (read-only mode)`);
+        exporter._display = exporter._resolveDisplaySections(display);
+        (follow || outputFile === '-' ? console.error : console.log)(`Opened database: ${dbPath} (read-only mode)`);
 
         if (showStats) {
             const stats = exporter.getStats();
@@ -598,17 +651,20 @@ Google Sheets Setup:
             const filterFn = exporter._buildRowFilter(filter, mac_device, mac_base);
             const toStdout = !outputFile || outputFile === '-';
             const output = toStdout ? process.stdout : fs.createWriteStream(outputFile);
-            console.error(`Following ${dbPath} for new messages (${verbose ? 'verbose' : 'plain'} log${filter ? ', filter: ' + filter : ''}) - Ctrl-C to stop`);
+            console.error(`Following ${dbPath} for new messages (${verbose ? 'verbose' : 'plain'} log${verbose ? ', display: ' + [...exporter._display].join(',') : ''}${filter ? ', filter: ' + filter : ''}) - Ctrl-C to stop`);
             process.on('SIGINT', () => exporter.stopFollow());
             await exporter.followLog(output, mac_device, mac_base, filterFn, verbose);
             if (!toStdout) output.end();
             console.error('Stopped.');
         } else {
+            // For log->stdout (--output -), keep stdout clean: route diagnostics to stderr.
+            const toStdout = outputFile === '-';
+            const diag = toStdout ? console.error : console.log;
             const filters = { startTime, endTime, head, tail };
-            console.log(`format: ${format}`);
-            console.log(`filters: ${formatStruct(filters, 'filters')}`);
+            diag(`format: ${format}`);
+            diag(`filters: ${formatStruct(filters, 'filters')}`);
             const filterFn = exporter._buildRowFilter(filter, mac_device, mac_base);
-            if (filter) console.log(`message filter: ${filter}`);
+            if (filter) diag(`message filter: ${filter}`);
 
             switch (format) {
                 case 'csv':
@@ -637,7 +693,7 @@ Google Sheets Setup:
 
                 default: // 'log' format
                     if (!outputFile) outputFile = `export_${new Date().toISOString().split('T')[0]}.log`;
-                    console.log(`Output file: ${outputFile}`);
+                    diag(`Output: ${toStdout ? '(stdout)' : outputFile}`);
                     verbose ? await exporter.exportToLogVerbose(filters, outputFile, mac_device, mac_base, filterFn) : await exporter.exportToLog(filters, outputFile, filterFn);
                     break;
             }

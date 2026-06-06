@@ -439,20 +439,25 @@ function decodeRobotMowingStatus(decoded, location) {
 //   [5] cutPosition        anchor/reference point {east,north} doubles on a 0.5 m grid (NOT live target)
 //   [6] cutDirection       cutting direction in degrees (from radians; rotates each run)
 //   [7] cutUnknown2        marker (=2 when [5] present) — unknown
-// Only surfaced when an anchor [5] is present. (At least one of [3]/[7] may relate to cut-height encoding.)
+// [18][4] sometimes carries only a subset (e.g. just [1]/[2]); decode whatever is present. The counters
+// ([1..4],[7]) coerce missing->0, but cutPosition ([5]) and cutDirection ([6]) are left UNDEFINED when
+// absent so callers render only what exists. (At least one of [3]/[7] may relate to cut-height encoding.)
 function decodeRobotMowingStrategy(decoded, location) {
-    if (!decoded || decoded[5] === undefined) return undefined;
-    const east = hexToDouble(decoded[5][1] || '0000000000000000'),
-        north = hexToDouble(decoded[5][2] || '0000000000000000');
-    return upgradeRobotMowingStrategy({
+    if (!decoded) return undefined;
+    const strategy = {
         cutEffortProgress: decoded[1] || 0,
         cutAttitude: decoded[2] || 0,
         cutUnknown1: decoded[3] || 0,
         cutEffortMaximum: decoded[4] || 0,
-        cutPosition: { east, north, ...calculateLocationFromOffset(location, [east, north]) },
-        cutDirection: ((decoded[6] || 0) * 180) / Math.PI, // degrees
         cutUnknown2: decoded[7] || 0,
-    });
+    };
+    if (decoded[5] !== undefined) {
+        const east = hexToDouble(decoded[5][1] || '0000000000000000'),
+            north = hexToDouble(decoded[5][2] || '0000000000000000');
+        strategy.cutPosition = { east, north, ...calculateLocationFromOffset(location, [east, north]) };
+    }
+    if (decoded[6] !== undefined) strategy.cutDirection = (decoded[6] * 180) / Math.PI; // degrees
+    return upgradeRobotMowingStrategy(strategy);
 }
 function formatRobotMowingStatus(mowing) {
     if (!mowing) return undefined;
@@ -462,9 +467,15 @@ function formatRobotMowingStatus(mowing) {
     );
 }
 function formatRobotMowingStrategy(s) {
-    const cp = s.cutPosition;
-    const where = cp.latitude !== undefined && cp.longitude !== undefined ? `${cp.latitude.toFixed(7)},${cp.longitude.toFixed(7)}` : `${cp.east.toFixed(1)},${cp.north.toFixed(1)}m`;
-    return `effort=${s.cutEffortProgress}/${s.cutEffortMaximum} direction=${Math.round(s.cutDirection)}°/${s.cutAttitude}° position=${where} unknown=${s.cutUnknown1}/${s.cutUnknown2}`;
+    const parts = [`effort=${s.cutEffortProgress}/${s.cutEffortMaximum}`];
+    parts.push(s.cutDirection === undefined ? `attitude=${s.cutAttitude}°` : `direction=${Math.round(s.cutDirection)}°/${s.cutAttitude}°`);
+    if (s.cutPosition) {
+        const cp = s.cutPosition;
+        const where = cp.latitude === undefined ? `${cp.east.toFixed(1)},${cp.north.toFixed(1)}m` : `${cp.latitude.toFixed(7)},${cp.longitude.toFixed(7)}`;
+        parts.push(`position=${where}`);
+    }
+    parts.push(`unknown=${s.cutUnknown1}/${s.cutUnknown2}`);
+    return parts.join(' ');
 }
 function upgradeRobotMowingStatus(mowing) {
     mowing.toString = () => formatRobotMowingStatus(mowing);
