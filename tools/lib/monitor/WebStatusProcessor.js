@@ -1493,7 +1493,8 @@ function robotColor(r){
   if(r.statusText && /error|fault|stuck|blocked|fail/i.test(r.statusText)) return '#ea4335';
   if(r.docked) return '#1a73e8';
   var t = (r.statusType || '').toUpperCase();
-  if(t.indexOf('MOW') >= 0 || t.indexOf('PLAN') >= 0 || t.indexOf('WORK') >= 0) return '#34a853';
+  if(t.indexOf('MOW') >= 0 || t.indexOf('WORK') >= 0) return '#34a853'; // actively cutting → green
+  if(t.indexOf('PLAN') >= 0) return '#fbbc04'; // planning/preparing → yellow (transitional, not yet cutting)
   if(t.indexOf('CHARG') >= 0) return '#1a73e8';
   return '#fbbc04';
 }
