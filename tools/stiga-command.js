@@ -24,7 +24,8 @@ const {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const LEVELS = { quiet: 0, normal: 1, verbose: 2 };
+const LEVELS = { quiet: 1, normal: 2, verbose: 3 };
+const FORMATS = { none: 1, text: 2, json: 3 };
 
 let globalOptions = {
     debug: false,
@@ -48,14 +49,13 @@ const display = {
 const commands = {};
 const aliases = {};
 
-function registerCommand(names, config) {
+function commandRegister(names, config) {
     const [primary, ...rest] = Array.isArray(names) ? names : [names];
     commands[primary] = { ...config, name: primary, aliases: rest };
-    // store alias lookup keys lower-cased so resolution is case-insensitive (e.g. goAway == goaway)
     for (const alias of rest) aliases[alias.toLowerCase()] = primary;
 }
 
-function resolveCommand(name) {
+function commandResolve(name) {
     const key = name.toLowerCase();
     if (commands[key]) return commands[key];
     if (aliases[key]) return commands[aliases[key]];
@@ -67,7 +67,7 @@ function resolveCommand(name) {
     throw new Error(`Ambiguous command '${name}': matches ${[...matches].join(', ')}`);
 }
 
-function showCommandHelp(cmd) {
+function commandShowHelp(cmd) {
     display.log(`Usage: ${cmd.usage}`);
     if (cmd.summary) display.log(`\n${cmd.summary}`);
     if (cmd.details) for (const line of cmd.details) display.log(line);
@@ -94,63 +94,45 @@ function parseArgs() {
         password: undefined,
         mqttBroker: undefined,
     };
-    let i = 0;
-    while (i < args.length) {
+    for (let i = 0; i < args.length; i++)
         // eslint-disable-next-line unicorn/prefer-switch
-        if (args[i] === '--base') {
+        if (args[i] === '--username') {
+            if (++i >= args.length) throw new Error('--username requires a value');
+            options.username = args[i];
+        } else if (args[i] === '--password') {
+            if (++i >= args.length) throw new Error('--password requires a value');
+            options.password = args[i];
+        } else if (args[i] === '--mqtt-broker' || args[i] === '--broker') {
+            if (++i >= args.length) throw new Error('--mqtt-broker/--broker requires a value (e.g. broker, broker1, broker2)');
+            options.mqttBroker = args[i];
+        } else if (args[i] === '--base') {
             options.target = ['robot', 'both'].includes(options.target) ? 'both' : 'base';
-            i++;
         } else if (args[i] === '--robot') {
             options.target = ['base', 'both'].includes(options.target) ? 'both' : 'robot';
-            i++;
         } else if (args[i] === '--both') {
             options.target = 'both';
-            i++;
-        } else if (args[i] === '--debug') {
-            options.debug = true;
-            i++;
-        } else if (args[i] === '--level') {
-            if (i + 1 >= args.length) throw new Error('--level requires a value (quiet|normal|verbose)');
-            const v = args[++i].toLowerCase();
-            if (LEVELS[v] === undefined) throw new Error(`Invalid --level value '${v}': must be quiet|normal|verbose`);
-            options.level = v;
-            i++;
         } else if (args[i] === '--watch') {
             options.watch = 5;
-            if (i + 1 < args.length && /^\d+$/.test(args[i + 1])) options.watch = Number.parseInt(args[++i]);
-            i++;
+            if (++i < args.length && /^\d+$/.test(args[i])) options.watch = Number.parseInt(args[i]);
         } else if (args[i] === '--passive') {
             options.watch = 0;
-            i++;
-        } else if (args[i] === '--username') {
-            if (i + 1 >= args.length) throw new Error('--username requires a value');
-            options.username = args[++i];
-            i++;
-        } else if (args[i] === '--password') {
-            if (i + 1 >= args.length) throw new Error('--password requires a value');
-            options.password = args[++i];
-            i++;
-        } else if (args[i] === '--mqtt-broker') {
-            if (i + 1 >= args.length) throw new Error('--mqtt-broker requires a value (e.g. broker, broker1, broker2)');
-            options.mqttBroker = args[++i];
-            i++;
-        } else if (args[i].startsWith('--mqtt-broker=')) {
-            options.mqttBroker = args[i].slice('--mqtt-broker='.length);
-            i++;
+        } else if (args[i] === '--level') {
+            if (++i >= args.length) throw new Error(`--level requires a value (${Object.keys(LEVELS).join('|')})`);
+            const v = args[i].toLowerCase();
+            if (!LEVELS[v]) throw new Error(`Invalid --level value '${v}': must be ${Object.keys(LEVELS).join('|')}`);
+            options.level = v;
         } else if (args[i] === '--format') {
-            if (i + 1 >= args.length) throw new Error('--format requires a value (text|json|none)');
-            const v = args[++i].toLowerCase();
-            if (!['text', 'json', 'none'].includes(v)) throw new Error(`Invalid --format value '${v}': must be text|json|none`);
+            if (++i >= args.length) throw new Error(`--format requires a value (${Object.keys(FORMATS).join('|')})`);
+            const v = args[i].toLowerCase();
+            if (!FORMATS[v]) throw new Error(`Invalid --format value '${v}': must be ${Object.keys(FORMATS).join('|')}`);
             options.format = v;
-            i++;
+        } else if (args[i] === '--debug') {
+            options.debug = true;
         } else if (options.command === undefined) {
             options.command = args[i];
-            i++;
         } else {
             options.params.push(args[i]);
-            i++;
         }
-    }
     if (!options.target) options.target = 'both';
     globalOptions = { debug: options.debug, level: LEVELS[options.level], format: options.format };
     return options;
@@ -354,8 +336,7 @@ function resolveCredentials(options) {
 async function executeRobotCommand(name, fn, context) {
     const { device, connectors } = context;
     await connectToRobot(device, connectors);
-    const ok = await fn(device);
-    if (ok === true) {
+    if ((await fn(device)) === true) {
         display.text(`${name} command acknowledged`);
         display.json({ source: 'robot', kind: 'command', command: name, ok: true });
         return;
@@ -390,8 +371,7 @@ async function runChecks(credentials, target) {
                 return;
             }
         try {
-            const detail = await fn();
-            record(name, 'ok', detail);
+            record(name, 'ok', await fn());
         } catch (e) {
             record(name, 'fail', e.message);
         }
@@ -520,7 +500,7 @@ async function runChecks(credentials, target) {
     if (counts.fail > 0) throw throwExit(`check failed (${counts.fail} failure${counts.fail === 1 ? '' : 's'})`, 3);
 }
 
-registerCommand('check', {
+commandRegister('check', {
     description: 'Step-by-step installation/connectivity health check',
     targets: ['robot', 'base'],
     usage: 'stiga-command [--robot|--base] check [help]',
@@ -692,7 +672,7 @@ function displayCloudInfoText(info) {
     if (info.notifications) display.text(`  Notifications: ${info.notifications.total} total, ${info.notifications.unread} unread`);
 }
 
-registerCommand(['info', 'describe'], {
+commandRegister(['info', 'describe'], {
     description: 'Dump all known information for the selected target(s)',
     targets: ['robot', 'base'],
     usage: 'stiga-command [--robot|--base] info [help]',
@@ -721,7 +701,7 @@ registerCommand(['info', 'describe'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand('version', {
+commandRegister('version', {
     description: 'Get firmware/hardware version',
     targets: ['robot', 'base'],
     usage: 'stiga-command [--robot|--base] version [help]',
@@ -748,7 +728,7 @@ registerCommand('version', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand('status', {
+commandRegister('status', {
     description: 'Get operation/battery/mowing/location/network status',
     targets: ['robot', 'base'],
     args: '[types...]',
@@ -883,7 +863,7 @@ function plainSettings(value) {
     return Object.fromEntries(sortedSettingEntries(value));
 }
 
-registerCommand('settings', {
+commandRegister('settings', {
     description: 'Display device settings',
     targets: ['robot', 'base'],
     usage: 'stiga-command [--robot|--base] settings [help]',
@@ -930,7 +910,7 @@ registerCommand('settings', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['zone-settings', 'zoneSettings', 'zones'], {
+commandRegister(['zone-settings', 'zoneSettings', 'zones'], {
     description: 'Display per-zone settings (cutting height, mode, priority, angle, border cut)',
     targets: ['robot'],
     usage: 'stiga-command --robot zone-settings [zone] [help]',
@@ -1003,7 +983,7 @@ async function scheduleUpdateAndDisplay(device, subCommand, value) {
     displaySchedule(updated.value);
 }
 
-registerCommand('schedule', {
+commandRegister('schedule', {
     description: 'Display/enable/disable/insert/remove mowing schedule',
     targets: ['robot'],
     args: '[subcommand]',
@@ -1174,7 +1154,7 @@ async function runPerimeters(credentials) {
     });
 }
 
-registerCommand('perimeters', {
+commandRegister('perimeters', {
     description: 'Display garden zones and obstacles from the cloud',
     targets: ['robot'],
     usage: 'stiga-command perimeters [help]',
@@ -1192,7 +1172,7 @@ registerCommand('perimeters', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand('start', {
+commandRegister('start', {
     description: 'Start mowing',
     targets: ['robot'],
     usage: 'stiga-command --robot start [help]',
@@ -1203,7 +1183,7 @@ registerCommand('start', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand('stop', {
+commandRegister('stop', {
     description: 'Stop the robot',
     targets: ['robot'],
     usage: 'stiga-command --robot stop [help]',
@@ -1214,7 +1194,7 @@ registerCommand('stop', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['go-home', 'goHome', 'home'], {
+commandRegister(['go-home', 'goHome', 'home'], {
     description: 'Send the robot home to dock',
     targets: ['robot'],
     usage: 'stiga-command --robot go-home [help]',
@@ -1225,7 +1205,7 @@ registerCommand(['go-home', 'goHome', 'home'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['force-cut', 'forceCut', 'cut'], {
+commandRegister(['force-cut', 'forceCut', 'cut'], {
     description: 'Force the robot to mow a specific zone now',
     targets: ['robot'],
     usage: 'stiga-command --robot force-cut <zone> [help]',
@@ -1240,7 +1220,7 @@ registerCommand(['force-cut', 'forceCut', 'cut'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['force-border-cut', 'forceBorderCut', 'border-cut'], {
+commandRegister(['force-border-cut', 'forceBorderCut', 'border-cut'], {
     description: "Force the robot to cut a specific zone's border now",
     targets: ['robot'],
     usage: 'stiga-command --robot force-border-cut <zone> [help]',
@@ -1255,7 +1235,7 @@ registerCommand(['force-border-cut', 'forceBorderCut', 'border-cut'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['reset-error', 'resetError', 'reset'], {
+commandRegister(['reset-error', 'resetError', 'reset'], {
     description: 'Clear a recoverable latched error (the app\'s "reset error" button)',
     targets: ['robot'],
     usage: 'stiga-command --robot reset-error [help]',
@@ -1266,7 +1246,7 @@ registerCommand(['reset-error', 'resetError', 'reset'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['boot', 'startup'], {
+commandRegister(['boot', 'startup'], {
     description: 'Boot the robot out of a "startup required" state (the app\'s "boot" button)',
     targets: ['robot'],
     usage: 'stiga-command --robot boot [help]',
@@ -1277,7 +1257,7 @@ registerCommand(['boot', 'startup'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
+commandRegister(['calibrate-blades', 'calibrateBlades', 'blades'], {
     description: 'Calibrate the cutting blades',
     targets: ['robot'],
     usage: 'stiga-command --robot calibrate-blades [help]',
@@ -1288,7 +1268,7 @@ registerCommand(['calibrate-blades', 'calibrateBlades', 'blades'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['calibrate-docking', 'calibrateDocking', 'docking'], {
+commandRegister(['calibrate-docking', 'calibrateDocking', 'docking'], {
     description: 'Calibrate the docking/charging alignment',
     targets: ['robot'],
     usage: 'stiga-command --robot calibrate-docking [help]',
@@ -1299,7 +1279,7 @@ registerCommand(['calibrate-docking', 'calibrateDocking', 'docking'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['cloud-sync', 'cloudSync', 'sync'], {
+commandRegister(['cloud-sync', 'cloudSync', 'sync'], {
     description: 'Tell the robot to re-sync its perimeter from the cloud',
     targets: ['robot'],
     usage: 'stiga-command --robot cloud-sync [help]',
@@ -1320,7 +1300,7 @@ registerCommand(['cloud-sync', 'cloudSync', 'sync'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-registerCommand(['go-away', 'goAway', 'avoid'], {
+commandRegister(['go-away', 'goAway', 'avoid'], {
     description: 'Push a temporary circular GO_AWAY obstacle to the robot (real-time avoid)',
     targets: ['robot'],
     usage: 'stiga-command --robot go-away <lat> <lng> <radius_m> [expiry_days]',
@@ -1501,7 +1481,7 @@ async function runNotificationsDelete(credentials, selector) {
     display.json({ source: 'cloud', kind: 'notificationsDelete', value: { selector: selector ?? null, matched: targets.length, deleted, total: all.length, results } });
 }
 
-registerCommand('notifications', {
+commandRegister('notifications', {
     description: 'Display device notifications/events from the cloud',
     targets: ['robot', 'base'],
     args: '[qualifier...]',
@@ -1531,8 +1511,7 @@ registerCommand('notifications', {
         const first = (context.params[0] || '').toLowerCase();
         if (first === 'delete' || first.startsWith('delete:')) {
             const raw = context.params[0];
-            const selector = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : undefined;
-            return runNotificationsDelete(context.credentials, selector);
+            return runNotificationsDelete(context.credentials, raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : undefined);
         }
         return runNotifications(context.credentials, context.params);
     },
@@ -1577,7 +1556,7 @@ async function runUser(credentials) {
     });
 }
 
-registerCommand('user', {
+commandRegister('user', {
     description: 'Display the cloud account profile',
     targets: ['robot', 'base'],
     usage: 'stiga-command user [help]',
@@ -1590,7 +1569,7 @@ registerCommand('user', {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-async function showGeneralHelp() {
+function showHelp() {
     display.log('Usage: stiga-command [options] <command> [params...]');
     display.log('\nOptions:');
     display.log('  --robot              Select/Add robot as target');
@@ -1623,11 +1602,9 @@ async function showGeneralHelp() {
     display.log('  stiga-command <command> help');
 }
 
-// Dedicated examples view (`stiga-command examples`): every command's examples plus the global/watch ones.
 function showExamples() {
     display.log('Examples:');
-    for (const [name, cmd] of Object.entries(commands)) {
-        if (!cmd.examples?.length) continue;
+    for (const [name, cmd] of Object.entries(commands).filter(([, cmd]) => cmd.examples?.length)) {
         display.log(`\n  ${name}:`);
         for (const ex of cmd.examples) display.log(`    ${ex}`);
     }
@@ -1637,6 +1614,8 @@ function showExamples() {
     display.log('    stiga-command --robot --watch 0 --format json --level quiet | jq .');
     display.log('    stiga-command --robot status --format json --level quiet | jq .');
 }
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function main() {
     let options;
@@ -1648,7 +1627,7 @@ async function main() {
     }
 
     if (!options.command && options.watch === undefined) {
-        await showGeneralHelp();
+        showHelp();
         process.exit(1);
     }
 
@@ -1661,20 +1640,20 @@ async function main() {
     if (options.command) {
         try {
             if (options.params.length > 0 && options.params[options.params.length - 1] === 'help') {
-                const c = resolveCommand(options.command);
+                const c = commandResolve(options.command);
                 if (c) {
-                    showCommandHelp(c);
+                    commandShowHelp(c);
                     process.exit(0);
                 }
             }
-            cmd = resolveCommand(options.command);
+            cmd = commandResolve(options.command);
         } catch (e) {
             display.error(e.message);
             process.exit(1);
         }
         if (!cmd) {
             display.error(`Unknown command: ${options.command}`);
-            await showGeneralHelp();
+            showHelp();
             process.exit(1);
         }
         if (options.target !== 'both' && !cmd.targets.includes(options.target)) {
@@ -1691,11 +1670,9 @@ async function main() {
         process.exit(1);
     }
 
-    // CLI --mqtt-broker wins over any value applied from stiga-config.js. Setting the static
-    // here, before any connection is created, means every subsequent MQTT connect uses it.
     if (options.mqttBroker) StigaAPIConnectionMQTT.brokerOverride = options.mqttBroker;
 
-    if (cmd?.skipDefaultSetup) {
+    if (cmd?.skipDefaultSetup)
         try {
             await cmd.execute(options, {
                 target: options.target,
@@ -1709,7 +1686,6 @@ async function main() {
             if (options.debug) display.error(e.stack);
             process.exit(e.exitCode ?? 1);
         }
-    }
 
     try {
         display.debug('Initializing framework...');
@@ -1718,9 +1694,6 @@ async function main() {
         const { device, base } = framework.getDeviceAndBasePair();
         if (!device) throw new Error('No robot found');
         if (options.target !== 'robot' && !base) throw new Error('No base found for robot');
-        // Framework load only reaches the CLOUD (auth + garage) — no device MQTT session is opened here.
-        // The actual robot/base MQTT connect happens lazily in connectToRobot/connectToBase (and is logged
-        // there), so cloud-only commands (zone-settings, notifications, …) never connect to MQTT at all.
         display.verbose(`Cloud: robot/${device.getMacAddress()} '${(await device.getName()).value}'${base ? ', base/' + base.getMacAddress() : ''}`);
 
         const connectors = {
