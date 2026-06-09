@@ -153,40 +153,128 @@ function parseTracksClrSpec(raw) {
     }
     return spec;
 }
-// Cutoff t for "keep the last N contiguous runs": walk newest→oldest, start a new run on each zone change,
-// and return the boundary t just inside the Nth run (−∞ if fewer than N runs exist). Unzoned crumbs belong
-// to the current run, so going-home/transition points inside the window are kept.
-function tracksClrRunsCutoff(crumbs, n) {
+// Cutoff t for "keep the last N contiguous runs" over the columnar store (store.zone[i] is the zone int,
+// -1 = unzoned; store.t[i] the timestamp). Walk newest→oldest, new run on each zone change; return the
+// boundary t just inside the Nth run (−∞ if fewer than N runs exist). Unzoned crumbs belong to the
+// current run, so going-home/transition points inside the window are kept.
+function tracksClrRunsCutoff(store, n) {
     n = Math.max(n, 1);
+    const len = store.t.length;
     let runs = 0,
         cur,
         hasCur = false;
-    for (let i = crumbs.length - 1; i >= 0; i--) {
-        const z = crumbs[i].zone;
-        if (z === undefined || z === null) continue;
+    for (let i = len - 1; i >= 0; i--) {
+        const z = store.zone[i];
+        if (z === -1) continue;
         if (!hasCur || z !== cur) {
             runs++;
-            if (runs > n) return crumbs[i + 1] === undefined ? crumbs[i].t : crumbs[i + 1].t;
+            if (runs > n) return i + 1 < len ? store.t[i + 1] : store.t[i];
             cur = z;
             hasCur = true;
         }
     }
     return Number.NEGATIVE_INFINITY;
 }
-function tracksClrPointsCutoff(crumbs, n) {
+function tracksClrPointsCutoff(store, n) {
     n = Math.max(n, 1);
-    return crumbs.length <= n ? Number.NEGATIVE_INFINITY : crumbs[crumbs.length - n].t;
+    const len = store.t.length;
+    return len <= n ? Number.NEGATIVE_INFINITY : store.t[len - n];
 }
-// Resolve a parsed spec against the crumb list to one cutoff timestamp (keep crumbs with t >= cutoff). The
-// MAX window = the furthest-back term = the MIN of the per-term cutoffs. Empty spec defaults to 1 run.
-function tracksClrCutoff(crumbs, spec, nowMs) {
+// Resolve a parsed spec against the store to one cutoff timestamp (keep crumbs with t >= cutoff). The MAX
+// window = the furthest-back term = the MIN of the per-term cutoffs. Empty spec defaults to 1 run.
+function tracksClrCutoff(store, spec, nowMs) {
     if (spec.off) return Number.NEGATIVE_INFINITY;
     const cutoffs = [];
-    if (spec.runs !== undefined) cutoffs.push(tracksClrRunsCutoff(crumbs, spec.runs));
-    if (spec.points !== undefined) cutoffs.push(tracksClrPointsCutoff(crumbs, spec.points));
+    if (spec.runs !== undefined) cutoffs.push(tracksClrRunsCutoff(store, spec.runs));
+    if (spec.points !== undefined) cutoffs.push(tracksClrPointsCutoff(store, spec.points));
     if (spec.timeMs !== undefined) cutoffs.push(nowMs - spec.timeMs);
-    if (cutoffs.length === 0) cutoffs.push(tracksClrRunsCutoff(crumbs, CRUMB_DEFAULT_INITIAL_ZONES));
+    if (cutoffs.length === 0) cutoffs.push(tracksClrRunsCutoff(store, CRUMB_DEFAULT_INITIAL_ZONES));
     return Math.min(...cutoffs);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Columnar crumb store — parallel arrays instead of an object per crumb. lat/lng are 1e7-scaled integers
+// (~1cm, packed SMIs), t is epoch ms, zone is an int (-1 = unzoned), col is an index into a small colour
+// palette, and err is a plain inline column (null for the ~98% of crumbs with no fault — kept in the list,
+// not a side cache). ~24 B/crumb vs ~180 B for the old form. Used in-memory (server + client), persisted
+// (v3), and — with lat/lng/t delta-encoded — on the wire. err/zone/col are NOT delta'd (low-entropy or
+// categorical); only the three high-entropy numeric columns are, which is the whole gzip win.
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function makeCrumbStore() {
+    return { lat: [], lng: [], t: [], zone: [], col: [], err: [], pal: [] };
+}
+function crumbPalIndex(store, hex) {
+    let k = store.pal.indexOf(hex);
+    if (k === -1) {
+        k = store.pal.length;
+        store.pal.push(hex);
+    }
+    return k;
+}
+// Append one crumb (degrees in, scaled internally). zone: int or -1; err: string or null/undefined.
+function crumbPush(store, latDeg, lngDeg, t, zone, hex, err) {
+    store.lat.push(Math.round(latDeg * 1e7));
+    store.lng.push(Math.round(lngDeg * 1e7));
+    store.t.push(t);
+    store.zone.push(zone);
+    store.col.push(crumbPalIndex(store, hex));
+    // eslint-disable-next-line unicorn/no-null
+    store.err.push(err || null);
+}
+// First index with t >= cutoff (binary search; t ascending). −∞ cutoff → 0.
+function crumbStartIndex(store, cutoff) {
+    if (cutoff === Number.NEGATIVE_INFINITY) return 0;
+    let lo = 0,
+        hi = store.t.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (store.t[mid] < cutoff) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+// Encode crumbs [startIdx..end] as the wire payload: lat/lng/t as first-absolute-then-delta arrays; zone,
+// col and err sent verbatim per crumb. Empty -> { n: 0 }.
+function encodeCrumbsWire(store, startIdx) {
+    const end = store.t.length,
+        n = end - startIdx;
+    if (n <= 0) return { n: 0 };
+    const lat = [],
+        lng = [],
+        t = [],
+        z = [],
+        c = [],
+        err = [];
+    let pl = 0,
+        pn = 0,
+        pt = 0;
+    for (let i = startIdx; i < end; i++) {
+        const la = store.lat[i],
+            lo = store.lng[i],
+            tt = store.t[i],
+            first = i === startIdx;
+        lat.push(first ? la : la - pl);
+        lng.push(first ? lo : lo - pn);
+        t.push(first ? tt : tt - pt);
+        pl = la;
+        pn = lo;
+        pt = tt;
+        z.push(store.zone[i]);
+        c.push(store.col[i]);
+        err.push(store.err[i]);
+    }
+    return { n, pal: store.pal, lat, lng, t, z, c, err };
+}
+// Build a store from a legacy v2 persist payload (array of { lat, lng, t, zone, color, err } objects).
+function crumbStoreFromV2(arr) {
+    const store = makeCrumbStore();
+    for (const c of arr) {
+        if (typeof c.lat !== 'number' || typeof c.lng !== 'number') continue;
+        const zone = c.zone === undefined || c.zone === null ? -1 : Number(c.zone);
+        crumbPush(store, c.lat, c.lng, c.t, Number.isFinite(zone) ? zone : -1, c.color || '#ffffff', c.err);
+    }
+    return store;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -217,7 +305,7 @@ class WebStatusProcessor {
         this.persistDir = typeof options.persist === 'string' && options.persist ? options.persist : PERSIST_DEFAULT_DIR;
         this.persistDays = options.persistDays || PERSIST_DEFAULT_DAYS;
         this.persistanceTimer = undefined;
-        this.crumbs = []; // [{ lat, lng, t (epoch ms), zone, color }]
+        this.crumbs = makeCrumbStore(); // columnar store (see makeCrumbStore)
         this.crumbsDirty = false;
 
         // zone-completion tracking — see ZONE_COMPLETION_* constants for retention/threshold.
@@ -685,28 +773,30 @@ class WebStatusProcessor {
 
     _trackCrumbs(lat, lng) {
         const r = this.state.robot;
-        const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? String(r.mowing.zone) : undefined;
+        const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? Number(r.mowing.zone) : -1;
         const color = this._serverCrumbColor();
-        // For red ("alarm") crumbs we also capture a short text describing what was wrong, so
-        // the client can dedupe and surface a fault trail on demand. Older persisted crumbs
-        // (pre this change) simply have no `err` field — backwards compatible: the client
-        // treats undefined as "no detail" and skips those entries in the alarm panel.
+        // For red ("alarm") crumbs capture a short fault text (stored full-size inline in the err column —
+        // ~2% of crumbs, so cheap). lat/lng are scaled to 1e7 ints (~1cm) inside crumbPush.
         const err = color === '#ea4335' ? [r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || undefined : undefined;
-        // 7 decimal places ≈ 1 cm precision — vastly more than the mower's repeatability —
-        // and saves ~20 bytes per crumb in serialised form vs. the ~17 digits JS produces.
-        this.crumbs.push({ lat: Math.round(lat * 1e7) / 1e7, lng: Math.round(lng * 1e7) / 1e7, t: Date.now(), zone, color, err });
+        crumbPush(this.crumbs, lat, lng, Date.now(), Number.isFinite(zone) ? zone : -1, color, err);
         this._pruneCrumbs();
         this.crumbsDirty = true;
     }
 
+    // Drop crumbs older than the retention window from the front of every column (kept aligned).
     _pruneCrumbs() {
         const cutoff = Date.now() - this.persistDays * 24 * 60 * 60 * 1000;
-        let pruned = false;
-        while (this.crumbs.length > 0 && this.crumbs[0].t < cutoff) {
-            this.crumbs.shift();
-            pruned = true;
-        }
-        return pruned;
+        const s = this.crumbs;
+        let k = 0;
+        while (k < s.t.length && s.t[k] < cutoff) k++;
+        if (k === 0) return false;
+        s.lat.splice(0, k);
+        s.lng.splice(0, k);
+        s.t.splice(0, k);
+        s.zone.splice(0, k);
+        s.col.splice(0, k);
+        s.err.splice(0, k);
+        return true;
     }
 
     _filenameCrumbs() {
@@ -714,13 +804,13 @@ class WebStatusProcessor {
         return path.join(this.persistDir, `stiga-crumbs-${mac}.json.gz`);
     }
 
-    // Persist as gzipped JSON: keeps the format human-inspectable (gunzip + jq) while
-    // shrinking the file ~5–10×. The full file is rewritten each tick — fine at /dev/shm
-    // speeds and crumb cadence; revisit if the cache ever grows to many MB.
+    // Persist as gzipped JSON (v3 columnar): the parallel arrays dumped verbatim. Still gunzip+jq
+    // inspectable. The full file is rewritten each tick — fine at /dev/shm speeds and crumb cadence.
     _saveCrumbs() {
         if (this.crumbsDirty)
             try {
-                const json = JSON.stringify({ version: 2, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, crumbs: this.crumbs });
+                const s = this.crumbs;
+                const json = JSON.stringify({ version: 3, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, pal: s.pal, lat: s.lat, lng: s.lng, t: s.t, zone: s.zone, col: s.col, err: s.err });
                 fs.writeFileSync(this._filenameCrumbs(), zlib.gzipSync(json));
                 this.crumbsDirty = false;
             } catch (e) {
@@ -734,11 +824,15 @@ class WebStatusProcessor {
             try {
                 const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
                 const data = JSON.parse(json);
-                if (Array.isArray(data?.crumbs)) {
-                    this.crumbs = data.crumbs;
+                if (data?.version === 3 && Array.isArray(data.t)) {
+                    this.crumbs = { lat: data.lat || [], lng: data.lng || [], t: data.t || [], zone: data.zone || [], col: data.col || [], err: data.err || [], pal: data.pal || [] };
                     this.crumbsDirty = this._pruneCrumbs();
-                    this.logger(`WebStatus: crumbs load ${this.crumbs.length} from ${file}`);
-                }
+                } else if (Array.isArray(data?.crumbs)) {
+                    this.crumbs = crumbStoreFromV2(data.crumbs); // migrate legacy v2 objects -> columnar
+                    this._pruneCrumbs();
+                    this.crumbsDirty = true; // re-persist as v3 on next save
+                } else return;
+                this.logger(`WebStatus: crumbs load ${this.crumbs.t.length} from ${file}`);
             } catch (e) {
                 this.logger(`WebStatus: crumbs load failed: ${e.message}`);
             }
@@ -881,6 +975,7 @@ class WebStatusProcessor {
         const q = req?.query || {};
         // One-shot hydration window per ?tracksClr (see parseTracksClrSpec). Default = 1 run (current zone).
         const crumbCutoff = tracksClrCutoff(this.crumbs, parseTracksClrSpec(q.tracksClr), Date.now());
+        const crumbStart = crumbStartIndex(this.crumbs, crumbCutoff);
         const config = JSON.stringify({
             baseLat: this.location.latitude,
             baseLng: this.location.longitude,
@@ -907,7 +1002,7 @@ class WebStatusProcessor {
 <div id="schedpanel"></div>
 <script>
 var CONFIG = ${config};
-var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t >= crumbCutoff))};
+var INITIAL_CRUMBS = ${JSON.stringify(encodeCrumbsWire(this.crumbs, crumbStart))};
 var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() })};
 var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
 var CUTTING_MODE_LABELS = ${JSON.stringify(elements.getCuttingModeLabels())};
@@ -1056,7 +1151,7 @@ var mowTargetMarker = null, mowTargetEl = null, mowTargetFlash = null; // yellow
 var state = null, hovered = null, closeTimer = null, userMoved = false, didFit = false;
 var perimetersDrawn = false, perimetersLoading = false;
 var zonePolys = {}, zoneNames = {};
-var tracksOn = true, tracksVisible = true, alarmsHighlighted = false, crumbs = [], crumbSegments = [], lastCrumbTime = null;
+var tracksOn = true, tracksVisible = true, alarmsHighlighted = false, crumbs = makeCrumbStore(), crumbSegments = [], lastCrumbTime = null;
 var notifications = [], dismissed = {};
 // Hovering a notification that carries decoded geometry (e.g. obstacle_proposal -> metadata.obstacles)
 // flashes it on the map — distinct purple, on/off, only while hovered. Generic: any future notification
@@ -1282,13 +1377,18 @@ function parseTracksClrSpec(raw){
   }
   return spec;
 }
+// Columnar crumb store (mirror of the server form): parallel arrays + colour palette + inline err column.
+// lat/lng are 1e7-scaled ints; accessors hand back degrees / hex. zone is an int, -1 = unzoned.
+function makeCrumbStore(){ return { lat:[], lng:[], t:[], zone:[], col:[], err:[], pal:[] }; }
+function crumbN(){ return crumbs.t.length; }
+function crumbPalIdx(hex){ var k = crumbs.pal.indexOf(hex); if(k < 0){ k = crumbs.pal.length; crumbs.pal.push(hex); } return k; }
 // Number of distinct contiguous runs currently in the client crumb buffer (a run = a contiguous one-zone
 // span; revisiting a zone is a new run). This is the live ceiling for the #N filter — it grows over time.
 function availableRuns(){
-  var runs = 0, cur, hasCur = false;
-  for(var i = 0; i < crumbs.length; i++){
-    var z = crumbs[i].zone;
-    if(z === undefined || z === null) continue;
+  var runs = 0, cur, hasCur = false, n = crumbN();
+  for(var i = 0; i < n; i++){
+    var z = crumbs.zone[i];
+    if(z === -1) continue;
     if(!hasCur || z !== cur){ runs++; cur = z; hasCur = true; }
   }
   return Math.max(runs, 1);
@@ -1296,13 +1396,13 @@ function availableRuns(){
 // Cutoff t for "keep last N contiguous runs" (client mirror of tracksClrRunsCutoff) — drives the display decay.
 function runsCutoffClient(n){
   n = Math.max(n, 1);
-  var runs = 0, cur, hasCur = false;
-  for(var i = crumbs.length - 1; i >= 0; i--){
-    var z = crumbs[i].zone;
-    if(z === undefined || z === null) continue;
+  var runs = 0, cur, hasCur = false, len = crumbN();
+  for(var i = len - 1; i >= 0; i--){
+    var z = crumbs.zone[i];
+    if(z === -1) continue;
     if(!hasCur || z !== cur){
       runs++;
-      if(runs > n) return crumbs[i+1] === undefined ? crumbs[i].t : crumbs[i+1].t;
+      if(runs > n) return (i+1 < len) ? crumbs.t[i+1] : crumbs.t[i];
       cur = z; hasCur = true;
     }
   }
@@ -1482,29 +1582,31 @@ function initMap(){
 // INITIAL_CRUMBS; here we replay them into the crumbs[] array and rebuild the matching
 // polyline segments so the live recordCrumb() path naturally extends from the last point.
 function hydrateInitialCrumbs(){
-  if(typeof INITIAL_CRUMBS === 'undefined' || !Array.isArray(INITIAL_CRUMBS) || INITIAL_CRUMBS.length === 0) return;
-  for(var i = 0; i < INITIAL_CRUMBS.length; i++){
-    var c = INITIAL_CRUMBS[i];
-    // err and t may be absent on legacy crumbs (pre-alarm-trail data) — that's fine, they
-    // just won't appear in the dedup'd alarm panel. Fields are additive, schema unchanged.
-    crumbs.push({ lat: c.lat, lng: c.lng, color: c.color, zone: c.zone, err: c.err, t: c.t });
+  var W = (typeof INITIAL_CRUMBS !== 'undefined') ? INITIAL_CRUMBS : null;
+  if(!W || !W.n) return;
+  crumbs.pal = (W.pal || []).slice();
+  var la = 0, lo = 0, tt = 0;
+  for(var i = 0; i < W.n; i++){
+    la = (i === 0) ? W.lat[i] : la + W.lat[i]; // undo lat/lng/t delta encoding
+    lo = (i === 0) ? W.lng[i] : lo + W.lng[i];
+    tt = (i === 0) ? W.t[i]   : tt + W.t[i];
+    crumbs.lat.push(la); crumbs.lng.push(lo); crumbs.t.push(tt);
+    crumbs.zone.push(W.z[i]); crumbs.col.push(W.c[i]); crumbs.err.push(W.err ? W.err[i] : null);
     if(i > 0){
-      var prev = INITIAL_CRUMBS[i-1];
+      var hex = crumbs.pal[W.c[i]];
       var seg = new google.maps.Polyline({
-        path: [{ lat: prev.lat, lng: prev.lng }, { lat: c.lat, lng: c.lng }],
-        strokeColor: c.color, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
+        path: [{ lat: crumbs.lat[i-1]/1e7, lng: crumbs.lng[i-1]/1e7 }, { lat: la/1e7, lng: lo/1e7 }],
+        strokeColor: hex, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
         map: (tracksOn && tracksVisible) ? map : null
       });
-      seg.crumbColor = c.color;
-      seg.crumbZone = c.zone;
-      seg.crumbErr = c.err;
-      seg.crumbT = c.t;
+      seg.crumbColor = hex;
+      seg.crumbT = tt;
       crumbSegments.push(seg);
     }
   }
   applyTracksClr();
   applyAlarmsHighlight();
-  console.log('WebStatus: hydrated ' + crumbs.length + ' cached crumbs');
+  console.log('WebStatus: hydrated ' + crumbN() + ' cached crumbs');
 }
 window.initMap = initMap;
 window.toggleTracks = toggleTracks;
@@ -1747,22 +1849,22 @@ function recordCrumb(){
   if(r.updatedPosition === lastCrumbTime) return;
   lastCrumbTime = r.updatedPosition;
   var color = crumbColor(r);
-  var zone = (r.mowing && !r.docked && r.mowing.zone !== null && r.mowing.zone !== undefined) ? String(r.mowing.zone) : null;
-  // Capture an alarm string for red crumbs so the alarm panel can dedupe by it.
+  var zone = (r.mowing && !r.docked && r.mowing.zone !== null && r.mowing.zone !== undefined) ? Number(r.mowing.zone) : -1;
+  // Capture an alarm string for red crumbs so the alarm panel can dedupe by it (stored full-size inline).
   var err = color === '#ea4335' ? ([r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || null) : null;
-  var prev = crumbs[crumbs.length - 1];
-  var pt = { lat: r.latitude, lng: r.longitude, color: color, zone: zone, err: err, t: Date.now() };
-  crumbs.push(pt);
-  if(prev){
+  var i = crumbN(), hadPrev = i > 0, prevLat, prevLng;
+  if(hadPrev){ prevLat = crumbs.lat[i-1]; prevLng = crumbs.lng[i-1]; }
+  var latInt = Math.round(r.latitude * 1e7), lngInt = Math.round(r.longitude * 1e7), t = Date.now();
+  crumbs.lat.push(latInt); crumbs.lng.push(lngInt); crumbs.t.push(t);
+  crumbs.zone.push(isFinite(zone) ? zone : -1); crumbs.col.push(crumbPalIdx(color)); crumbs.err.push(err);
+  if(hadPrev){
     var seg = new google.maps.Polyline({
-      path: [{ lat: prev.lat, lng: prev.lng }, { lat: pt.lat, lng: pt.lng }],
+      path: [{ lat: prevLat/1e7, lng: prevLng/1e7 }, { lat: latInt/1e7, lng: lngInt/1e7 }],
       strokeColor: color, strokeOpacity: 0.55, strokeWeight: 3, clickable: false, zIndex: 1,
       map: tracksVisible ? map : null
     });
     seg.crumbColor = color;
-    seg.crumbZone = zone;
-    seg.crumbErr = err;
-    seg.crumbT = pt.t;
+    seg.crumbT = t;
     crumbSegments.push(seg);
     if(color === '#ea4335' && alarmsHighlighted){
       styleAlarmSegment(seg, true);
@@ -1810,7 +1912,13 @@ function distanceMetres(lat1, lng1, lat2, lng2){
 function buildAlarmClusters(){
   clearAlarmClusters();
   if(!map) return;
-  var red = crumbs.filter(function(c){ return c.color === '#ea4335' && c.err && c.t; }).slice().sort(function(a, b){ return a.t - b.t; });
+  var red = [], cn = crumbN();
+  for(var ri = 0; ri < cn; ri++){
+    var re = crumbs.err[ri];
+    if(!re) continue; // err is only set on red crumbs, so its presence is sufficient
+    red.push({ lat: crumbs.lat[ri]/1e7, lng: crumbs.lng[ri]/1e7, t: crumbs.t[ri], err: re });
+  }
+  red.sort(function(a, b){ return a.t - b.t; });
   red.forEach(function(c){
     // try to attach to any recent same-error cluster within range, scanning newest-first
     var match;
@@ -1929,7 +2037,7 @@ function setTracksVisible(on){
 }
 function toggleTracksVisible(){ setTracksVisible(!tracksVisible); }
 function clearTracks(){
-  crumbs = [];
+  crumbs = makeCrumbStore();
   lastCrumbTime = null;
   crumbSegments.forEach(function(s){ s.setMap(null); });
   crumbSegments = [];
