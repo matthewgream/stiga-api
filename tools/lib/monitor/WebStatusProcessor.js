@@ -51,7 +51,6 @@
 //                                                        ⌖ status-box button.
 //
 // Status-box content
-//   statusBatterySparkline  on | off                     Show inline battery SVG (default off).
 //   statusTracksControls    on | off                     Show the Tracks line (default on).
 //
 // Commands (active control panel, stacked between status & notify boxes)
@@ -59,7 +58,7 @@
 //                                                        Start/Stop is context-aware (the relevant verb is shown).
 //
 // Example kiosk URL:
-//   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&statusBatterySparkline=off
+//   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&follow=on
 //
 // More knobs will be added here over time; structure new ones the same way (URL_CONFIG entry +
 // a single usage site) so each option stays small and removable.
@@ -963,7 +962,6 @@ html,body{margin:0;height:100%}
 #statusbox h1 .linktag.online{background:#34a853}
 #statusbox h1 .linktag.stale{background:#fbbc04;color:#202124}
 #statusbox h1 .linktag.offline{background:#ea4335}
-#statusbox .spark{margin-top:4px;display:block}
 #statusbox .zonelast{font-size:11px;color:#5f6368;text-align:right;cursor:default;padding:1px 0;font-weight:500}
 #statusbox .zonelast:hover{color:#202124}
 #zonepanel,#schedpanel{position:absolute;z-index:6;background:rgba(255,255,255,.98);border-radius:8px;
@@ -1131,7 +1129,6 @@ function showProposalCrosshair(lat, lng){
   flashRedAt([{ lat: lat, lng: lng }]);
   locateOnMap([{ lat: lat, lng: lng }]);
 }
-var batteryHistory = [], lastBatteryStatusTime = null;
 
 // Hydrate from the snapshot baked into the page so the boxes show real data from first paint
 // instead of "connecting…". The first /api/state poll will replace this with fresher values,
@@ -1147,7 +1144,6 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   tracks                 on|off           (force tracks state; default on)
 //   tracksClr              N|pN|tX|off,…    (trail window = MAX of comma terms: N runs / pN points / tX time / off=all; drives one-shot hydration. #N button is a live runs display filter. default = 1 run)
 //   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default off)
-//   statusBatterySparkline on|off           (default off)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
 var URL_CONFIG = (function(){
@@ -1160,7 +1156,6 @@ var URL_CONFIG = (function(){
     tracks: p.get('tracks'),
     tracksClr: p.get('tracksClr'),
     follow: p.get('follow'),
-    statusBatterySparkline: p.get('statusBatterySparkline'),
     statusTracksControls: p.get('statusTracksControls'),
     commands: p.get('commands'),
     experimental: p.get('experimental')
@@ -1673,7 +1668,6 @@ function refresh(){
         }
       }
       recordCrumb();
-      recordBattery();
       noteSettingsForDirty();
       renderStatusBox();
       renderCommandBox();
@@ -1903,36 +1897,6 @@ function clearTracks(){
   crumbSegments.forEach(function(s){ s.setMap(null); });
   crumbSegments = [];
   renderStatusBox();
-}
-
-// session-only battery history: one sample per fresh STATUS report. Capped at 240 samples
-// so the SVG stays small even after a long session.
-function recordBattery(){
-  if(!state || !state.robot || !state.robot.battery || !state.robot.updatedStatus) return;
-  if(state.robot.updatedStatus === lastBatteryStatusTime) return;
-  lastBatteryStatusTime = state.robot.updatedStatus;
-  batteryHistory.push({ t: new Date(state.robot.updatedStatus).getTime(), v: state.robot.battery.charge });
-  if(batteryHistory.length > 240) batteryHistory.shift();
-}
-
-function batterySparkSVG(){
-  if(batteryHistory.length < 2) return '';
-  var w = 110, h = 22, pad = 2;
-  var t0 = batteryHistory[0].t, tN = batteryHistory[batteryHistory.length - 1].t;
-  var span = Math.max(1, tN - t0);
-  var pts = batteryHistory.map(function(p){
-    return (pad + ((p.t - t0) / span) * (w - 2 * pad)).toFixed(1) + ',' + (pad + (1 - p.v / 100) * (h - 2 * pad)).toFixed(1);
-  }).join(' ');
-  var last = batteryHistory[batteryHistory.length - 1];
-  var first = batteryHistory[0];
-  var trend = last.v - first.v;
-  var color = trend > 0 ? '#34a853' : (trend < 0 ? '#fbbc04' : '#80868b');
-  var lastX = pad + (w - 2 * pad);
-  var lastY = pad + (1 - last.v / 100) * (h - 2 * pad);
-  return '<svg class="spark" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
-    '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round"/>' +
-    '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="1.8" fill="' + color + '"/>' +
-    '</svg>';
 }
 
 // Extract "now" in the schedule's home timezone — Stockholm by default. The robot's schedule
@@ -2462,7 +2426,6 @@ function renderStatusBox(){
   var op = fmt(soften(r.statusMessage || r.statusType));
   if(r.statusText) op += ' · ' + soften(r.statusText);
   var batt = r.battery ? (r.battery.charge + '%') : '-';
-  var spark = URL_CONFIG.statusBatterySparkline === 'on' ? batterySparkSVG() : '';
   var sched = formatScheduleSummary();
   var schedRow = '<div class="row"><span class="k">Schedule</span><span class="v sched-trigger" data-schedpanel="1">' + esc(sched) + '</span></div>';
   var mow = '-';
@@ -2507,7 +2470,7 @@ function renderStatusBox(){
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
-    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + spark + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
+    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
   attachZonePanelHover();
   attachSchedPanelHover();
