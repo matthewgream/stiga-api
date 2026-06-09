@@ -1030,29 +1030,29 @@ function showProposalCircles(obstacles){
     if(typeof o.latitude !== 'number' || typeof o.longitude !== 'number') continue;
     proposalCircles.push(new google.maps.Circle({
       center: { lat: o.latitude, lng: o.longitude }, radius: (typeof o.radius === 'number' && o.radius > 0 ? o.radius : 0.5),
-      fillColor: '#a142f4', fillOpacity: 0.5, strokeColor: '#a142f4', strokeOpacity: 1, strokeWeight: 2,
+      fillColor: '#ffffff', fillOpacity: 0.5, strokeColor: '#ffffff', strokeOpacity: 1, strokeWeight: 2,
       clickable: false, zIndex: 7, map: map
     }));
   }
-  // The purple proposal circle stays fixed at its real size; a large flashing red ring overlaid on each
+  // The white proposal circle stays fixed at its real size; a large flashing red ring overlaid on each
   // (plus the dashed sight line) is what makes the location easy to find.
   var pts = obstacles.filter(function(o){ return typeof o.latitude === 'number' && typeof o.longitude === 'number'; }).map(function(o){ return { lat: o.latitude, lng: o.longitude }; });
   flashRedAt(pts);
   locateOnMap(pts);
 }
-// Single-point notification location (stuck / out-of-perimeter / skip / job-done): a fixed purple
-// crosshair (matching the obstacle-proposal colour) marks the exact spot, while a large flashing red
-// locator ring overlaid on it makes the location easy to find. Teardown via clearProposalCircles().
+// Single-point notification location (stuck / out-of-perimeter / skip / job-done): a fixed white
+// crosshair (matching the obstacle-proposal colour, high-contrast against grass/earth) marks the exact
+// spot, while a large flashing red locator ring overlaid on it makes the location easy to find.
 function showProposalCrosshair(lat, lng){
   clearProposalCircles();
   if(typeof map === 'undefined' || !map) return;
   if(typeof lat !== 'number' || typeof lng !== 'number') return;
   var R = 1; // metres — matches an obstacle proposal of radius 1
   var dLat = R / 111320, dLng = R / (111320 * Math.cos(lat * Math.PI / 180));
-  function arm(path){ return new google.maps.Polyline({ path: path, strokeColor: '#a142f4', strokeOpacity: 1, strokeWeight: 2, clickable: false, zIndex: 8, map: map }); }
+  function arm(path){ return new google.maps.Polyline({ path: path, strokeColor: '#ffffff', strokeOpacity: 1, strokeWeight: 2, clickable: false, zIndex: 8, map: map }); }
   proposalCircles.push(arm([{ lat: lat, lng: lng - dLng }, { lat: lat, lng: lng + dLng }]));
   proposalCircles.push(arm([{ lat: lat - dLat, lng: lng }, { lat: lat + dLat, lng: lng }]));
-  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R * 0.55, fillOpacity: 0, strokeColor: '#a142f4', strokeOpacity: 0.9, strokeWeight: 2, clickable: false, zIndex: 8, map: map }));
+  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R * 0.55, fillOpacity: 0, strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 2, clickable: false, zIndex: 8, map: map }));
   flashRedAt([{ lat: lat, lng: lng }]);
   locateOnMap([{ lat: lat, lng: lng }]);
 }
