@@ -951,7 +951,9 @@ var notifications = [], dismissed = {};
 // Hovering a notification that carries decoded geometry (e.g. obstacle_proposal -> metadata.obstacles)
 // flashes it on the map — distinct purple, on/off, only while hovered. Generic: any future notification
 // metadata exposing {latitude,longitude,radius} circles renders the same way.
-var proposalCircles = [], proposalFlash = null;
+var proposalCircles = [], proposalFlash = null; // fixed purple proposal/crosshair geometry (no longer flashes)
+var leaderLines = [], savedMapView = null; // leader line(s) base->point + the map view to restore when the hover ends
+var flashRedCircles = []; // large red locator ring(s) overlaid on the point — the only flashing element
 var cutZones = [], cutZone = null, lastCmdSig = ''; // zone selector state ([{id,name}] from perimeters)
 var zoneCmd = 'force-cut'; // selected zone-action command (extensible: force-cut, force-border-cut, …)
 // Zone-action commands offered in the command dropdown (extend here to add enable/disable/etc later).
@@ -965,6 +967,60 @@ function clearProposalCircles(){
   if(proposalFlash){ clearInterval(proposalFlash); proposalFlash = null; }
   for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setMap(null);
   proposalCircles = [];
+  for(var k = 0; k < leaderLines.length; k++) leaderLines[k].setMap(null);
+  leaderLines = [];
+  for(var m = 0; m < flashRedCircles.length; m++) flashRedCircles[m].setMap(null);
+  flashRedCircles = [];
+  restoreMapView();
+}
+// Overlay a large flashing red locator ring (same 1.5 m radius / red as the "!" alarm clusters) on each
+// point. This is the ONLY flashing element — the underlying purple proposal/crosshair stays fixed — so a
+// tiny or far-off location is easy to pick out: look for the pulsing red ring. points: [{lat,lng}, ...].
+function flashRedAt(points){
+  if(typeof map === 'undefined' || !map || !points || !points.length) return;
+  for(var i = 0; i < points.length; i++)
+    flashRedCircles.push(new google.maps.Circle({
+      center: points[i], radius: 1.5,
+      fillColor: '#ea4335', fillOpacity: 0.15,
+      strokeColor: '#ea4335', strokeOpacity: 0.95, strokeWeight: 2,
+      clickable: false, zIndex: 9, map: map
+    }));
+  var on = true;
+  proposalFlash = setInterval(function(){ on = !on; for(var j = 0; j < flashRedCircles.length; j++) flashRedCircles[j].setVisible(on); }, 450);
+}
+// Snapshot the current map view once, so we can restore it when the hover ends (after fitBounds moved it).
+function saveMapView(){
+  if(savedMapView || typeof map === 'undefined' || !map) return;
+  savedMapView = { center: map.getCenter(), zoom: map.getZoom() };
+}
+function restoreMapView(){
+  if(!savedMapView || typeof map === 'undefined' || !map) return;
+  map.setCenter(savedMapView.center); map.setZoom(savedMapView.zoom);
+  savedMapView = null;
+}
+// The docking base position — a fixed, always-present anchor for the leader line. null until state arrives.
+function basePos(){
+  if(state && state.base && typeof state.base.latitude === 'number' && typeof state.base.longitude === 'number')
+    return { lat: state.base.latitude, lng: state.base.longitude };
+  return null;
+}
+// Draw a dashed sight line from the base to each target point and fit the map so the base + all points
+// (and thus the whole line) are on-screen, saving the prior view for restore. Makes a tiny faraway flash
+// easy to find: follow the line from the base. Dashes signal it's a temporary, transient guide; the dash
+// weight (2) matches the red locator ring. points: [{lat,lng}, ...].
+function locateOnMap(points){
+  if(typeof map === 'undefined' || !map || !points || !points.length) return;
+  saveMapView();
+  var bp = basePos();
+  var bounds = new google.maps.LatLngBounds();
+  for(var i = 0; i < points.length; i++) bounds.extend(points[i]);
+  if(bp){
+    bounds.extend(bp);
+    var dash = { path: 'M 0,-1 0,1', strokeColor: '#ea4335', strokeOpacity: 0.8, strokeWeight: 2, scale: 2 };
+    for(var j = 0; j < points.length; j++)
+      leaderLines.push(new google.maps.Polyline({ path: [bp, points[j]], strokeOpacity: 0, icons: [{ icon: dash, offset: '0', repeat: '12px' }], clickable: false, zIndex: 6, map: map }));
+  }
+  if(bp || points.length > 1) map.fitBounds(bounds, 80); else map.panTo(points[0]);
 }
 function showProposalCircles(obstacles){
   clearProposalCircles();
@@ -978,24 +1034,27 @@ function showProposalCircles(obstacles){
       clickable: false, zIndex: 7, map: map
     }));
   }
-  var on = true; // flash so it stands out from the static red obstacle circles
-  proposalFlash = setInterval(function(){ on = !on; for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setVisible(on); }, 450);
+  // The purple proposal circle stays fixed at its real size; a large flashing red ring overlaid on each
+  // (plus the dashed sight line) is what makes the location easy to find.
+  var pts = obstacles.filter(function(o){ return typeof o.latitude === 'number' && typeof o.longitude === 'number'; }).map(function(o){ return { lat: o.latitude, lng: o.longitude }; });
+  flashRedAt(pts);
+  locateOnMap(pts);
 }
-// Single-point notification location (stuck / out-of-perimeter / skip / job-done): a flashing red
-// crosshair sized like a radius-1m obstacle proposal, so the on/off change of shape is easy to spot.
-// Reuses proposalCircles/proposalFlash so clearProposalCircles() tears it down the same way.
+// Single-point notification location (stuck / out-of-perimeter / skip / job-done): a fixed purple
+// crosshair (matching the obstacle-proposal colour) marks the exact spot, while a large flashing red
+// locator ring overlaid on it makes the location easy to find. Teardown via clearProposalCircles().
 function showProposalCrosshair(lat, lng){
   clearProposalCircles();
   if(typeof map === 'undefined' || !map) return;
   if(typeof lat !== 'number' || typeof lng !== 'number') return;
   var R = 1; // metres — matches an obstacle proposal of radius 1
   var dLat = R / 111320, dLng = R / (111320 * Math.cos(lat * Math.PI / 180));
-  function arm(path){ return new google.maps.Polyline({ path: path, strokeColor: '#ea4335', strokeOpacity: 1, strokeWeight: 2, clickable: false, zIndex: 8, map: map }); }
+  function arm(path){ return new google.maps.Polyline({ path: path, strokeColor: '#a142f4', strokeOpacity: 1, strokeWeight: 2, clickable: false, zIndex: 8, map: map }); }
   proposalCircles.push(arm([{ lat: lat, lng: lng - dLng }, { lat: lat, lng: lng + dLng }]));
   proposalCircles.push(arm([{ lat: lat - dLat, lng: lng }, { lat: lat + dLat, lng: lng }]));
-  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R * 0.55, fillOpacity: 0, strokeColor: '#ea4335', strokeOpacity: 0.9, strokeWeight: 2, clickable: false, zIndex: 8, map: map }));
-  var on = true;
-  proposalFlash = setInterval(function(){ on = !on; for(var i = 0; i < proposalCircles.length; i++) proposalCircles[i].setVisible(on); }, 450);
+  proposalCircles.push(new google.maps.Circle({ center: { lat: lat, lng: lng }, radius: R * 0.55, fillOpacity: 0, strokeColor: '#a142f4', strokeOpacity: 0.9, strokeWeight: 2, clickable: false, zIndex: 8, map: map }));
+  flashRedAt([{ lat: lat, lng: lng }]);
+  locateOnMap([{ lat: lat, lng: lng }]);
 }
 var batteryHistory = [], lastBatteryStatusTime = null;
 
