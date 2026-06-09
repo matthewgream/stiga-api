@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/stiga-api/tools/stiga-monitor.js --monitor --capture --webstatus=3001/password --persist --persist-days=24 --background
+ExecStart=/opt/stiga-api/tools/stiga-monitor.js --monitor --capture --webstatus=3001/password --persist --persist-days=28 --background
 Restart=on-failure
 RestartSec=5s
 
