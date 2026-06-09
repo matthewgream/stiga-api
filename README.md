@@ -2,6 +2,13 @@
 
 > An unofficial, reverse-engineered API for the **Stiga A-series robot mowers**, developed and tested against a Stiga A1500. Not officially provided nor supported by Stiga. Mostly to MONITOR and ANALYSE, rather than CONTROL.
 
+<table>
+<tr>
+<td width="50%"><video src="assets/web-recording-20260609.mp4" controls width="100%"></video></td>
+<td width="50%"><video src="assets/cli-recording-20260609.mp4" controls width="100%"></video></td>
+</tr>
+</table>
+
 ---
 
 ## Start
