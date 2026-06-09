@@ -18,12 +18,14 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
-    "canvas": "^3.1.2",
     "blessed": "^0.1.81",
+    "canvas": "^3.1.2",
+    "clean-css": "^5.3.3",
     "express": "^5.1.0",
     "googleapis": "^150.0.1",
     "mcc-mnc-list": "^1.1.11",
     "mqtt": "^5.13.1",
-    "protobufjs": "^7.5.3"
+    "protobufjs": "^7.5.3",
+    "terser": "^5.48.0"
   }
 }

@@ -69,6 +69,18 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const express = require('express');
 
+// Optional minifiers — present in production, gracefully absent in lean installs (we then serve the assets
+// unminified; gzip still applies). minifyStaticAssets() does a one-off pass over PAGE_CSS/CLIENT_JS at startup.
+function _optionalRequire(name) {
+    try {
+        return require(name);
+    } catch {
+        return undefined;
+    }
+}
+const _terser = _optionalRequire('terser'),
+    _CleanCSS = _optionalRequire('clean-css');
+
 const { StigaAPIUtilities, StigaAPIElements: elements, StigaAPIAuthentication, StigaAPIConnectionServer, StigaAPIGarage, StigaAPIPerimeters, StigaAPINotifications } = require('../../../api/StigaAPI');
 const { protobufDecode, stringToBytes, formatNetworkId } = StigaAPIUtilities;
 
@@ -261,8 +273,33 @@ class WebStatusProcessor {
     async start() {
         this.connection.on('message', (topic, message) => this._handleMessage(topic, message));
 
+        await minifyStaticAssets(this.logger); // one-off; serves verbatim if minifiers absent
         const app = express();
         app.disable('x-powered-by');
+        // gzip responses for clients that accept it — the page's INITIAL_CRUMBS blob, CLIENT_JS and CSS are
+        // highly repetitive and compress ~10x. Hand-rolled on zlib (already a dep) to avoid pulling in the
+        // compression middleware. Wraps res.send so res.json (which calls send) is covered too; only touches
+        // string/Buffer bodies past a small threshold and never double-encodes.
+        app.use((req, res, next) => {
+            if (!/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+                next();
+                return;
+            }
+            const rawSend = res.send.bind(res);
+            res.send = (body) => {
+                if ((typeof body === 'string' || Buffer.isBuffer(body)) && !res.getHeader('Content-Encoding')) {
+                    const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+                    if (buf.length >= 1024) {
+                        res.setHeader('Content-Encoding', 'gzip');
+                        res.setHeader('Vary', 'Accept-Encoding');
+                        res.removeHeader('Content-Length');
+                        return rawSend(zlib.gzipSync(buf));
+                    }
+                }
+                return rawSend(body);
+            };
+            next();
+        });
         if (this.basicAuth) app.use((req, res, next) => this._basicAuthMiddleware(req, res, next));
         app.get('/', (req, res) => res.type('html').send(this._renderPage(req)));
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() }));
@@ -858,7 +895,7 @@ class WebStatusProcessor {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stiga Robot — Live Status</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect y='21' width='32' height='11' fill='%23137333'/><path fill='%2334a853' d='M2 21 L3 11 L4 21 Z M6 21 L7 13 L8 21 Z M10 21 L11 10 L12 21 Z M13 21 L14 14 L15 21 Z M17 21 L18 9 L19 21 Z M21 21 L22 12 L23 21 Z M25 21 L26 11 L27 21 Z M29 21 L30 13 L31 21 Z'/></svg>">
-<style>${PAGE_CSS}</style>
+<style>${PAGE_CSS_OUT}</style>
 </head>
 <body>
 <div id="map"></div>
@@ -875,7 +912,7 @@ var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...t
 var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
 var CUTTING_MODE_LABELS = ${JSON.stringify(elements.getCuttingModeLabels())};
 </script>
-<script>${CLIENT_JS}</script>
+<script>${CLIENT_JS_OUT}</script>
 <script async src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(this.apiKey)}&loading=async&callback=initMap&libraries=marker"></script>
 </body>
 </html>`;
@@ -2632,6 +2669,45 @@ function baseInfo(){
   return '<div class="infobox"><h2>Base station</h2>' + table(rows) + '<div class="muted">status ' + ago(b.updatedStatus) + '</div></div>';
 }
 `;
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// One-off startup minification of the two static assets. Served versions default to the originals and are
+// replaced in place when terser/clean-css are available — so the page is identical either way, just smaller.
+// terser runs with mangle.toplevel:false because CLIENT_JS exposes global functions by name (initMap for the
+// Maps callback, the onclick="..." handlers); renaming them would break the page. clean-css level 1 is safe.
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+let PAGE_CSS_OUT = PAGE_CSS,
+    CLIENT_JS_OUT = CLIENT_JS,
+    _assetsMinified = false;
+async function minifyStaticAssets(logger) {
+    if (_assetsMinified) return; // idempotent — only the first webstatus instance pays the cost
+    _assetsMinified = true;
+    const log = logger || (() => {});
+    if (_CleanCSS) {
+        try {
+            const out = new _CleanCSS({ level: 1, returnPromise: false, rebase: false }).minify(PAGE_CSS);
+            if (out.styles && out.errors.length === 0) PAGE_CSS_OUT = out.styles;
+            else if (out.errors.length > 0) log('WebStatus: CSS minify errors: ' + out.errors.join('; '));
+        } catch (e) {
+            log('WebStatus: CSS minify failed: ' + e.message);
+        }
+    }
+    if (_terser) {
+        try {
+            const out = await _terser.minify(CLIENT_JS, {
+                compress: { drop_debugger: true, passes: 2 },
+                mangle: { toplevel: false },
+                format: { comments: false },
+            });
+            if (out.code) CLIENT_JS_OUT = out.code;
+        } catch (e) {
+            log('WebStatus: JS minify failed: ' + e.message);
+        }
+    }
+    const on = _terser || _CleanCSS;
+    log(`WebStatus: assets ${on ? 'minified' : 'served verbatim (terser/clean-css absent)'} — css ${PAGE_CSS.length}→${PAGE_CSS_OUT.length}, js ${CLIENT_JS.length}→${CLIENT_JS_OUT.length}`);
+}
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
