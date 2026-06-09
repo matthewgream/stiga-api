@@ -34,7 +34,9 @@ let globalOptions = {
 };
 
 const display = {
-    log: (...args) => globalOptions.level >= LEVELS.normal && console.log(...args),
+    // progress/help text. In json mode it routes to stderr so stdout stays pure JSON for piping (| jq);
+    // in text/none mode it stays on stdout. Suppressed below 'normal' level (e.g. --level quiet) either way.
+    log: (...args) => globalOptions.level >= LEVELS.normal && (globalOptions.format === 'json' ? console.error(...args) : console.log(...args)),
     error: (...args) => console.error(...args),
     debug: (...args) => globalOptions.debug && console.error('[DEBUG]', ...args),
     verbose: (...args) => (globalOptions.level >= LEVELS.verbose || globalOptions.debug) && console.error('[VERBOSE]', ...args),
