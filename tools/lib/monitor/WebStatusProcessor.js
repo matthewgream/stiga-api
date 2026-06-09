@@ -29,17 +29,21 @@
 //
 // Tracks (breadcrumb trail)
 //   tracks                  on | off                     Force initial tracks state (default on).
-//   tracksClr               0 | 1 | 2 | 3 | off          Decay limit: keep at most max(N,1) most-recent
-//                                                        distinct mowing zones. 0 = kill prior on zone change,
-//                                                        'off' = keep all (no decay). Default 0.
-//                                                        Cycle button in the status box steps through
-//                                                        0 → 1 → 2 → 3 → ∞ → 0.
-//                                                        Also drives the one-shot history baked into the
-//                                                        page at connect time: by default the server sends
-//                                                        crumbs from the CURRENT zone only (matching the
-//                                                        official app's behaviour); ?tracksClr=N extends to
-//                                                        N zones; ?tracksClr=off sends the entire cache.
-//                                                        Server-side caching is always on; --persist on
+//   tracksClr               N | pN | tX | off | combos    Trail window. Comma-separated terms; the window is
+//                                                        the MAX (furthest-back) of all terms:
+//                                                          N    last N contiguous mowing runs (a run = a
+//                                                               contiguous one-zone span; revisiting a zone
+//                                                               is a new run). Default 1 (current run).
+//                                                          pN   last N crumb points (k = ×1000: p20k).
+//                                                          tX   last X wall-clock time (s|m|h|d: t24h, t7d).
+//                                                          off|inf|∞  entire cache.
+//                                                        e.g. ?tracksClr=16,p20k = whichever reaches further
+//                                                        back, 16 runs or 20000 points. Governs the one-shot
+//                                                        history baked into the page at connect time (change
+//                                                        needs a reload). The #N status-box button is a live
+//                                                        DISPLAY filter over what's loaded, in runs, cycling
+//                                                        1 → 2 → … → R → ∞ (R = runs currently buffered, grows
+//                                                        over time). Server caching is always on; --persist on
 //                                                        stiga-monitor opts into cross-restart persistence
 //                                                        (default off, 14 days).
 //
@@ -52,7 +56,7 @@
 //                                                        Start/Stop is context-aware (the relevant verb is shown).
 //
 // Example kiosk URL:
-//   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=2&statusBatterySparkline=off
+//   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&statusBatterySparkline=off
 //
 // More knobs will be added here over time; structure new ones the same way (URL_CONFIG entry +
 // a single usage site) so each option stays small and removable.
@@ -84,6 +88,92 @@ const ZONE_COMPLETIONS_PER_ZONE_KEEP = 10; // server retains up to N per zone (o
 const ZONE_COMPLETIONS_PER_ZONE_SERVE = 5; // up to N per zone served to the client
 const ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS = 90; // longer retention than crumbs — they're tiny
 const ZONE_COMPLETION_DEDUPE_WINDOW_MS = 60 * 60 * 1000; // merge same-zone records within 1h: treat as one session
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// tracksClr — modular trail-window spec. A comma-separated list of window terms; the effective window is the
+// MAX (furthest-back / most inclusive) of all terms, so combining terms widens rather than narrows. Terms:
+//   N         last N contiguous mowing runs. A "run" is a contiguous span of one zone; revisiting a zone
+//             starts a NEW run, so this tracks recent activity instead of distinct zone IDs (the old model,
+//             which jumped straight to "everything" once you asked for more IDs than the garden has).
+//   pN        last N crumb points          (k suffix ×1000: p20k = 20000)
+//   tX        last X of wall-clock time     (s|m|h|d: t90s, t24h, t7d)
+//   off|inf|∞ everything (whole cache)
+// e.g. "16,p20k" = whichever reaches further back, 16 runs or 20000 points. This parser/cutoff runs
+// server-side (the one-shot hydration window) and is mirrored client-side (the #N display filter). The
+// empty/default spec is 1 run (the current zone only).
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function _tracksClrParseCount(s) {
+    const m = /^(\d+(?:\.\d+)?)(k)?$/i.exec(s);
+    if (!m) return undefined;
+    return Math.round(Number.parseFloat(m[1]) * (m[2] ? 1000 : 1));
+}
+const _TRACKS_CLR_UNIT_MS = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+function _tracksClrParseDuration(s) {
+    const m = /^(\d+(?:\.\d+)?)([dhms])?$/i.exec(s);
+    if (!m) return undefined;
+    return Math.round(Number.parseFloat(m[1]) * _TRACKS_CLR_UNIT_MS[(m[2] || 's').toLowerCase()]);
+}
+function parseTracksClrSpec(raw) {
+    const spec = { off: false, runs: undefined, points: undefined, timeMs: undefined };
+    if (raw === undefined) return spec;
+    for (const tok of String(raw).split(',')) {
+        const t = tok.trim().toLowerCase();
+        if (t === '') continue;
+        if (t === 'off' || t === 'inf' || t === '∞') {
+            spec.off = true;
+            continue;
+        }
+        if (t[0] === 'p') {
+            const v = _tracksClrParseCount(t.slice(1));
+            if (v !== undefined) spec.points = spec.points === undefined ? v : Math.max(spec.points, v);
+            continue;
+        }
+        if (t[0] === 't') {
+            const v = _tracksClrParseDuration(t.slice(1));
+            if (v !== undefined) spec.timeMs = spec.timeMs === undefined ? v : Math.max(spec.timeMs, v);
+            continue;
+        }
+        const v = Number.parseInt(t, 10);
+        if (Number.isFinite(v) && v >= 0) spec.runs = spec.runs === undefined ? v : Math.max(spec.runs, v);
+    }
+    return spec;
+}
+// Cutoff t for "keep the last N contiguous runs": walk newest→oldest, start a new run on each zone change,
+// and return the boundary t just inside the Nth run (−∞ if fewer than N runs exist). Unzoned crumbs belong
+// to the current run, so going-home/transition points inside the window are kept.
+function tracksClrRunsCutoff(crumbs, n) {
+    n = Math.max(n, 1);
+    let runs = 0,
+        cur,
+        hasCur = false;
+    for (let i = crumbs.length - 1; i >= 0; i--) {
+        const z = crumbs[i].zone;
+        if (z === undefined || z === null) continue;
+        if (!hasCur || z !== cur) {
+            runs++;
+            if (runs > n) return crumbs[i + 1] === undefined ? crumbs[i].t : crumbs[i + 1].t;
+            cur = z;
+            hasCur = true;
+        }
+    }
+    return Number.NEGATIVE_INFINITY;
+}
+function tracksClrPointsCutoff(crumbs, n) {
+    n = Math.max(n, 1);
+    return crumbs.length <= n ? Number.NEGATIVE_INFINITY : crumbs[crumbs.length - n].t;
+}
+// Resolve a parsed spec against the crumb list to one cutoff timestamp (keep crumbs with t >= cutoff). The
+// MAX window = the furthest-back term = the MIN of the per-term cutoffs. Empty spec defaults to 1 run.
+function tracksClrCutoff(crumbs, spec, nowMs) {
+    if (spec.off) return Number.NEGATIVE_INFINITY;
+    const cutoffs = [];
+    if (spec.runs !== undefined) cutoffs.push(tracksClrRunsCutoff(crumbs, spec.runs));
+    if (spec.points !== undefined) cutoffs.push(tracksClrPointsCutoff(crumbs, spec.points));
+    if (spec.timeMs !== undefined) cutoffs.push(nowMs - spec.timeMs);
+    if (cutoffs.length === 0) cutoffs.push(tracksClrRunsCutoff(crumbs, CRUMB_DEFAULT_INITIAL_ZONES));
+    return Math.min(...cutoffs);
+}
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -750,30 +840,8 @@ class WebStatusProcessor {
     // the last cached point.
     _renderPage(req) {
         const q = req?.query || {};
-        const tcRaw = q.tracksClr;
-        const tcOff = tcRaw === 'off' || tcRaw === 'inf' || tcRaw === '∞';
-        let maxZones = CRUMB_DEFAULT_INITIAL_ZONES;
-        if (tcRaw !== undefined && tcRaw !== null && tcRaw !== '' && !tcOff) {
-            const tc = Number.parseInt(tcRaw, 10);
-            if (Number.isFinite(tc) && tc >= 0) maxZones = Math.max(tc, 1);
-        }
-        // walk newest-first counting distinct zones; stop at the boundary into the (maxZones+1)th
-        // zone. Unzoned crumbs (going-home, transitions) within that window are included.
-        let zoneCutoff = Number.NEGATIVE_INFINITY;
-        if (!tcOff) {
-            const seenZones = new Set();
-            for (let i = this.crumbs.length - 1; i >= 0; i--) {
-                const z = this.crumbs[i].zone;
-                if (z === undefined || z === null) continue;
-                if (!seenZones.has(z)) {
-                    if (seenZones.size >= maxZones) {
-                        zoneCutoff = this.crumbs[i].t;
-                        break;
-                    }
-                    seenZones.add(z);
-                }
-            }
-        }
+        // One-shot hydration window per ?tracksClr (see parseTracksClrSpec). Default = 1 run (current zone).
+        const crumbCutoff = tracksClrCutoff(this.crumbs, parseTracksClrSpec(q.tracksClr), Date.now());
         const config = JSON.stringify({
             baseLat: this.location.latitude,
             baseLng: this.location.longitude,
@@ -800,7 +868,7 @@ class WebStatusProcessor {
 <div id="schedpanel"></div>
 <script>
 var CONFIG = ${config};
-var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t > zoneCutoff))};
+var INITIAL_CRUMBS = ${JSON.stringify(this.crumbs.filter((c) => c.t >= crumbCutoff))};
 var INITIAL_STATE = ${JSON.stringify({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() })};
 var INITIAL_NOTIFICATIONS = ${JSON.stringify(this.notifications)};
 var CUTTING_MODE_LABELS = ${JSON.stringify(elements.getCuttingModeLabels())};
@@ -1070,7 +1138,7 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   mapPosition            lat,lon,zoom     (locks map view)
 //   mapControls            on|off           (off = disableDefaultUI)
 //   tracks                 on|off           (force tracks state; default on)
-//   tracksClr              0|1|2|3|off      (decay limit; 0=kill prior on transition, off=keep all; also drives one-shot history window — default = current zone only)
+//   tracksClr              N|pN|tX|off,…    (trail window = MAX of comma terms: N runs / pN points / tX time / off=all; drives one-shot hydration. #N button is a live runs display filter. default = 1 run)
 //   statusBatterySparkline on|off           (default off)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
@@ -1143,16 +1211,71 @@ function computeZonesBoundsCenter(zones){
 var MAP_POSITION = parseMapPositionSpec(URL_CONFIG.mapPosition);
 var ZONES_CENTRE = null; // populated when perimeters arrive; used as the offset reference
 
-// tracksClr cycle: 0 -> 1 -> 2 -> 3 -> off (Infinity) -> 0. The value is "at most N most-recent
-// distinct zones kept"; N=0 means kill prior tracks on zone change (1 zone visible).
-var TRACKS_CLR_CYCLE = [0, 1, 2, 3, Number.POSITIVE_INFINITY];
-var tracksClr = 0;
+// tracksClr — modular trail window (mirror of the server-side parser; same syntax). The #N status button is
+// a simple client-side DISPLAY filter over the crumbs already loaded: it keeps the last N contiguous runs,
+// or ∞ = all. tracksClr holds that filter as a run count (or Infinity). Server hydration already trimmed the
+// buffer to the URL window; this only shrinks what's drawn, and its ceiling grows as runs accumulate live.
+function tcParseCount(s){
+  var m = /^(\\d+(?:\\.\\d+)?)(k)?$/i.exec(s);
+  return m ? Math.round(Number.parseFloat(m[1]) * (m[2] ? 1000 : 1)) : null;
+}
+function tcParseDuration(s){
+  var m = /^(\\d+(?:\\.\\d+)?)(s|m|h|d)?$/i.exec(s);
+  if(!m) return null;
+  var unit = (m[2] || 's').toLowerCase();
+  var mult = unit === 'd' ? 86400000 : unit === 'h' ? 3600000 : unit === 'm' ? 60000 : 1000;
+  return Math.round(Number.parseFloat(m[1]) * mult);
+}
+function parseTracksClrSpec(raw){
+  var spec = { off: false, runs: null, points: null, timeMs: null };
+  if(raw === null || raw === undefined) return spec;
+  var toks = String(raw).split(',');
+  for(var i = 0; i < toks.length; i++){
+    var t = toks[i].trim().toLowerCase();
+    if(t === '') continue;
+    if(t === 'off' || t === 'inf' || t === '∞'){ spec.off = true; continue; }
+    if(t.charAt(0) === 'p'){ var pv = tcParseCount(t.slice(1)); if(pv !== null) spec.points = spec.points === null ? pv : Math.max(spec.points, pv); continue; }
+    if(t.charAt(0) === 't'){ var tv = tcParseDuration(t.slice(1)); if(tv !== null) spec.timeMs = spec.timeMs === null ? tv : Math.max(spec.timeMs, tv); continue; }
+    var rv = Number.parseInt(t, 10);
+    if(!Number.isNaN(rv) && rv >= 0) spec.runs = spec.runs === null ? rv : Math.max(spec.runs, rv);
+  }
+  return spec;
+}
+// Number of distinct contiguous runs currently in the client crumb buffer (a run = a contiguous one-zone
+// span; revisiting a zone is a new run). This is the live ceiling for the #N filter — it grows over time.
+function availableRuns(){
+  var runs = 0, cur, hasCur = false;
+  for(var i = 0; i < crumbs.length; i++){
+    var z = crumbs[i].zone;
+    if(z === undefined || z === null) continue;
+    if(!hasCur || z !== cur){ runs++; cur = z; hasCur = true; }
+  }
+  return Math.max(runs, 1);
+}
+// Cutoff t for "keep last N contiguous runs" (client mirror of tracksClrRunsCutoff) — drives the display decay.
+function runsCutoffClient(n){
+  n = Math.max(n, 1);
+  var runs = 0, cur, hasCur = false;
+  for(var i = crumbs.length - 1; i >= 0; i--){
+    var z = crumbs[i].zone;
+    if(z === undefined || z === null) continue;
+    if(!hasCur || z !== cur){
+      runs++;
+      if(runs > n) return crumbs[i+1] === undefined ? crumbs[i].t : crumbs[i+1].t;
+      cur = z; hasCur = true;
+    }
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+// Initial display filter (count of contiguous runs, or Infinity = all): a bare run-count spec selects that
+// many; off/points/time/combos show everything hydrated (dial down with #N); no param = 1 (current run).
+var tracksClr = 1;
 (function(){
-  var v = URL_CONFIG.tracksClr;
-  if(v === null || v === undefined) return;
-  if(v === 'off' || v === 'inf' || v === '∞') { tracksClr = Number.POSITIVE_INFINITY; return; }
-  var n = Number.parseInt(v, 10);
-  if(!Number.isNaN(n) && n >= 0) tracksClr = n;
+  if(URL_CONFIG.tracksClr === null || URL_CONFIG.tracksClr === undefined) return;
+  var spec = parseTracksClrSpec(URL_CONFIG.tracksClr);
+  if(spec.off || spec.points !== null || spec.timeMs !== null) { tracksClr = Number.POSITIVE_INFINITY; return; }
+  if(spec.runs !== null) tracksClr = Math.max(spec.runs, 1);
+  else tracksClr = Number.POSITIVE_INFINITY;
 })();
 if(URL_CONFIG.tracks === 'on') tracksOn = true;
 else if(URL_CONFIG.tracks === 'off') tracksOn = false;
@@ -1605,30 +1728,10 @@ function recordCrumb(){
   applyTracksClr();
 }
 
-// Enforce the decay limit: keep at most max(tracksClr,1) most-recent distinct zones.
-// Segments tagged with a zone outside the keep-set are removed from the map and dropped.
-// Unzoned segments (recorded while the robot wasn't mowing) are always kept.
-function applyTracksClr(){
-  if(tracksClr === Number.POSITIVE_INFINITY) return;
-  var maxZones = Math.max(tracksClr, 1);
-  var seen = {}, zoneOrder = [];
-  for(var i = crumbs.length - 1; i >= 0; i--){
-    var z = crumbs[i].zone;
-    if(!z) continue;
-    if(seen[z]) continue;
-    seen[z] = true;
-    zoneOrder.push(z);
-    if(zoneOrder.length >= maxZones) break;
-  }
-  var keepSet = {};
-  zoneOrder.forEach(function(z){ keepSet[z] = true; });
-  crumbSegments = crumbSegments.filter(function(s){
-    if(!s.crumbZone) return true;
-    if(keepSet[s.crumbZone]) return true;
-    s.setMap(null);
-    return false;
-  });
-}
+// The #N display filter is just a visibility condition layered onto the normal show/hide logic, so it can
+// widen as well as narrow without ever destroying segments (the crumb data is retained). applyTracksMap()
+// owns the actual setMap; this is the re-apply hook called after the filter or the crumb set changes.
+function applyTracksClr(){ applyTracksMap(); }
 
 // cycle the decay limit through the canonical values; called from the [#N] button in the
 // status box. Re-applies immediately so segments drop or remain as appropriate.
@@ -1735,9 +1838,13 @@ function setAlarmsHighlight(on){
 function toggleAlarmsHighlight(){ setAlarmsHighlight(!alarmsHighlighted); }
 window.toggleAlarmsHighlight = toggleAlarmsHighlight;
 
+// #N button: cycle the display filter 1 -> 2 -> ... -> R -> ∞ -> 1, where R = runs currently in the buffer.
+// R is recomputed each click, so the numeric ceiling grows as new runs accumulate while the page is open.
 function cycleTracksClr(){
-  var idx = TRACKS_CLR_CYCLE.indexOf(tracksClr);
-  tracksClr = TRACKS_CLR_CYCLE[(idx + 1) % TRACKS_CLR_CYCLE.length];
+  var ceiling = availableRuns();
+  if(tracksClr === Number.POSITIVE_INFINITY) tracksClr = 1;
+  else if(tracksClr >= ceiling) tracksClr = Number.POSITIVE_INFINITY;
+  else tracksClr = tracksClr + 1;
   applyTracksClr();
   renderStatusBox();
 }
@@ -1747,7 +1854,12 @@ window.cycleTracksClr = cycleTracksClr;
 // crumb data); recording continues regardless.
 function applyTracksMap(){
   var show = tracksOn && tracksVisible;
-  crumbSegments.forEach(function(s){ s.setMap(show ? map : null); });
+  // run-window filter: hide (don't destroy) segments older than the last tracksClr contiguous runs
+  var cutoff = (tracksClr === Number.POSITIVE_INFINITY) ? Number.NEGATIVE_INFINITY : runsCutoffClient(tracksClr);
+  crumbSegments.forEach(function(s){
+    var inWindow = cutoff === Number.NEGATIVE_INFINITY || typeof s.crumbT !== 'number' || s.crumbT >= cutoff;
+    s.setMap(show && inWindow ? map : null);
+  });
 }
 function setTracks(on){
   if(tracksOn === on) return;
@@ -2366,7 +2478,7 @@ function renderStatusBox(){
       '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
       visBtn +
       '<span class="btn" onclick="clearTracks()">CLR</span>' +
-      '<span class="btn" onclick="cycleTracksClr()" title="decay limit (distinct zones to keep)">#' + clrLabel + '</span>' +
+      '<span class="btn" onclick="cycleTracksClr()" title="trail filter: how many recent mowing runs to show (∞ = all loaded)">#' + clrLabel + '</span>' +
       alarmBtn + notifBtn + settingsBtn +
     '</div>';
   }
