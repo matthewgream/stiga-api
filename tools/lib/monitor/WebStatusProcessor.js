@@ -46,6 +46,9 @@
 //                                                        over time). Server caching is always on; --persist on
 //                                                        stiga-monitor opts into cross-restart persistence
 //                                                        (default off, 14 days).
+//   follow                  on | off                     Keep the robot centred: pan the map to it on each
+//                                                        position update (default off). Toggle live with the
+//                                                        ⌖ status-box button.
 //
 // Status-box content
 //   statusBatterySparkline  on | off                     Show inline battery SVG (default off).
@@ -911,7 +914,11 @@ html,body{margin:0;height:100%}
 .infobox td.k{color:#80868b;padding-right:12px;white-space:nowrap}
 .infobox .muted{color:#9aa0a6;margin-top:4px}
 #statusbox .tracks{margin-top:6px;font-size:11px;color:#80868b}
-#statusbox .btn{cursor:pointer;border:1px solid #c4c7c5;border-radius:3px;padding:0 6px;margin-left:4px;color:#202124;user-select:none}
+#statusbox .btn{display:inline-block;vertical-align:middle;cursor:pointer;border:1px solid #c4c7c5;border-radius:3px;padding:0 6px;margin-left:4px;color:#202124;user-select:none}
+/* tracks cluster: a tight segmented box — child buttons drop their own border/radius/margin and share thin dividers */
+#statusbox .btngroup{display:inline-flex;vertical-align:middle;margin-left:4px;border:1px solid #c4c7c5;border-radius:3px;overflow:hidden}
+#statusbox .btngroup .btn{margin-left:0;border:0;border-left:1px solid #c4c7c5;border-radius:0}
+#statusbox .btngroup .btn:first-child{border-left:0}
 #statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
 #statusbox .btn.dirty{background:#ea4335;border-color:#ea4335;color:#fff;animation:wheelDirtyPulse 1.3s ease-in-out infinite}
 @keyframes wheelDirtyPulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -1139,6 +1146,7 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   mapControls            on|off           (off = disableDefaultUI)
 //   tracks                 on|off           (force tracks state; default on)
 //   tracksClr              N|pN|tX|off,…    (trail window = MAX of comma terms: N runs / pN points / tX time / off=all; drives one-shot hydration. #N button is a live runs display filter. default = 1 run)
+//   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default off)
 //   statusBatterySparkline on|off           (default off)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
@@ -1151,6 +1159,7 @@ var URL_CONFIG = (function(){
     mapControls: p.get('mapControls'),
     tracks: p.get('tracks'),
     tracksClr: p.get('tracksClr'),
+    follow: p.get('follow'),
     statusBatterySparkline: p.get('statusBatterySparkline'),
     statusTracksControls: p.get('statusTracksControls'),
     commands: p.get('commands'),
@@ -1279,6 +1288,9 @@ var tracksClr = 1;
 })();
 if(URL_CONFIG.tracks === 'on') tracksOn = true;
 else if(URL_CONFIG.tracks === 'off') tracksOn = false;
+// follow: keep the robot centred — the map pans to the robot on each position update. URL ?follow=on
+// presets it; the ⌖ status-box button toggles it live.
+var followMode = URL_CONFIG.follow === 'on';
 
 function applyBoxPosition(id, defaultClass, override){
   var el = document.getElementById(id);
@@ -1650,7 +1662,9 @@ function refresh(){
         }
         // the mowing strategy's cut position is no longer drawn on the map; it flashes only on hover of
         // the status-box strategy line (attachMowFlashHover -> showProposalCircles).
-        if(!didFit && !userMoved){
+        if(followMode){
+          map.panTo(pos); // keep the robot centred (zoom unchanged); takes precedence over the one-time fit
+        } else if(!didFit && !userMoved){
           didFit = true;
           var b = new google.maps.LatLngBounds();
           b.extend({ lat: CONFIG.baseLat, lng: CONFIG.baseLng });
@@ -1849,6 +1863,14 @@ function cycleTracksClr(){
   renderStatusBox();
 }
 window.cycleTracksClr = cycleTracksClr;
+// follow toggle: when on, refresh() pans the map to the robot each update. Turning it on recentres now.
+function toggleFollow(){
+  followMode = !followMode;
+  if(followMode && state && state.robot && typeof state.robot.latitude === 'number' && typeof state.robot.longitude === 'number')
+    map.panTo({ lat: state.robot.latitude, lng: state.robot.longitude });
+  renderStatusBox();
+}
+window.toggleFollow = toggleFollow;
 // Segments are on the map only when BOTH recording is on AND visibility is on. Visibility is a
 // purely UI concern (lets the user peek under tracks at zones/paths/obstacles without losing the
 // crumb data); recording continues regardless.
@@ -2469,18 +2491,19 @@ function renderStatusBox(){
   var trk = '';
   if(URL_CONFIG.statusTracksControls !== 'off'){
     var clrLabel = tracksClr === Number.POSITIVE_INFINITY ? '∞' : String(tracksClr);
+    // spaced functional buttons (follow, refresh, errors, notifications, settings)
+    var followBtn = '<span class="btn' + (followMode ? ' on' : '') + '" onclick="toggleFollow()" title="follow: keep the robot centred as it moves">⌖</span>';
+    var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-sync everything: perimeters, zone settings, notifications, robot settings">' + (refreshBusy ? '↻…' : '↻') + '</span>';
+    var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + '" onclick="toggleAlarmsHighlight()" title="highlight error tracks and reveal deduped alarm log on hover">!</span>';
     var notifBtn = '<span class="btn' + (notifBoxClosed ? '' : ' on') + '" onclick="toggleNotifBox()" title="show/hide the notifications box">#</span>';
     var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsDirtyFlag ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
-    var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-sync everything: perimeters, zone settings, notifications, robot settings">' + (refreshBusy ? '↻…' : '↻') + '</span>';
-    var visBtn = '<span class="btn" onclick="toggleTracksVisible()" title="temporarily hide/show tracks (recording continues)">' + (tracksVisible ? 'HIDE' : 'SHOW') + '</span>';
-    var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + '" onclick="toggleAlarmsHighlight()" title="highlight error tracks and reveal deduped alarm log on hover">!</span>';
-    trk = '<div class="tracks">' + refreshBtn + ' Tracks:' +
-      '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()">' + (tracksOn ? 'ON' : 'OFF') + '</span>' +
-      visBtn +
-      '<span class="btn" onclick="clearTracks()">CLR</span>' +
-      '<span class="btn" onclick="cycleTracksClr()" title="trail filter: how many recent mowing runs to show (∞ = all loaded)">#' + clrLabel + '</span>' +
-      alarmBtn + notifBtn + settingsBtn +
-    '</div>';
+    // tracks cluster — bundled tight in one segmented box (power=record, eye=show/hide, ✕=clear, #N=run filter)
+    var powerBtn = '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()" title="trail recording on/off">⏻</span>';
+    var visBtn = '<span class="btn' + (tracksVisible ? ' on' : '') + '" onclick="toggleTracksVisible()" title="show/hide the trail (recording continues)">◉</span>';
+    var clrBtn = '<span class="btn" onclick="clearTracks()" title="clear the trail">✕</span>';
+    var selBtn = '<span class="btn" onclick="cycleTracksClr()" title="trail filter: how many recent mowing runs to show (∞ = all loaded)">#' + clrLabel + '</span>';
+    var trackGroup = '<span class="btngroup" title="trail">' + powerBtn + visBtn + clrBtn + selBtn + '</span>';
+    trk = '<div class="tracks">' + followBtn + refreshBtn + trackGroup + alarmBtn + notifBtn + settingsBtn + '</div>';
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
