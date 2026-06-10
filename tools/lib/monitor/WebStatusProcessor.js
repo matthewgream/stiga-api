@@ -1658,9 +1658,10 @@ function runDiagnostic(name){
 }
 // ---- map heatmap overlay (for type:'map' diagnostics) -----------------------------------------------------
 function clearDiagHeatmap(){ for(var i = 0; i < diagHeatmap.length; i++) diagHeatmap[i].setMap(null); diagHeatmap = []; }
-// value 0..1 -> default heatmap colour (blue → green → yellow → red), mirroring the analyser's image scheme.
+// value 0..1 -> colour. v is normalised so HIGH = good (more satellites / stronger signal), so we use the
+// signal-quality convention: red (low/bad) → yellow → green (high/good).
 function valueToColorClient(v){
-  var stops = [[0,0,0,255],[0.33,0,255,0],[0.66,255,255,0],[1,255,0,0]];
+  var stops = [[0,255,0,0],[0.5,255,255,0],[1,0,255,0]];
   var lo, hi;
   for(var i = 0; i < stops.length - 1; i++) if(v >= stops[i][0] && v <= stops[i+1][0]){ lo = stops[i]; hi = stops[i+1]; break; }
   if(!lo){ var s = v <= 0 ? stops[0] : stops[stops.length - 1]; return 'rgb(' + s[1] + ',' + s[2] + ',' + s[3] + ')'; }
