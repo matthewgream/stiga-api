@@ -130,6 +130,27 @@ The following is a set of rolling updates, each new entry may update/obsolete so
 
 ---
 
+## Update (10 June 2026)
+
+There are a lot of recent updates to the Web UI; functionality and performance. I'm fully using Claude to manage the implementation and commits, so you'll see verbose details. One thing I want to call out is the diagnostics support. With the CGI param "&diagnostics=on" you get a spanner button that allows diagnostics that run on the back end: (1) battery charge analysis, (2) battery consumption analysis, (3) satellite signal analysis, (4) mobile signal analysis. These run the existing stiga-analysis command but now bring them back to the front end. They are authentication controlled as with the command set.
+
+For me, the battery analysis helped design a good schedule (e.g. it takes 90 minutes for the robot to charge on average, worst case 110 minutes: therefore you need at least 2hrs between operating times; and the robot can run for more than 3 hours on a full charge, but with heavy grass, it lowers, so 2hrs per operating run means it never has to return to charge before the schedule time expires).
+
+The satellite/mobile analysis helped confirm the base station was not in a weak point, and helped understand the locations where occasionally there would be GPS SEARCHING. 
+
+  <table>
+  <tr>
+  <td width="50%"><img width="1372" height="994" alt="stiga-diag-battery-charge" src="https://github.com/user-attachments/assets/4626519e-0fad-489f-8026-4fbd141012b5" /></td>
+  <td width="50%"><img width="1371" height="1015" alt="stiga-diag-battery-consumption" src="https://github.com/user-attachments/assets/99c4db4e-beaf-431b-9f3f-96fe09053d3c" /></td>
+  </tr>
+  <tr>
+  <td width="50%"><img width="1368" height="1016" alt="stiga-diag-signal-satellite" src="https://github.com/user-attachments/assets/591d322a-5ae4-423c-91ae-33c5f85c0b6b" /></td>
+  <td width="50%"><img width="1378" height="1014" alt="stiga-diag-signal-mobile" src="https://github.com/user-attachments/assets/d36d3d63-4d50-4a8a-88ab-d50ac1c46d7b" /></td>
+  </tr>
+  </table>
+
+---
+
 ## Update (26 May 2026)
 
 A lot of updates over the last two weeks. None of these are breaking/changes (I hope), but are all enhancements onto last years functionality, namely (1) supporting additional commands in stiga-command.js and in the API when needed (e.g. perimeters); (b) building out a "webstatus" in stiga-monitor.js, which is great for desktop side monitoring; (c) tidying up error messages, terminology (e.g. gnss/rtk, etc) and "polish"; (d) supporting a config file with reference, authentication, api keys and more (removing hard coded gnss reference points for example); (e) add scripts directory with add hoc scripts for probing/accessing the API in ways that are not yet API supported or understood.
