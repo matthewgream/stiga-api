@@ -773,6 +773,7 @@ class WebStatusProcessor {
 
     _trackCrumbs(lat, lng) {
         const r = this.state.robot;
+        if (r.docked) return; // don't collect crumbs while parked — the robot just sits on the dock reporting the same spot
         const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? Number(r.mowing.zone) : -1;
         const color = this._serverCrumbColor();
         // For red ("alarm") crumbs capture a short fault text (stored full-size inline in the err column —
@@ -810,7 +811,19 @@ class WebStatusProcessor {
         if (this.crumbsDirty)
             try {
                 const s = this.crumbs;
-                const json = JSON.stringify({ version: 3, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.persistDays, pal: s.pal, lat: s.lat, lng: s.lng, t: s.t, zone: s.zone, col: s.col, err: s.err });
+                const json = JSON.stringify({
+                    version: 3,
+                    robotMac: this.state.robot.mac,
+                    savedAt: new Date().toISOString(),
+                    retentionDays: this.persistDays,
+                    pal: s.pal,
+                    lat: s.lat,
+                    lng: s.lng,
+                    t: s.t,
+                    zone: s.zone,
+                    col: s.col,
+                    err: s.err,
+                });
                 fs.writeFileSync(this._filenameCrumbs(), zlib.gzipSync(json));
                 this.crumbsDirty = false;
             } catch (e) {
@@ -1729,6 +1742,7 @@ function loadPerimeters(){
 // printed (e.g. mapPosition=+5.20m,-1.80m,19) into the URL or stiga-monitor invocation.
 var lastLoggedMapSpec = null;
 function logMapPositionFromCurrentView(){
+  if(followMode) return; // follow pans the map for us — those moves aren't intentional, so don't log them (noisy)
   if(!ZONES_CENTRE || !map) return;
   var c = map.getCenter();
   if(!c) return;
@@ -1845,6 +1859,7 @@ function crumbColor(r){
 function recordCrumb(){
   if(!tracksOn || !state || !state.robot) return;
   var r = state.robot;
+  if(r.docked) return; // mirror the server: no crumbs while docked
   if(typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return;
   if(r.updatedPosition === lastCrumbTime) return;
   lastCrumbTime = r.updatedPosition;
@@ -2469,7 +2484,10 @@ function noteSettingsForDirty(){
   if(sig === null) return;
   if(settingsSeenSig === null){ settingsSeenSig = sig; return; }
   if(settingsOpen){ settingsSeenSig = sig; settingsDirtyFlag = false; return; }
-  if(sig !== settingsSeenSig) settingsDirtyFlag = true;
+  // Self-healing: dirty iff the settings DIFFER from the last-acknowledged baseline. A change that reverts
+  // (e.g. the cloud's config recycle on dock that round-trips back to the original) clears itself once it
+  // settles, instead of latching the wheel red forever; a real, persistent change stays red.
+  settingsDirtyFlag = (sig !== settingsSeenSig);
 }
 function toggleSettings(){
   settingsOpen = !settingsOpen;
