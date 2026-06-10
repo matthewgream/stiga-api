@@ -132,8 +132,8 @@ class StigaMonitor {
             const port = typeof this.config.webstatus === 'number' ? this.config.webstatus : this.config.webstatus_port;
             const apiKey = this.config.apikey ?? mapsApiKey;
             if (!apiKey) throw new Error('stiga-monitor: --webstatus requires a Google Maps API key; provide --apikey=KEY or set mapsApiKey in stiga-config.js');
-            const { webstatus_auth: auth, persist, persistDays } = this.config;
-            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth, persist, persistDays, scheduleTimezone });
+            const { webstatus_auth: auth, webstatus_auth_scope: authScope, persist, persistDays } = this.config;
+            const webstatus = new WebStatusProcessor(this.connectionManager, { ...options, port, apiKey, username, password, auth, authScope, persist, persistDays, scheduleTimezone });
             this.processors.push(webstatus);
             this.displayLocal.updateStatus('webstatus', `port:${port}${auth ? ' auth' : ''}${persist ? ' persist' : ''}`);
         }
@@ -170,8 +170,10 @@ Processor Options:
   --capture[=database]         Enable capture mode (default: capture.db)
   --listen[=filename]          Enable listen mode (default: listen.log)
   --intercept[=port]           Enable intercept mode (default: 8083)
-  --webstatus[=port[/creds]]   Enable real-time status web page (default port: 3001)
+  --webstatus[=port[/creds[/scope]]]  Enable real-time status web page (default port: 3001)
                                creds = user:pass (full basic-auth) or pass (any user)
+                               scope = 'commands' (auth only the command box + endpoint; read-only stays open);
+                                       omit to protect all access
   --persist[=dir]              Persist breadcrumb trail to disk across restarts
                                Default dir: /dev/shm. Implies --webstatus context
   --persist-days=N             Crumb retention in days (default 14, only with --persist)
@@ -217,12 +219,13 @@ function parseArgs() {
                     break;
                 case 'webstatus':
                     if (value) {
-                        // accept --webstatus=PORT, --webstatus=PORT/user:pass, --webstatus=PORT/pass, --webstatus=/user:pass
-                        const slash = value.indexOf('/');
-                        const portPart = slash === -1 ? value : value.slice(0, slash);
-                        const credsPart = slash === -1 ? '' : value.slice(slash + 1);
+                        // PORT[/creds[/scope]] — creds is user:pass or just pass; scope 'commands' limits auth
+                        // to the command box + endpoint (read-only stays open), anything else = protect all.
+                        // e.g. --webstatus=3001/pass, --webstatus=3001/user:pass, --webstatus=3001/pass/commands
+                        const [portPart, credsPart, scopePart] = value.split('/');
                         config.webstatus = portPart ? Number.parseInt(portPart) : true;
                         if (credsPart) config.webstatus_auth = credsPart;
+                        if (scopePart) config.webstatus_auth_scope = scopePart;
                     } else {
                         config.webstatus = true;
                     }

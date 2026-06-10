@@ -307,6 +307,10 @@ class WebStatusProcessor {
         this.username = options.username;
         this.password = options.password;
         this.basicAuth = this._parseBasicAuth(options.auth);
+        // Auth scope: 'all' (default) protects every request; 'commands' protects only the command-enabled
+        // page load (?commands=on, so the browser caches the credential) and the /api/command endpoint
+        // itself — leaving read-only access and server ops (e.g. /api/refresh) open without a password.
+        this.authScope = options.authScope === 'commands' ? 'commands' : 'all';
         this.scheduleTimezone = options.scheduleTimezone || SCHEDULE_TIMEZONE_DEFAULT;
         this.perimeters = undefined;
         this.notifications = [];
@@ -403,7 +407,11 @@ class WebStatusProcessor {
             };
             next();
         });
-        if (this.basicAuth) app.use((req, res, next) => this._basicAuthMiddleware(req, res, next));
+        if (this.basicAuth)
+            app.use((req, res, next) => {
+                if (this._authRequired(req)) this._basicAuthMiddleware(req, res, next);
+                else next();
+            });
         app.get('/', (req, res) => res.type('html').send(this._renderPage(req)));
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() }));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
@@ -461,6 +469,16 @@ class WebStatusProcessor {
         const colon = spec.indexOf(':');
         if (colon === -1) return { user: undefined, pass: spec };
         return { user: spec.slice(0, colon), pass: spec.slice(colon + 1) };
+    }
+
+    // Does this request need authentication? In 'all' scope, everything does. In 'commands' scope, only the
+    // command-enabled page load (?commands=on — fires the browser's native auth dialog at load so the
+    // credential is cached for the realm) and the robot-command endpoint (/api/command/*, the under-the-hood
+    // backstop). Read GETs and server ops like /api/refresh stay open.
+    _authRequired(req) {
+        if (this.authScope === 'all') return true;
+        if (req.query && req.query.commands === 'on') return true;
+        return req.path.startsWith('/api/command');
     }
 
     _basicAuthMiddleware(req, res, next) {
