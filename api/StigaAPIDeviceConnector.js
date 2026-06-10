@@ -31,6 +31,7 @@ const {
     decodeRobotPosition,
     decodeRobotSettings,
     decodeRobotScheduleSettings,
+    decodeFirmwareNotification,
     // decodeRobotZoneSettings,
     // decodeRobotZoneOrder,
 } = require('./StigaAPIElements');
@@ -157,12 +158,15 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     }
     _handleMessageJsonNotification(topic, message) {
         this.display.debug(`connectedDevice ${this.macAddress}: received JSON message on ${topic}`);
+        // So far JSON_NOTIFICATION only carries firmware OTA progress. Decode it (handles the batched
+        // repeated-key stream) and emit a structured 'firmwareUpdate'; also emit the raw 'notification' for
+        // any other/unknown JSON payloads.
+        const firmware = decodeFirmwareNotification(message);
+        if (firmware) this.emit('firmwareUpdate', firmware);
         try {
-            const notification = JSON.parse(message.toString());
-            this.display.debug(notification);
-            this.emit('notification', notification);
-        } catch (e) {
-            this.display.error(`connectedDevice ${this.macAddress}: JSON decode error:`, e);
+            this.emit('notification', JSON.parse(message.toString()));
+        } catch {
+            // batched repeated-key payloads aren't strictly parseable as one object — firmwareUpdate covers them
         }
     }
     _handleMessageLog(topic, message) {

@@ -46,6 +46,15 @@ function _decodeVersionInfo(hex) {
     return bytes.join('.');
 }
 
+// HYPOTHESIS (unconfirmed, 2026-06-10): the [1]/[2]/[3] labels below (hardware/firmware/build) are probably
+// wrong. The cloud's device.firmware_version is exactly these three concatenated — e.g. robot LOG/VERSION
+// {hardware 0.0.3.151, firmware 0.0.3.143, build 0.0.3.68} == cloud "0.0.3.151.0.0.3.143.0.0.3.68" — so they
+// are three independent firmware components, not a hardware rev. The FIRMWARE_UPDATE (cmd 49) OTA to
+// 0.0.3.154 bumped field [1] (the one we call "hardware"), which a hardware revision could never do — so [1]
+// is really the main/app firmware. Likely [1]=main/app, [2]=nav-RTK, [3]=safety/MCU, but NOT verified: the
+// base (an RTK reference) runs firmware 0.0.1.126 — a different lineage from the robot's [2] 0.0.3.143 — so
+// the boards don't trivially line up. Leaving the labels as-is until more firmware versions confirm the
+// mapping; do NOT rename on this single data point.
 function decodeVersion(decoded) {
     return decoded
         ? upgradeVersion({
@@ -199,6 +208,10 @@ const ROBOT_COMMAND_TYPES = {
     38: 'FORCE_CUT',
     40: 'GO_AWAY',
     47: 'ZONE_ORDER_UPDATE',
+    // 49 (0x31): OTA firmware update. [2] = the image path (e.g. "prod/vAR/0.0.3.154.img"); the robot then
+    // fetches it out-of-band over HTTPS from the cloud (like CLOUDSYNC) and applies it, narrating progress on
+    // the <MAC>/JSON_NOTIFICATION topic (see decodeFirmwareNotification). [3] echoes the command type (49).
+    49: 'FIRMWARE_UPDATE',
     51: 'FORCE_BORDER_CUT',
 };
 const ROBOT_COMMAND_IDS = Object.fromEntries(Object.entries(ROBOT_COMMAND_TYPES).map(([key, value]) => [value, Number.parseInt(key)]));
@@ -225,6 +238,45 @@ const ROBOT_COMMAND_RESULT_CODES = {
 };
 function decodeRobotCommandAckResult(decoded, allowUndefined = false) {
     return decodeIndex(decoded, ROBOT_COMMAND_RESULT_CODES, allowUndefined);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Firmware OTA progress, published on <MAC>/JSON_NOTIFICATION as plain JSON (NOT protobuf) during a
+// FIRMWARE_UPDATE (command 49). Each event is { "0": <phase>, "1": <percent 0-100> }, frequently batched
+// into one payload as concatenated repeated keys, e.g. {"0":5,"1":99,"0":5,"1":100,"0":6}. We walk the
+// key/value pairs in order — a new "0" sets the phase and clears percent until its next "1" — and report
+// the final (latest) state. Phase names are inferred from the observed 0.0.3.154 update; 2/4 unseen.
+// (2026-06-10)
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// Phase names from the observed 0.0.3.154 update. The odd phases are the slow, progress-reporting ops.
+const FIRMWARE_UPDATE_PHASES = {
+    0: 'idle', // no update in progress / finished (terminal {"0":0})
+    1: 'downloading', // robot fetches the .img out-of-band over HTTPS (the slow ~6-min 0->100)
+    2: 'verifying', // INFERRED (never observed): quick integrity check after download — unconfirmed
+    3: 'flashing', // writing the image to storage
+    4: 'verifying', // INFERRED (never observed): quick integrity check after flash — unconfirmed
+    5: 'installing', // applying the image
+    6: 'finalizing', // wrapping up before the reboot
+};
+function decodeFirmwareNotification(payload) {
+    const text = Buffer.isBuffer(payload) ? payload.toString('utf8') : String(payload ?? '');
+    let phase,
+        percent,
+        seen = false;
+    for (const m of text.matchAll(/"([01])"\s*:\s*(\d+)/g)) {
+        seen = true;
+        if (m[1] === '0') {
+            phase = Number(m[2]);
+            percent = undefined;
+        } else percent = Number(m[2]);
+    }
+    if (!seen) return undefined;
+    return { phase, phaseName: FIRMWARE_UPDATE_PHASES[phase] ?? `phase ${phase}`, percent, active: phase !== 0 };
+}
+function formatFirmwareNotification(notification) {
+    if (!notification) return 'none';
+    return notification.percent === undefined ? notification.phaseName : `${notification.phaseName} ${notification.percent}%`;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1439,6 +1491,9 @@ module.exports = {
     encodeRobotCommand,
     decodeRobotCommandType,
     decodeRobotCommandAckResult,
+    FIRMWARE_UPDATE_PHASES,
+    decodeFirmwareNotification,
+    formatFirmwareNotification,
     encodeRobotStatusRequestTypes,
     decodeRobotStatusRequestTypes,
     formatRobotStatusRequestTypes,

@@ -44,6 +44,9 @@ function message_robot_CMD_ROBOT(decoded, { interpretation, fieldTracker }) {
             case 'GO_AWAY':
                 fieldTracker.add(addField(interpretation, 2, 'Go-Away Obstacle', elements.formatRobotGoAway(elements.decodeRobotGoAway(decoded[2]))));
                 break;
+            case 'FIRMWARE_UPDATE':
+                fieldTracker.add(addField(interpretation, 2, 'Firmware Image', decoded[2]));
+                break;
         }
     if (decoded[3] !== undefined) {
         fieldTracker.add('3');
@@ -161,6 +164,15 @@ function message_ACK(_decoded, { interpretation }) {
     interpretation.push('ACK (Empty acknowledgment)');
 }
 
+// <MAC>/JSON_NOTIFICATION carries firmware OTA progress as plain JSON (not protobuf). `decoded` here is the
+// raw message (the topic is registered as type 'json', so it is NOT protobuf-decoded).
+function message_robot_JSON_NOTIFICATION(decoded, { interpretation }) {
+    interpretation.push('ROBOT::JSON_NOTIFICATION');
+    const firmware = elements.decodeFirmwareNotification(decoded);
+    if (firmware) interpretation.push(`Firmware Update: ${elements.formatFirmwareNotification(firmware)}`);
+    else interpretation.push(`Payload: ${Buffer.isBuffer(decoded) ? decoded.toString('utf8') : decoded}`);
+}
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -179,6 +191,7 @@ function getHandlers({ MAC_ROBOT, MAC_BASE }) {
         [`${MAC_ROBOT}/LOG/SCHEDULING_SETTINGS/ACK`]: { handler: message_ACK, type: 'custom' },
         [`${MAC_ROBOT}/LOG/ROBOT_POSITION`]: { handler: message_robot_POSITION, type: 'protobuf' },
         [`${MAC_ROBOT}/LOG/ROBOT_POSITION/ACK`]: { handler: message_ACK, type: 'custom' },
+        [`${MAC_ROBOT}/JSON_NOTIFICATION`]: { handler: message_robot_JSON_NOTIFICATION, type: 'json' },
         //
         [`${MAC_BASE}/CMD_REFERENCE`]: { handler: message_base_CMD_REFERENCE, type: 'protobuf' },
         [`CMD_REFERENCE_ACK/${MAC_BASE}`]: {

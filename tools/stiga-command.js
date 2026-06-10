@@ -294,6 +294,7 @@ async function runWatch(options, context) {
         cd.on('statusLocation', onEvent('robot', 'location'));
         cd.on('statusNetwork', onEvent('robot', 'network'));
         cd.on('position', onEvent('robot', 'position'));
+        cd.on('firmwareUpdate', onEvent('robot', 'firmware'));
         cd.on('notification', onEvent('robot', 'notification'));
     }
     if (watchBase && connectors.connectedBase) {

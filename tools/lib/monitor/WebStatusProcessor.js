@@ -659,6 +659,10 @@ class WebStatusProcessor {
     }
 
     _handleMessage(topic, message) {
+        if (topic.includes('/JSON_NOTIFICATION')) {
+            this._handleJsonNotification(topic, message);
+            return;
+        }
         try {
             const decoded = protobufDecode(message);
             if (topic.includes(this.connection.getRobotMac())) this._handleRobotMessage(topic, decoded);
@@ -666,6 +670,16 @@ class WebStatusProcessor {
         } catch {
             // not all messages are protobuf
         }
+    }
+
+    // <MAC>/JSON_NOTIFICATION is plain JSON (not protobuf); so far only seen carrying firmware OTA progress
+    // (decodeFirmwareNotification). Surface the latest phase/percent on the robot state as a transient
+    // qualifier on the status; phase 0 (complete/idle) clears it. The client also expires it if it goes stale.
+    _handleJsonNotification(topic, message) {
+        if (!topic.includes(this.connection.getRobotMac())) return;
+        const firmware = elements.decodeFirmwareNotification(message);
+        if (!firmware) return;
+        this.state.robot.firmware = firmware.active ? { phaseName: firmware.phaseName, percent: firmware.percent, updatedAt: new Date().toISOString() } : undefined;
     }
 
     _handleRobotMessage(topic, decoded) {
@@ -1169,6 +1183,7 @@ html,body{margin:0;height:100%}
 #statusbox .v{font-weight:600;text-align:right}
 #statusbox .v.mowstrat{font-weight:400;font-size:11px;color:#80868b;cursor:default}
 #statusbox .v.alert{animation:statusAlertFlash 1.1s ease-in-out infinite;padding:1px 7px;border-radius:5px}
+#statusbox .v.fwupd{color:#a142f4} /* firmware OTA progress qualifier (purple, distinct from green/red/blue) */
 @keyframes statusAlertFlash{0%,100%{background:#ffffff;color:#202124}50%{background:#ea4335;color:#ffffff}}
 #statusbox .muted{color:#9aa0a6;font-size:11px;margin-top:5px}
 .dot{width:9px;height:9px;border-radius:50%;margin-right:6px;display:inline-block}
@@ -2899,9 +2914,16 @@ function renderStatusBox(){
     var diagBtn = diagnosticsAvailable() ? '<span class="btn' + (diagOpen ? ' on' : '') + '" onclick="toggleDiagnostics()" title="diagnostics">🔧</span>' : '';
     trk = '<div class="tracks">' + followBtn + refreshBtn + trackGroup + alarmBtn + notifBtn + settingsBtn + diagBtn + '</div>';
   }
+  // firmware OTA progress qualifies the status while an update runs (from JSON_NOTIFICATION). Expire it if
+  // it goes stale (~20s without an update — the robot finished or rebooted mid-flight).
+  var fwRow = '';
+  if(r.firmware && r.firmware.updatedAt && (Date.now() - new Date(r.firmware.updatedAt).getTime() < 20000)){
+    var fwTxt = r.firmware.phaseName + ((r.firmware.percent !== undefined && r.firmware.percent !== null) ? ' ' + r.firmware.percent + '%' : '');
+    fwRow = '<div class="row"><span class="k">Firmware</span><span class="v fwupd">' + esc(fwTxt) + '</span></div>';
+  }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
-    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
+    row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + fwRow + row('Battery', batt) + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
     '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk + renderDiagnosticsRow();
   attachZonePanelHover();
   attachSchedPanelHover();
