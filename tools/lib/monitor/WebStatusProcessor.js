@@ -62,11 +62,15 @@
 // Commands (active control panel, stacked between status & notify boxes)
 //   commands                on | off                     Show command box with [Start|Stop] [Home] (default off).
 //                                                        Start/Stop is context-aware (the relevant verb is shown).
-//   diagnostics             on | off                     Show the 🔧 diagnostics row (default off). Buttons run
-//                                                        whitelisted stiga-analyse.js reports server-side and
-//                                                        show the output in a console overlay. AUTH-GATED like
-//                                                        commands (the server only offers it when a credential
-//                                                        is configured); single-slot (one run at a time).
+//   diagnostics             on | off                     Show the 🔧 diagnostics row (default off, collapsed;
+//                                                        the 🔧 status-row button toggles it). Buttons run
+//                                                        whitelisted stiga-analyse.js reports server-side:
+//                                                        'text' ones (battery charge/consumption) show in a
+//                                                        console overlay; 'map' ones (satellite coverage,
+//                                                        mobile signal — 7-day --format json) paint a value-
+//                                                        coloured heatmap on the live map. AUTH-GATED like
+//                                                        commands (only offered when a credential is
+//                                                        configured); single-slot (one run at a time).
 //
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&follow=on
@@ -85,8 +89,11 @@ const { spawn } = require('node:child_process');
 // child is spawned with an argv array (no shell), output is capped, and only one runs at a time.
 const STIGA_ANALYSE = path.join(__dirname, '..', '..', 'stiga-analyse.js');
 const DIAGNOSTICS = {
-    'battery-charge': { argv: ['battery-charge'], timeoutMs: 90_000, label: 'Battery charge', icon: '⚡' },
-    'battery-consumption': { argv: ['battery-consumption'], timeoutMs: 90_000, label: 'Battery consumption', icon: '🪫' },
+    // type 'text' → console overlay; type 'map' → JSON (lat/lng cells) painted as a heatmap on the live map.
+    'battery-charge': { argv: ['battery-charge'], timeoutMs: 90_000, label: 'Battery charge', icon: '⚡', type: 'text' },
+    'battery-consumption': { argv: ['battery-consumption'], timeoutMs: 90_000, label: 'Battery consumption', icon: '🪫', type: 'text' },
+    'satellites': { argv: ['position-heatmap', '--format', 'json', '--metric', 'satellites', '--days', '7'], timeoutMs: 180_000, label: 'Satellite coverage (7d)', icon: '🛰️', type: 'map', metric: 'satellites' },
+    'mobile-signal': { argv: ['position-heatmap', '--format', 'json', '--metric', 'rssi', '--days', '7'], timeoutMs: 180_000, label: 'Mobile signal (7d)', icon: '📶', type: 'map', metric: 'rssi' },
 };
 const DIAGNOSTIC_OUTPUT_CAP = 256 * 1024; // bytes; guards against a runaway returning a huge payload
 const express = require('express');
@@ -1106,7 +1113,7 @@ class WebStatusProcessor {
             scheduleTimezone: this.scheduleTimezone,
             // diagnostics are auth-gated, so only offer them when a credential is configured. The client
             // shows the 🔧 row when ?diagnostics=on AND this list is non-empty.
-            diagnostics: this.basicAuth ? Object.entries(DIAGNOSTICS).map(([name, d]) => ({ name, label: d.label, icon: d.icon })) : [],
+            diagnostics: this.basicAuth ? Object.entries(DIAGNOSTICS).map(([name, d]) => ({ name, label: d.label, icon: d.icon, type: d.type, metric: d.metric })) : [],
         });
         return `<!DOCTYPE html>
 <html lang="en">
@@ -1314,7 +1321,7 @@ var notifBoxClosed = false, notifClosedUuids = {}; // whole-box hide; reopens wh
 var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only settings panel state (* = global)
 // Diagnostics drawer (single-slot): one run in flight at a time; result held until viewed in the overlay.
 // diagOpen toggles the 🔧 row's visibility (the 🔧 button lives in the status button row; default collapsed).
-var diagState = { busy: false, running: null, ready: false, result: null }, diagOpen = false;
+var diagState = { busy: false, running: null, ready: false, result: null }, diagOpen = false, diagHeatmap = [];
 var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
@@ -1593,10 +1600,12 @@ function diagnosticsAvailable(){
 }
 // The 🔧 button (in the status button row) toggles this row open/closed.
 function toggleDiagnostics(){ diagOpen = !diagOpen; renderStatusBox(); }
+function diagConfig(name){ for(var i = 0; i < CONFIG.diagnostics.length; i++) if(CONFIG.diagnostics[i].name === name) return CONFIG.diagnostics[i]; return null; }
 function renderDiagnosticsRow(){
   if(!diagnosticsAvailable() || !diagOpen) return '';
   var left;
   if(diagState.busy) left = '<span class="diagstat run">running ' + esc(diagState.running) + '…</span>';
+  else if(diagState.ready && diagState.result && diagState.result.type === 'map') left = '<span class="diagstat ready" data-diagopen="1" title="clear the overlay">● ' + esc(diagState.result.label) + ' — clear</span>';
   else if(diagState.ready) left = '<span class="diagstat ready" data-diagopen="1" title="view result">● result ready</span>';
   else left = '<span class="diagstat idle">diagnostics</span>';
   var btns = CONFIG.diagnostics.map(function(d){
@@ -1612,26 +1621,62 @@ function attachDiagnosticsHandlers(){
   var btns = box.querySelectorAll('.btn[data-diag]');
   for(var i = 0; i < btns.length; i++)(function(el){ el.addEventListener('click', function(){ runDiagnostic(el.getAttribute('data-diag')); }); })(btns[i]);
   var open = box.querySelector('[data-diagopen]');
-  if(open) open.addEventListener('click', openDiagnosticOverlay);
+  if(open) open.addEventListener('click', onDiagReadyClick);
+}
+// clicking the ● ready indicator: map result -> clear the overlay; text result -> open the console overlay.
+function onDiagReadyClick(){
+  if(!diagState.result) return;
+  if(diagState.result.type === 'map'){ clearDiagHeatmap(); diagState.ready = false; diagState.result = null; renderStatusBox(); }
+  else openDiagnosticOverlay();
 }
 function runDiagnostic(name){
   if(diagState.busy || !diagnosticsAvailable()) return; // single-slot
+  clearDiagHeatmap(); // a new run replaces any previous map overlay
   diagState.busy = true; diagState.running = name; diagState.ready = false; diagState.result = null;
   renderStatusBox();
   fetch('api/diagnostic/' + encodeURIComponent(name), { method: 'POST', cache: 'no-store' })
     .then(function(r){ return r.json().then(function(j){ return { http: r.status, body: j }; }); })
     .then(function(rsp){
       diagState.busy = false; diagState.running = null; diagState.ready = true;
-      var b = rsp.body || {};
-      diagState.result = { name: name, label: (b.label || name), ok: !!b.ok, ms: b.ms,
-        output: b.output || ('(no output)' + (b.error ? ' — ' + b.error : '') + (rsp.http !== 200 ? ' [HTTP ' + rsp.http + ']' : '')) };
+      var b = rsp.body || {}, cfg = diagConfig(name), out = b.output || '';
+      if(cfg && cfg.type === 'map' && b.ok){
+        var parsed = null; try { parsed = JSON.parse(out); } catch(e){ parsed = null; }
+        if(parsed){ renderDiagHeatmap(parsed, cfg.metric); diagState.result = { name: name, type: 'map', label: cfg.label, ok: true }; }
+        else diagState.result = { name: name, type: 'text', label: (cfg.label || name), ok: false, output: 'failed to parse heatmap JSON:\\n' + out };
+      } else {
+        diagState.result = { name: name, type: 'text', label: (b.label || name), ok: !!b.ok, ms: b.ms,
+          output: out || ('(no output)' + (b.error ? ' — ' + b.error : '') + (rsp.http !== 200 ? ' [HTTP ' + rsp.http + ']' : '')) };
+      }
       renderStatusBox();
     })
     .catch(function(e){
       diagState.busy = false; diagState.running = null; diagState.ready = true;
-      diagState.result = { name: name, label: name, ok: false, output: 'request failed: ' + e.message };
+      diagState.result = { name: name, type: 'text', label: name, ok: false, output: 'request failed: ' + e.message };
       renderStatusBox();
     });
+}
+// ---- map heatmap overlay (for type:'map' diagnostics) -----------------------------------------------------
+function clearDiagHeatmap(){ for(var i = 0; i < diagHeatmap.length; i++) diagHeatmap[i].setMap(null); diagHeatmap = []; }
+// value 0..1 -> default heatmap colour (blue → green → yellow → red), mirroring the analyser's image scheme.
+function valueToColorClient(v){
+  var stops = [[0,0,0,255],[0.33,0,255,0],[0.66,255,255,0],[1,255,0,0]];
+  var lo, hi;
+  for(var i = 0; i < stops.length - 1; i++) if(v >= stops[i][0] && v <= stops[i+1][0]){ lo = stops[i]; hi = stops[i+1]; break; }
+  if(!lo){ var s = v <= 0 ? stops[0] : stops[stops.length - 1]; return 'rgb(' + s[1] + ',' + s[2] + ',' + s[3] + ')'; }
+  var t = (v - lo[0]) / (hi[0] - lo[0]);
+  return 'rgb(' + Math.round(lo[1] + t*(hi[1]-lo[1])) + ',' + Math.round(lo[2] + t*(hi[2]-lo[2])) + ',' + Math.round(lo[3] + t*(hi[3]-lo[3])) + ')';
+}
+function renderDiagHeatmap(json, metric){
+  clearDiagHeatmap();
+  if(typeof map === 'undefined' || !map || !json || !json.metrics) return;
+  var m = json.metrics[metric];
+  if(!m || !m.cells) return;
+  var radius = (json.cellM || 1.5) * 0.75; // metres; slight overlap reads as a continuous field
+  for(var i = 0; i < m.cells.length; i++){
+    var c = m.cells[i];
+    diagHeatmap.push(new google.maps.Circle({ center: { lat: c.lat, lng: c.lng }, radius: radius,
+      fillColor: valueToColorClient(c.v), fillOpacity: 0.55, strokeOpacity: 0, clickable: false, zIndex: 5, map: map }));
+  }
 }
 function openDiagnosticOverlay(){
   if(!diagState.result) return;

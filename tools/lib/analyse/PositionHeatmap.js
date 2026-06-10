@@ -24,7 +24,10 @@ class PositionHeatmapAnalyser extends AnalyserBase {
             description: 'Generate position heatmaps from robot data',
             detailedDescription: 'Creates satellite and RSSI signal strength heatmaps overlaid on Google Maps satellite imagery.',
             options: {
-                '--apikey': 'Google Maps API key (REQUIRED)',
+                '--apikey': 'Google Maps API key (REQUIRED for image format)',
+                '--format': 'Output: image (default, JPEGs) or json (lat/lng coordinate cells for a live map overlay; no apikey needed)',
+                '--days': 'Limit analysis to the last N days (default: all data)',
+                '--metric': 'For --format json: satellites | rssi (default: both)',
                 '--lat': 'Center latitude (override stiga-config.js referencePosition.latitude)',
                 '--lon': 'Center longitude (override stiga-config.js referencePosition.longitude)',
                 '--zoom': 'Map zoom level (default: 18)',
@@ -61,13 +64,27 @@ class PositionHeatmapAnalyser extends AnalyserBase {
     }
 
     async analyze(options = {}) {
-        this.apiKey = options['--apikey'];
-        if (!this.apiKey) throw new Error('Error: Google Maps API key is required (--apikey)');
+        this.format = options['--format'] || 'image';
+        this.metric = options['--metric']; // 'satellites' | 'rssi' | undefined (both)
+        this.days = options['--days'] === undefined ? undefined : Number.parseFloat(options['--days']);
+        this.quiet = this.format === 'json'; // json output must be clean stdout — suppress progress logs
         const ref = StigaAPIConfig.load().referencePosition;
         if (options['--lat'] === undefined && ref?.latitude === undefined) throw new Error('Error: center latitude not set; provide --lat or referencePosition in stiga-config.js');
         if (options['--lon'] === undefined && ref?.longitude === undefined) throw new Error('Error: center longitude not set; provide --lon or referencePosition in stiga-config.js');
         this.centerLat = options['--lat'] === undefined ? ref.latitude : Number.parseFloat(options['--lat']);
         this.centerLng = options['--lon'] === undefined ? ref.longitude : Number.parseFloat(options['--lon']);
+        this.originalCenterLat = this.centerLat;
+        this.originalCenterLng = this.centerLng;
+
+        // JSON mode: no Google base map (so no apikey), no canvas — just emit lat/lng cells for a live overlay.
+        if (this.format === 'json') {
+            this.loadPositionData(options.robotMac);
+            this._emitHeatmapJson();
+            return;
+        }
+
+        this.apiKey = options['--apikey'];
+        if (!this.apiKey) throw new Error('Error: Google Maps API key is required (--apikey)');
         this.zoom = Number.parseInt(options['--zoom'] || '18');
         this.mapSize = Number.parseInt(options['--size'] || '640');
         this.gridSize = Number.parseInt(options['--grid'] || '100');
@@ -102,14 +119,21 @@ class PositionHeatmapAnalyser extends AnalyserBase {
         await this.generateHeatmaps();
     }
 
+    // SQL fragment to cap the query to the last N days (this.days), or '' for all data.
+    _daysClause() {
+        if (this.days === undefined || !Number.isFinite(this.days)) return '';
+        const cutoff = new Date(Date.now() - this.days * 24 * 60 * 60 * 1000).toISOString();
+        return `AND timestamp > '${cutoff}'`;
+    }
+
     // eslint-disable-next-line sonarjs/cognitive-complexity
     loadPositionData(robotMac) {
         const robotPositions = [],
             robotStatuses = [];
         const positionQuery = `
-            SELECT timestamp, data 
-            FROM messages 
-            WHERE topic LIKE '%${robotMac}/LOG/ROBOT_POSITION%'
+            SELECT timestamp, data
+            FROM messages
+            WHERE topic LIKE '%${robotMac}/LOG/ROBOT_POSITION%' ${this._daysClause()}
             ORDER BY timestamp
         `;
         for (const row of this.db.prepare(positionQuery).all())
@@ -143,9 +167,9 @@ class PositionHeatmapAnalyser extends AnalyserBase {
                 // Skip messages that can't be decoded
             }
         const statusQuery = `
-            SELECT timestamp, data 
-            FROM messages 
-            WHERE topic LIKE '%${robotMac}/LOG/STATUS%'
+            SELECT timestamp, data
+            FROM messages
+            WHERE topic LIKE '%${robotMac}/LOG/STATUS%' ${this._daysClause()}
             ORDER BY timestamp
         `;
         for (const row of this.db.prepare(statusQuery).all())
@@ -174,15 +198,33 @@ class PositionHeatmapAnalyser extends AnalyserBase {
             } catch {
                 // Skip messages that can't be decoded
             }
-        console.log(`  Robot positions: ${robotPositions.length}`);
-        console.log(`  Robot statuses with location/network: ${robotStatuses.length}`);
+        if (!this.quiet) console.log(`  Robot positions: ${robotPositions.length}`);
+        if (!this.quiet) console.log(`  Robot statuses with location/network: ${robotStatuses.length}`);
+        // Match each position to the closest status within tolerance. Both arrays are time-sorted, so a
+        // forward-only two-pointer (the closest is always one of the two neighbours of the position's time)
+        // does this in O(n+m) instead of O(n*m) — ~60x faster on a week of data.
+        const tol = this.positionData.metadata.timeTolerance;
+        let j = 0;
         for (const robotPosition of robotPositions) {
-            const match = {
-                timestamp: robotPosition.timestamp,
-                robotPosition,
-            };
-            const robotStatus = this.findClosestInWindow(robotPosition.time, robotStatuses, this.positionData.metadata.timeTolerance);
-            if (robotStatus) match.robotStatus = { ...robotStatus, timeDiffMs: Math.abs(robotPosition.time - robotStatus.time) };
+            while (j < robotStatuses.length && robotStatuses[j].time < robotPosition.time) j++;
+            let best,
+                bestDiff = Infinity;
+            if (j < robotStatuses.length) {
+                const d = robotStatuses[j].time - robotPosition.time;
+                if (d <= tol && d < bestDiff) {
+                    best = robotStatuses[j];
+                    bestDiff = d;
+                }
+            }
+            if (j > 0) {
+                const d = robotPosition.time - robotStatuses[j - 1].time;
+                if (d <= tol && d < bestDiff) {
+                    best = robotStatuses[j - 1];
+                    bestDiff = d;
+                }
+            }
+            const match = { timestamp: robotPosition.timestamp, robotPosition };
+            if (best) match.robotStatus = { ...best, timeDiffMs: bestDiff };
             this.positionData.matches.push(match);
         }
         this.positionData.metadata.totalMatches = this.positionData.matches.length;
@@ -190,17 +232,45 @@ class PositionHeatmapAnalyser extends AnalyserBase {
         this.positionData.metadata.robotStatuses = robotStatuses.length;
     }
 
-    findClosestInWindow(targetTime, dataArray, toleranceMs) {
-        let closest;
-        let closestDiff = Infinity;
-        for (const item of dataArray) {
-            const diff = Math.abs(targetTime - item.time);
-            if (diff <= toleranceMs && diff < closestDiff) {
-                closest = item;
-                closestDiff = diff;
+    // Emit a JSON heatmap for a live map overlay: spatially aggregate matched points into ~metre cells (in the
+    // base-relative ENU frame), average the metric per cell, convert the cell centre back to lat/lng, and
+    // normalise the value to 0..1 over a static range. Pure JSON to stdout (no progress, no images, no apikey).
+    _emitHeatmapJson() {
+        const CELL_M = 1.5; // grid cell size, metres
+        const RANGES = { satellites: { min: 0, max: 30, unit: '' }, rssi: { min: -110, max: -50, unit: 'dBm' } };
+        const metrics = this.metric ? [this.metric] : ['satellites', 'rssi'];
+        const out = { format: 'heatmap', generated: new Date().toISOString(), days: this.days, cellM: CELL_M, base: { lat: this.centerLat, lng: this.centerLng }, metrics: {} };
+        for (const metric of metrics) {
+            const range = RANGES[metric];
+            if (!range) continue;
+            const cells = new Map(); // "gx,gy" -> { sum, count, gx, gy }
+            for (const match of this.positionData.matches) {
+                const rp = match.robotPosition;
+                if (!rp) continue;
+                const value = metric === 'satellites' ? match.robotStatus?.location?.satellites : match.robotStatus?.network?.rssi;
+                if (value === undefined || value === null) continue;
+                const gx = Math.round(rp.xOffsetM / CELL_M),
+                    gy = Math.round(rp.yOffsetM / CELL_M),
+                    key = `${gx},${gy}`;
+                const cell = cells.get(key) || { sum: 0, count: 0, gx, gy };
+                cell.sum += value;
+                cell.count++;
+                cells.set(key, cell);
             }
+            const list = [];
+            for (const cell of cells.values()) {
+                const avg = cell.sum / cell.count,
+                    xM = cell.gx * CELL_M,
+                    yM = cell.gy * CELL_M;
+                const lat = this.centerLat + (yM / 6371000) * (180 / Math.PI),
+                    lng = this.centerLng + ((xM / 6371000) * (180 / Math.PI)) / Math.cos((this.centerLat * Math.PI) / 180);
+                const v = Math.max(0, Math.min(1, (avg - range.min) / (range.max - range.min)));
+                list.push({ lat: Number(lat.toFixed(7)), lng: Number(lng.toFixed(7)), v: Number(v.toFixed(3)), value: Math.round(avg * 10) / 10, n: cell.count });
+            }
+            out.metrics[metric] = { range, cells: list };
         }
-        return closest;
+        out.stats = { matches: this.positionData.matches.length };
+        process.stdout.write(`${JSON.stringify(out)}\n`);
     }
 
     hexToDouble(value) {
