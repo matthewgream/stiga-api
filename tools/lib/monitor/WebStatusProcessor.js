@@ -28,16 +28,19 @@
 //   mapControls             on | off                     'off' = disableDefaultUI (no zoom/fullscreen/etc.).
 //
 // Tracks (breadcrumb trail)
-//   tracks                  on | off                     Force initial tracks state (default on).
-//   tracksClr               N | pN | tX | off | combos    Trail window. Comma-separated terms; the window is
-//                                                        the MAX (furthest-back) of all terms:
+//   tracks                  on | off | <window>          Tracks state AND window in one. 'off' disables;
+//                                                        'on' (or absent) enables with the default window;
+//                                                        a window-spec (e.g. tracks=8,p20k) enables AND sets
+//                                                        the window. Default on. The window grammar — comma-
+//                                                        separated terms, the window being the MAX (furthest-
+//                                                        back) of all terms:
 //                                                          N    last N contiguous mowing runs (a run = a
 //                                                               contiguous one-zone span; revisiting a zone
 //                                                               is a new run). Default 1 (current run).
 //                                                          pN   last N crumb points (k = ×1000: p20k).
 //                                                          tX   last X wall-clock time (s|m|h|d: t24h, t7d).
 //                                                          off|inf|∞  entire cache.
-//                                                        e.g. ?tracksClr=16,p20k = whichever reaches further
+//                                                        e.g. ?tracks=16,p20k = whichever reaches further
 //                                                        back, 16 runs or 20000 points. Governs the one-shot
 //                                                        history baked into the page at connect time (change
 //                                                        needs a reload). The #N status-box button is a live
@@ -46,6 +49,9 @@
 //                                                        over time). Server caching is always on; --persist on
 //                                                        stiga-monitor opts into cross-restart persistence
 //                                                        (default off, 14 days).
+//   tracksClr               <window>                     Deprecated alias for the tracks window (same grammar
+//                                                        as above), still honoured for backwards compat; if
+//                                                        both are given, a window in `tracks` wins.
 //   follow                  on | off                     Keep the robot centred: pan the map to it on each
 //                                                        position update (default off). Toggle live with the
 //                                                        ⌖ status-box button.
@@ -190,6 +196,15 @@ function tracksClrCutoff(store, spec, nowMs) {
     if (spec.timeMs !== undefined) cutoffs.push(nowMs - spec.timeMs);
     if (cutoffs.length === 0) cutoffs.push(tracksClrRunsCutoff(store, CRUMB_DEFAULT_INITIAL_ZONES));
     return Math.min(...cutoffs);
+}
+// Resolve the `tracks` + `tracksClr` query params to { on, window }. `tracks` may be 'on' | 'off' | a
+// window-spec; a spec both enables tracks and sets the hydration window (new combined form, e.g.
+// tracks=8,p20k), while 'on'/'off'/absent fall back to tracksClr (backwards compat). The server only needs
+// the window; `on` is the client's display concern. Mirrored client-side.
+function resolveTracks(tracksParam, tracksClrParam) {
+    if (tracksParam === 'off') return { on: false, window: tracksClrParam };
+    if (tracksParam === undefined || tracksParam === '' || tracksParam === 'on') return { on: true, window: tracksClrParam };
+    return { on: true, window: tracksParam };
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -987,7 +1002,7 @@ class WebStatusProcessor {
     _renderPage(req) {
         const q = req?.query || {};
         // One-shot hydration window per ?tracksClr (see parseTracksClrSpec). Default = 1 run (current zone).
-        const crumbCutoff = tracksClrCutoff(this.crumbs, parseTracksClrSpec(q.tracksClr), Date.now());
+        const crumbCutoff = tracksClrCutoff(this.crumbs, parseTracksClrSpec(resolveTracks(q.tracks, q.tracksClr).window), Date.now());
         const crumbStart = crumbStartIndex(this.crumbs, crumbCutoff);
         const config = JSON.stringify({
             baseLat: this.location.latitude,
@@ -1286,8 +1301,8 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   boxStatus, boxNotify   lt|rt|lb|rb|no   (default: lt for status, lb for notify)
 //   mapPosition            lat,lon,zoom     (locks map view)
 //   mapControls            on|off           (off = disableDefaultUI)
-//   tracks                 on|off           (force tracks state; default on)
-//   tracksClr              N|pN|tX|off,…    (trail window = MAX of comma terms: N runs / pN points / tX time / off=all; drives one-shot hydration. #N button is a live runs display filter. default = 1 run)
+//   tracks                 on|off|<window>  (tracks state + window: off disables; on/absent = default window; a window-spec e.g. tracks=8,p20k enables AND sets it. window = MAX of comma terms: N runs / pN points / tX time / off=all. #N button is a live runs display filter. default on, 1 run)
+//   tracksClr              <window>         (deprecated alias for the tracks window, still honoured; a window in tracks= wins)
 //   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default off)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
@@ -1421,18 +1436,27 @@ function runsCutoffClient(n){
   }
   return Number.NEGATIVE_INFINITY;
 }
-// Initial display filter (count of contiguous runs, or Infinity = all): a bare run-count spec selects that
-// many; off/points/time/combos show everything hydrated (dial down with #N); no param = 1 (current run).
+// Resolve the tracks + tracksClr params into { on, window }. tracks may be 'on' | 'off' | a window-spec; a
+// spec both enables tracks AND sets the window (new combined form, e.g. ?tracks=8,p20k). 'on'/'off'/absent
+// fall back to tracksClr for the window (backwards compat). See parseTracksClrSpec for the window grammar.
+function resolveTracks(tracksParam, tracksClrParam){
+  if(tracksParam === 'off') return { on: false, window: tracksClrParam };
+  if(tracksParam === null || tracksParam === undefined || tracksParam === '' || tracksParam === 'on') return { on: true, window: tracksClrParam };
+  return { on: true, window: tracksParam };
+}
+var trackCfg = resolveTracks(URL_CONFIG.tracks, URL_CONFIG.tracksClr);
+tracksOn = trackCfg.on;
+// Initial display filter (count of contiguous runs, or Infinity = all) from the resolved window: a bare
+// run-count spec selects that many; off/points/time/combos show everything hydrated (dial down with #N);
+// no window = 1 (current run).
 var tracksClr = 1;
 (function(){
-  if(URL_CONFIG.tracksClr === null || URL_CONFIG.tracksClr === undefined) return;
-  var spec = parseTracksClrSpec(URL_CONFIG.tracksClr);
+  if(trackCfg.window === null || trackCfg.window === undefined) return;
+  var spec = parseTracksClrSpec(trackCfg.window);
   if(spec.off || spec.points !== null || spec.timeMs !== null) { tracksClr = Number.POSITIVE_INFINITY; return; }
   if(spec.runs !== null) tracksClr = Math.max(spec.runs, 1);
   else tracksClr = Number.POSITIVE_INFINITY;
 })();
-if(URL_CONFIG.tracks === 'on') tracksOn = true;
-else if(URL_CONFIG.tracks === 'off') tracksOn = false;
 // follow: keep the robot centred — the map pans to the robot on each position update. URL ?follow=on
 // presets it; the ⌖ status-box button toggles it live.
 var followMode = URL_CONFIG.follow === 'on';
