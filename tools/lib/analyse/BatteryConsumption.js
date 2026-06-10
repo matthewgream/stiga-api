@@ -7,6 +7,8 @@ const { decodeRobotStatusType, decodeRobotBatteryStatus } = StigaAPIElements;
 
 const AnalyserBase = require('./Analyser');
 
+const mean = (values) => (values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : undefined);
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -15,7 +17,7 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
         return {
             command: 'battery-consumption',
             description: 'Analyze battery consumption during mowing',
-            detailedDescription: 'Tracks battery usage during mowing sessions (>15 min) and estimates maximum mowing time on a full charge.',
+            detailedDescription: 'Tracks battery usage during mowing sessions (>15 min) and estimates mowing time — including a real-world estimate over the actual usable band (the typical auto-leave ~96% down to auto-return ~13%), alongside the fixed-band estimates.',
             options: { '--detailed': 'Show additional statistics (status distribution, consumption by battery level)' },
             examples: ['stiga-analyser.js battery-consumption', 'stiga-analyser.js battery-consumption --detailed'],
         };
@@ -126,6 +128,30 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
         }
     }
 
+    // Where the robot actually leaves/returns, thresholded so MANUAL cycles are excluded (a genuine auto
+    // full-charge leave is >90%, a genuine low-battery auto-return is <20%). Duplicated from the
+    // battery-charge analyser — same dock-transition walk over the (time-ordered) status events.
+    getDockingStats() {
+        const returns = [],
+            leaves = [];
+        for (let i = 1; i < this.statusEvents.length; i++) {
+            const prev = this.statusEvents[i - 1],
+                cur = this.statusEvents[i];
+            if (!prev.isDocked && cur.isDocked) returns.push(cur.batteryCharge); // arrived: charge at return
+            else if (prev.isDocked && !cur.isDocked) leaves.push(prev.batteryCharge); // departing: charge it left at
+        }
+        const lowReturns = returns.filter((c) => c < 20),
+            highLeaves = leaves.filter((c) => c > 90);
+        return {
+            returnTotal: returns.length,
+            returnLowCount: lowReturns.length,
+            avgReturnLow: mean(lowReturns),
+            leaveTotal: leaves.length,
+            leaveHighCount: highLeaves.length,
+            avgLeaveHigh: mean(highLeaves),
+        };
+    }
+
     displayResults() {
         console.log('Mowing Sessions (off dock for >15 minutes):');
         console.log('='.repeat(110));
@@ -167,6 +193,17 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
             console.log(`\nEstimated mowing time (using weighted average rate):`);
             console.log(`  With 80% usable capacity (100% → 20%): ${totalRuntime.toFixed(0)} minutes (${(totalRuntime / 60).toFixed(1)} hours)`);
             console.log(`  With 60% typical capacity (80% → 20%): ${((60 / weightedAvgRate) * 15).toFixed(0)} minutes (${(((60 / weightedAvgRate) * 15) / 60).toFixed(1)} hours)`);
+            const dock = this.getDockingStats();
+            if (dock.avgLeaveHigh !== undefined && dock.avgReturnLow !== undefined) {
+                const realRuntime = ((dock.avgLeaveHigh - dock.avgReturnLow) / weightedAvgRate) * 15;
+                console.log(`  Real-world band (${dock.avgLeaveHigh.toFixed(0)}% → ${dock.avgReturnLow.toFixed(0)}%, auto leave→return): ${realRuntime.toFixed(0)} minutes (${(realRuntime / 60).toFixed(1)} hours)`);
+            }
+            // the actual auto leave/return levels the real-world estimate is built on (manual cycles excluded)
+            console.log('\nDocking behaviour (thresholds exclude manual cycles):');
+            console.log(`  Leaves (dock→undock): ${dock.leaveTotal} observed, ${dock.leaveHighCount} at >90% (auto full-charge)`);
+            if (dock.avgLeaveHigh !== undefined) console.log(`    Average charge at leave, when >90%: ${dock.avgLeaveHigh.toFixed(1)}%`);
+            console.log(`  Returns (undock→dock): ${dock.returnTotal} observed, ${dock.returnLowCount} at <20% (auto low-battery)`);
+            if (dock.avgReturnLow !== undefined) console.log(`    Average charge at return, when <20%: ${dock.avgReturnLow.toFixed(1)}%`);
             console.log('\nSession length distribution:');
             const shortSessions = this.mowingSessions.filter((s) => s.duration < 30 * 60 * 1000).length,
                 mediumSessions = this.mowingSessions.filter((s) => s.duration >= 30 * 60 * 1000 && s.duration < 60 * 60 * 1000).length,
