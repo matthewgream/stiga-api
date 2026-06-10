@@ -53,8 +53,8 @@
 //                                                        as above), still honoured for backwards compat; if
 //                                                        both are given, a window in `tracks` wins.
 //   follow                  on | off                     Keep the robot centred: pan the map to it on each
-//                                                        position update (default off). Toggle live with the
-//                                                        ⌖ status-box button.
+//                                                        position update (default ON; ?follow=off disables).
+//                                                        Toggle live with the ⌖ status-box button.
 //
 // Status-box content
 //   statusTracksControls    on | off                     Show the Tracks line (default on).
@@ -1321,7 +1321,7 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   mapControls            on|off           (off = disableDefaultUI)
 //   tracks                 on|off|<window>  (tracks state + window: off disables; on/absent = default window; a window-spec e.g. tracks=8,p20k enables AND sets it. window = MAX of comma terms: N runs / pN points / tX time / off=all. #N button is a live runs display filter. default on, 1 run)
 //   tracksClr              <window>         (deprecated alias for the tracks window, still honoured; a window in tracks= wins)
-//   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default off)
+//   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default ON, follow=off disables)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
 var URL_CONFIG = (function(){
@@ -1475,9 +1475,9 @@ var tracksClr = 1;
   if(spec.runs !== null) tracksClr = Math.max(spec.runs, 1);
   else tracksClr = Number.POSITIVE_INFINITY;
 })();
-// follow: keep the robot centred — the map pans to the robot on each position update. URL ?follow=on
-// presets it; the ⌖ status-box button toggles it live.
-var followMode = URL_CONFIG.follow === 'on';
+// follow: keep the robot centred — the map pans to the robot on each position update. On by default;
+// ?follow=off disables it, and the ⌖ status-box button toggles it live.
+var followMode = URL_CONFIG.follow !== 'off';
 
 function applyBoxPosition(id, defaultClass, override){
   var el = document.getElementById(id);
