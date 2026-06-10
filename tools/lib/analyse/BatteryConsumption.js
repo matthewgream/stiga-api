@@ -18,7 +18,10 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
             command: 'battery-consumption',
             description: 'Analyze battery consumption during mowing',
             detailedDescription: 'Tracks battery usage during mowing sessions (>15 min) and estimates mowing time — including a real-world estimate over the actual usable band (the typical auto-leave ~96% down to auto-return ~13%), alongside the fixed-band estimates.',
-            options: { '--detailed': 'Show additional statistics (status distribution, consumption by battery level)' },
+            options: {
+                '--detailed': 'Show additional statistics (status distribution, consumption by battery level)',
+                '--days': 'Limit analysis to the last N days (default: all data)',
+            },
             examples: ['stiga-analyser.js battery-consumption', 'stiga-analyser.js battery-consumption --detailed'],
         };
     }
@@ -31,7 +34,8 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
 
     async analyze(options = {}) {
         const showDetailed = options['--detailed'] || false;
-        console.log('Loading status events from database...');
+        this.days = options['--days'] === undefined ? undefined : Number.parseFloat(options['--days']);
+        console.log('Loading status events from database...' + (this.days ? ` (last ${this.days} days)` : ''));
         this.loadStatusEvents(options.robotMac);
         console.log(`Found ${this.statusEvents.length} status messages with battery info`);
         const dockedCount = this.statusEvents.filter((e) => e.isDocked).length,
@@ -44,11 +48,17 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
         if (showDetailed) this.getDetailedStats();
     }
 
+    // SQL fragment to cap the query to the last N days (this.days), or '' for all data.
+    _daysClause() {
+        if (this.days === undefined || !Number.isFinite(this.days)) return '';
+        return `AND timestamp > '${new Date(Date.now() - this.days * 24 * 60 * 60 * 1000).toISOString()}'`;
+    }
+
     loadStatusEvents(robotMac) {
         const query = `
-            SELECT timestamp, data 
-            FROM messages 
-            WHERE topic LIKE '%${robotMac}/LOG/STATUS%'
+            SELECT timestamp, data
+            FROM messages
+            WHERE topic LIKE '%${robotMac}/LOG/STATUS%' ${this._daysClause()}
             ORDER BY timestamp
         `;
         for (const row of this.db.prepare(query).all()) {

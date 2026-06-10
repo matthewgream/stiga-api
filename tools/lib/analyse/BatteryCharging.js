@@ -18,7 +18,10 @@ class BatteryChargingAnalyser extends AnalyserBase {
             command: 'battery-charge',
             description: 'Analyze battery charging patterns',
             detailedDescription: 'Tracks charging sessions from <30% to >80%, charging rates, and estimated charging times — plus real-world docking behaviour: the average charge at auto-return (<20%) and auto-leave (>90%), and the resulting real-world return→leave charge time.',
-            options: { '--detailed': 'Show additional statistics (charging events by hour, battery level distribution)' },
+            options: {
+                '--detailed': 'Show additional statistics (charging events by hour, battery level distribution)',
+                '--days': 'Limit analysis to the last N days (default: all data)',
+            },
             examples: ['stiga-analyser.js battery-charge', 'stiga-analyser.js battery-charge --detailed'],
         };
     }
@@ -34,7 +37,8 @@ class BatteryChargingAnalyser extends AnalyserBase {
 
     async analyze(options = {}) {
         const showDetailed = options['--detailed'] || false;
-        console.log('Loading charging events from database...');
+        this.days = options['--days'] === undefined ? undefined : Number.parseFloat(options['--days']);
+        console.log('Loading charging events from database...' + (this.days ? ` (last ${this.days} days)` : ''));
         this.loadChargingEvents(options.robotMac);
         console.log(`Found ${this.chargingEvents.length} charging status messages`);
         console.log('\nIdentifying complete charging sessions...');
@@ -46,11 +50,17 @@ class BatteryChargingAnalyser extends AnalyserBase {
         if (showDetailed) this.getDetailedStats();
     }
 
+    // SQL fragment to cap the query to the last N days (this.days), or '' for all data.
+    _daysClause() {
+        if (this.days === undefined || !Number.isFinite(this.days)) return '';
+        return `AND timestamp > '${new Date(Date.now() - this.days * 24 * 60 * 60 * 1000).toISOString()}'`;
+    }
+
     loadChargingEvents(robotMac) {
         const query = `
-            SELECT timestamp, data 
-            FROM messages 
-            WHERE topic LIKE '%${robotMac}/LOG/STATUS%'
+            SELECT timestamp, data
+            FROM messages
+            WHERE topic LIKE '%${robotMac}/LOG/STATUS%' ${this._daysClause()}
             ORDER BY timestamp
         `;
         for (const row of this.db.prepare(query).all()) {
@@ -121,7 +131,7 @@ class BatteryChargingAnalyser extends AnalyserBase {
         const query = `
             SELECT timestamp, data
             FROM messages
-            WHERE topic LIKE '%${robotMac}/LOG/STATUS%'
+            WHERE topic LIKE '%${robotMac}/LOG/STATUS%' ${this._daysClause()}
             ORDER BY timestamp
         `;
         for (const row of this.db.prepare(query).all()) {

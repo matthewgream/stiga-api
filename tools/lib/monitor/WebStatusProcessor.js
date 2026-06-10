@@ -90,10 +90,11 @@ const { spawn } = require('node:child_process');
 const STIGA_ANALYSE = path.join(__dirname, '..', '..', 'stiga-analyse.js');
 const DIAGNOSTICS = {
     // type 'text' → console overlay; type 'map' → JSON (lat/lng cells) painted as a heatmap on the live map.
-    'battery-charge': { argv: ['battery-charge'], timeoutMs: 90_000, label: 'Battery charge', icon: '⚡', type: 'text' },
-    'battery-consumption': { argv: ['battery-consumption'], timeoutMs: 90_000, label: 'Battery consumption', icon: '🪫', type: 'text' },
-    'satellites': { argv: ['position-heatmap', '--format', 'json', '--metric', 'satellites', '--days', '7'], timeoutMs: 180_000, label: 'Satellite coverage (7d)', icon: '🛰️', type: 'map', metric: 'satellites' },
-    'mobile-signal': { argv: ['position-heatmap', '--format', 'json', '--metric', 'rssi', '--days', '7'], timeoutMs: 180_000, label: 'Mobile signal (7d)', icon: '📶', type: 'map', metric: 'rssi' },
+    // front-end runs are day-capped for recent locality (the CLI can run unconstrained); battery 90d, maps 14d.
+    'battery-charge': { argv: ['battery-charge', '--days', '90'], timeoutMs: 90_000, label: 'Battery charge (90d)', icon: '⚡', type: 'text' },
+    'battery-consumption': { argv: ['battery-consumption', '--days', '90'], timeoutMs: 90_000, label: 'Battery consumption (90d)', icon: '🪫', type: 'text' },
+    'satellites': { argv: ['position-heatmap', '--format', 'json', '--metric', 'satellites', '--days', '14'], timeoutMs: 180_000, label: 'Satellite coverage (14d)', icon: '🛰️', type: 'map', metric: 'satellites' },
+    'mobile-signal': { argv: ['position-heatmap', '--format', 'json', '--metric', 'rssi', '--days', '14'], timeoutMs: 180_000, label: 'Mobile signal (14d)', icon: '📶', type: 'map', metric: 'rssi' },
 };
 const DIAGNOSTIC_OUTPUT_CAP = 256 * 1024; // bytes; guards against a runaway returning a huge payload
 const express = require('express');
