@@ -7,6 +7,8 @@ const { decodeRobotBatteryStatus } = StigaAPIElements;
 
 const AnalyserBase = require('./Analyser');
 
+const mean = (values) => (values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : undefined);
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -15,7 +17,7 @@ class BatteryChargingAnalyser extends AnalyserBase {
         return {
             command: 'battery-charge',
             description: 'Analyze battery charging patterns',
-            detailedDescription: 'Tracks charging sessions from <30% to >80% and calculates charging rates and estimated charging times.',
+            detailedDescription: 'Tracks charging sessions from <30% to >80%, charging rates, and estimated charging times — plus real-world docking behaviour: the average charge at auto-return (<20%) and auto-leave (>90%), and the resulting real-world return→leave charge time.',
             options: { '--detailed': 'Show additional statistics (charging events by hour, battery level distribution)' },
             examples: ['stiga-analyser.js battery-charge', 'stiga-analyser.js battery-charge --detailed'],
         };
@@ -25,6 +27,9 @@ class BatteryChargingAnalyser extends AnalyserBase {
         super(databasePath);
         this.chargingEvents = [];
         this.chargingSessions = [];
+        this.dockEvents = []; // every status with battery + docked flag (for return/leave transitions)
+        this.dockReturns = []; // undock->dock transitions: charge at return
+        this.dockLeaves = []; // dock->undock transitions: charge at leave
     }
 
     async analyze(options = {}) {
@@ -35,6 +40,8 @@ class BatteryChargingAnalyser extends AnalyserBase {
         console.log('\nIdentifying complete charging sessions...');
         this.identifyChargingSessions();
         console.log(`Found ${this.chargingSessions.length} complete charging sessions\n`);
+        this.loadDockEvents(options.robotMac);
+        this.identifyDockTransitions();
         this.displayResults();
         if (showDetailed) this.getDetailedStats();
     }
@@ -107,6 +114,65 @@ class BatteryChargingAnalyser extends AnalyserBase {
         }
     }
 
+    // Every LOG/STATUS carrying a battery reading, with its docked flag — regardless of charging status.
+    // Needed to see the FULL on-dock charge (past the ~81% where the 'charging' status ends) and the
+    // actual return/leave levels.
+    loadDockEvents(robotMac) {
+        const query = `
+            SELECT timestamp, data
+            FROM messages
+            WHERE topic LIKE '%${robotMac}/LOG/STATUS%'
+            ORDER BY timestamp
+        `;
+        for (const row of this.db.prepare(query).all()) {
+            try {
+                const decoded = protobufDecode(row.data);
+                if (!decoded[17]) continue;
+                const battery = decodeRobotBatteryStatus(decoded[17]);
+                if (!battery || battery.charge === undefined) continue;
+                this.dockEvents.push({
+                    time: new Date(row.timestamp).getTime(),
+                    timestamp: row.timestamp,
+                    charge: battery.charge,
+                    isDocked: Boolean(decoded[13] === 1),
+                });
+            } catch {
+                // Skip messages that can't be decoded
+            }
+        }
+    }
+
+    // Walk the timeline; a undock->dock edge is a "return" (charge at arrival), dock->undock is a "leave"
+    // (charge it had charged to before departing).
+    identifyDockTransitions() {
+        let prev;
+        for (const event of this.dockEvents) {
+            if (prev) {
+                if (!prev.isDocked && event.isDocked) this.dockReturns.push({ charge: event.charge, timestamp: event.timestamp });
+                else if (prev.isDocked && !event.isDocked) this.dockLeaves.push({ charge: prev.charge, timestamp: prev.timestamp });
+            }
+            prev = event;
+        }
+    }
+
+    // Return/leave charge stats, thresholded so MANUAL cycles are excluded: a genuine low-battery auto-return
+    // is <20%, a genuine "fully charged, off it goes" leave is >90%. Manually sending it home at 60% or
+    // starting it at 40% won't pollute the averages.
+    getDockingStats() {
+        const returns = this.dockReturns.map((r) => r.charge),
+            leaves = this.dockLeaves.map((l) => l.charge);
+        const lowReturns = returns.filter((c) => c < 20),
+            highLeaves = leaves.filter((c) => c > 90);
+        return {
+            returnTotal: returns.length,
+            returnLowCount: lowReturns.length,
+            avgReturnLow: mean(lowReturns),
+            leaveTotal: leaves.length,
+            leaveHighCount: highLeaves.length,
+            avgLeaveHigh: mean(highLeaves),
+        };
+    }
+
     displayResults() {
         console.log('Complete Charging Sessions (< 30% to > 80%):');
         console.log('='.repeat(100));
@@ -143,6 +209,17 @@ class BatteryChargingAnalyser extends AnalyserBase {
             console.log(`\nEstimated charging times (based on average rate):`);
             console.log(`  30% to 80%: ${timeFor30To80.toFixed(0)} minutes`);
             console.log(`  0% to 100%: ${timeFor0To100.toFixed(0)} minutes`);
+            const dock = this.getDockingStats();
+            if (dock.avgReturnLow !== undefined && dock.avgLeaveHigh !== undefined) {
+                const timeForObserved = ((dock.avgLeaveHigh - dock.avgReturnLow) / avgRate) * 15;
+                console.log(`  ${dock.avgReturnLow.toFixed(0)}% to ${dock.avgLeaveHigh.toFixed(0)}% (real-world auto return→leave): ${timeForObserved.toFixed(0)} minutes`);
+            }
+            // Where the robot actually returns/leaves — thresholded to exclude manual return/leave cycles.
+            console.log(`\nDocking behaviour (thresholds exclude manual cycles):`);
+            console.log(`  Returns (undock→dock): ${dock.returnTotal} observed, ${dock.returnLowCount} at <20% (auto low-battery)`);
+            if (dock.avgReturnLow !== undefined) console.log(`    Average charge at return, when <20%: ${dock.avgReturnLow.toFixed(1)}%`);
+            console.log(`  Leaves (dock→undock): ${dock.leaveTotal} observed, ${dock.leaveHighCount} at >90% (auto full-charge)`);
+            if (dock.avgLeaveHigh !== undefined) console.log(`    Average charge at leave, when >90%: ${dock.avgLeaveHigh.toFixed(1)}%`);
         } else {
             console.log('\nNo complete charging sessions found.');
         }
