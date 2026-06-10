@@ -62,6 +62,11 @@
 // Commands (active control panel, stacked between status & notify boxes)
 //   commands                on | off                     Show command box with [Start|Stop] [Home] (default off).
 //                                                        Start/Stop is context-aware (the relevant verb is shown).
+//   diagnostics             on | off                     Show the 🔧 diagnostics row (default off). Buttons run
+//                                                        whitelisted stiga-analyse.js reports server-side and
+//                                                        show the output in a console overlay. AUTH-GATED like
+//                                                        commands (the server only offers it when a credential
+//                                                        is configured); single-slot (one run at a time).
 //
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&follow=on
@@ -73,6 +78,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const { spawn } = require('node:child_process');
+
+// Diagnostics the kiosk can trigger (with ?diagnostics=on, auth-gated exactly like commands). Each maps a
+// name to a FIXED stiga-analyse.js argv — never interpolate request input — with a per-type timeout. The
+// child is spawned with an argv array (no shell), output is capped, and only one runs at a time.
+const STIGA_ANALYSE = path.join(__dirname, '..', '..', 'stiga-analyse.js');
+const DIAGNOSTICS = {
+    'battery-charge': { argv: ['battery-charge'], timeoutMs: 90_000, label: 'Battery charge', icon: '⚡' },
+    'battery-consumption': { argv: ['battery-consumption'], timeoutMs: 90_000, label: 'Battery consumption', icon: '🪫' },
+};
+const DIAGNOSTIC_OUTPUT_CAP = 256 * 1024; // bytes; guards against a runaway returning a huge payload
 const express = require('express');
 
 // Optional minifiers — present in production, gracefully absent in lean installs (we then serve the assets
@@ -311,6 +327,7 @@ class WebStatusProcessor {
         // page load (?commands=on, so the browser caches the credential) and the /api/command endpoint
         // itself — leaving read-only access and server ops (e.g. /api/refresh) open without a password.
         this.authScope = options.authScope === 'commands' ? 'commands' : 'all';
+        this._diagnosticRunning = false; // single-slot guard for /api/diagnostic
         this.scheduleTimezone = options.scheduleTimezone || SCHEDULE_TIMEZONE_DEFAULT;
         this.perimeters = undefined;
         this.notifications = [];
@@ -417,6 +434,7 @@ class WebStatusProcessor {
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
         app.get('/api/notifications', (req, res) => res.json(this.notifications));
         app.post('/api/command/:name', (req, res) => this._handleCommandPost(req, res));
+        app.post('/api/diagnostic/:name', (req, res) => this._handleDiagnosticPost(req, res));
         app.post('/api/refresh', (req, res) => this._handleRefreshPost(req, res));
         await new Promise((resolve, reject) => {
             this.server = app.listen(this.port, '0.0.0.0', () => resolve());
@@ -472,13 +490,14 @@ class WebStatusProcessor {
     }
 
     // Does this request need authentication? In 'all' scope, everything does. In 'commands' scope, only the
-    // command-enabled page load (?commands=on — fires the browser's native auth dialog at load so the
-    // credential is cached for the realm) and the robot-command endpoint (/api/command/*, the under-the-hood
-    // backstop). Read GETs and server ops like /api/refresh stay open.
+    // command/diagnostics-enabled page load (?commands=on / ?diagnostics=on — fires the browser's native auth
+    // dialog at load so the credential is cached for the realm) and the privileged endpoints (/api/command/*
+    // and /api/diagnostic/*, which shell out — the under-the-hood backstop). Read GETs and server ops like
+    // /api/refresh stay open.
     _authRequired(req) {
         if (this.authScope === 'all') return true;
-        if (req.query && req.query.commands === 'on') return true;
-        return req.path.startsWith('/api/command');
+        if (req.query && (req.query.commands === 'on' || req.query.diagnostics === 'on')) return true;
+        return req.path.startsWith('/api/command') || req.path.startsWith('/api/diagnostic');
     }
 
     _basicAuthMiddleware(req, res, next) {
@@ -555,6 +574,63 @@ class WebStatusProcessor {
             res.json({ ok: true, command: 'SCHEDULING_SETTINGS_UPDATE', enabled });
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
+        }
+    }
+
+    // Run a whitelisted diagnostic (a stiga-analyse.js command) server-side and return its console output.
+    // Auth is enforced by the middleware (commands scope) AND defensively here: never shell out without a
+    // configured credential. Single-slot (409 if one's already running), fixed argv (no shell, no input
+    // interpolation), per-type timeout, capped output.
+    _handleDiagnosticPost(req, res) {
+        if (!this.basicAuth) {
+            res.status(403).json({ ok: false, error: 'diagnostics require authentication to be configured' });
+            return;
+        }
+        const name = (req.params.name || '').toLowerCase();
+        const diag = DIAGNOSTICS[name];
+        const from = req.ip || req.socket?.remoteAddress || '?';
+        if (!diag) {
+            this.logger(`WebStatus: diagnostic rejected — unknown '${name}' (from ${from})`);
+            res.status(404).json({ ok: false, error: `unknown diagnostic '${name}'` });
+            return;
+        }
+        if (this._diagnosticRunning) {
+            this.logger(`WebStatus: diagnostic '${name}' rejected — another is already running (from ${from})`);
+            res.status(409).json({ ok: false, error: 'a diagnostic is already running' });
+            return;
+        }
+        this._diagnosticRunning = true;
+        const started = Date.now();
+        const argvStr = [STIGA_ANALYSE, ...diag.argv].join(' ');
+        this.logger(`WebStatus: diagnostic '${name}' — shelling out: ${process.execPath} ${argvStr} (from ${from})`);
+        let output = '',
+            truncated = false,
+            settled = false;
+        const finish = (payload) => {
+            if (settled) return;
+            settled = true;
+            this._diagnosticRunning = false;
+            const ms = Date.now() - started;
+            this.logger(`WebStatus: diagnostic '${name}' finished — ${payload.ok ? 'ok' : 'FAILED'} (exit ${payload.code ?? '-'}${payload.signal ? '/' + payload.signal : ''}, ${ms}ms, ${output.length}b${payload.error ? ', error: ' + payload.error : ''})`);
+            res.json({ name, label: diag.label, ms, ...payload });
+        };
+        try {
+            const child = spawn(process.execPath, [STIGA_ANALYSE, ...diag.argv], { cwd: path.join(__dirname, '..', '..', '..'), timeout: diag.timeoutMs, killSignal: 'SIGTERM' });
+            const collect = (chunk) => {
+                if (output.length < DIAGNOSTIC_OUTPUT_CAP) output += chunk.toString();
+                else truncated = true;
+            };
+            child.stdout.on('data', collect);
+            child.stderr.on('data', collect);
+            child.on('error', (e) => finish({ ok: false, error: e.message, output }));
+            child.on('close', (code, signal) => {
+                const timedOut = signal === 'SIGTERM';
+                if (truncated) output += '\n…[output truncated]';
+                if (timedOut) output += `\n[timed out after ${Math.round(diag.timeoutMs / 1000)}s]`;
+                finish({ ok: code === 0 && !timedOut, code, signal, output });
+            });
+        } catch (e) {
+            finish({ ok: false, error: e.message, output });
         }
     }
 
@@ -1028,6 +1104,9 @@ class WebStatusProcessor {
             pollMs: POLL_MS,
             notifPollMs: NOTIF_POLL_MS_UNDOCKED,
             scheduleTimezone: this.scheduleTimezone,
+            // diagnostics are auth-gated, so only offer them when a credential is configured. The client
+            // shows the 🔧 row when ?diagnostics=on AND this list is non-empty.
+            diagnostics: this.basicAuth ? Object.entries(DIAGNOSTICS).map(([name, d]) => ({ name, label: d.label, icon: d.icon })) : [],
         });
         return `<!DOCTYPE html>
 <html lang="en">
@@ -1046,6 +1125,7 @@ class WebStatusProcessor {
 <div id="settingsbox" class="pos-st empty"></div>
 <div id="zonepanel"></div>
 <div id="schedpanel"></div>
+<div id="diagoverlay"><div class="diagwin"><div class="diaghdr"><span class="diagtitle"></span><span class="diagtools"><span class="diagcopy" title="copy" onclick="copyDiagnosticOutput()">⧉ copy</span><span class="diagclose" title="close" onclick="closeDiagnosticOverlay()">×</span></span></div><pre class="diagpre"></pre></div></div>
 <script>
 var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(encodeCrumbsWire(this.crumbs, crumbStart))};
@@ -1099,6 +1179,26 @@ html,body{margin:0;height:100%}
 #statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
 #statusbox .btn.dirty{background:#ea4335;border-color:#ea4335;color:#fff;animation:wheelDirtyPulse 1.3s ease-in-out infinite}
 @keyframes wheelDirtyPulse{0%,100%{opacity:1}50%{opacity:.5}}
+#statusbox .btn.busy{opacity:.4;pointer-events:none}
+/* diagnostics drawer row (🔧) under the tracks row */
+#statusbox .tracks.diag{display:flex;align-items:center;gap:6px}
+#statusbox .diagbtns{margin-left:auto}
+#statusbox .diagstat{font-size:11px}
+#statusbox .diagstat.idle{color:#9aa0a6}
+#statusbox .diagstat.run{color:#1a73e8}
+#statusbox .diagstat.ready{color:#ea4335;font-weight:600;cursor:pointer;animation:statusAlertFlash 1.1s ease-in-out infinite;padding:1px 7px;border-radius:5px}
+/* full-screen-ish console overlay for diagnostic output */
+#diagoverlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;display:none;align-items:center;justify-content:center}
+#diagoverlay.show{display:flex}
+#diagoverlay .diagwin{width:80vw;height:80vh;min-width:320px;min-height:200px;background:#1e1e1e;color:#d4d4d4;border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;overflow:hidden;resize:both}
+#diagoverlay .diaghdr{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#2d2d2d;border-bottom:1px solid #3a3a3a;font:13px system-ui,Segoe UI,Arial,sans-serif}
+#diagoverlay .diagtitle{font-weight:600;color:#fff}
+#diagoverlay .diagtools{display:flex;gap:12px;align-items:center}
+#diagoverlay .diagcopy{cursor:pointer;color:#9aa0a6;font-size:12px;user-select:none}
+#diagoverlay .diagcopy:hover{color:#fff}
+#diagoverlay .diagclose{cursor:pointer;color:#9aa0a6;font-weight:700;font-size:18px;line-height:1;user-select:none}
+#diagoverlay .diagclose:hover{color:#ea4335}
+#diagoverlay .diagpre{flex:1;margin:0;padding:12px;overflow:auto;white-space:pre;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#d4d4d4}
 /* box-level close × shared by the notif + settings boxes (hides the whole box) */
 .boxclose{cursor:pointer;color:#9aa0a6;font-weight:700;margin-right:7px;user-select:none;font-size:13px;line-height:1}
 .boxclose:hover{color:#ea4335}
@@ -1212,6 +1312,9 @@ var ZONE_COMMANDS = [{ cmd: 'force-cut', label: 'Force cut' }, { cmd: 'force-bor
 var CMD_IDLE = 'ready · awaiting command'; // command status line text when nothing is in flight (used by renderCommandBox at init)
 var notifBoxClosed = false, notifClosedUuids = {}; // whole-box hide; reopens when a NEW (unseen) notification arrives
 var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only settings panel state (* = global)
+// Diagnostics drawer (single-slot): one run in flight at a time; result held until viewed in the overlay.
+// diagOpen toggles the 🔧 row's visibility (the 🔧 button lives in the status button row; default collapsed).
+var diagState = { busy: false, running: null, ready: false, result: null }, diagOpen = false;
 var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
@@ -1324,6 +1427,7 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default ON, follow=off disables)
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
+//   diagnostics            on|off           (🔧 row: run whitelisted stiga-analyse.js reports server-side into a console overlay; auth-gated like commands, single-slot; default off)
 var URL_CONFIG = (function(){
   var p = new URLSearchParams(window.location.search);
   return {
@@ -1336,6 +1440,7 @@ var URL_CONFIG = (function(){
     follow: p.get('follow'),
     statusTracksControls: p.get('statusTracksControls'),
     commands: p.get('commands'),
+    diagnostics: p.get('diagnostics'),
     experimental: p.get('experimental')
   };
 })();
@@ -1478,6 +1583,77 @@ var tracksClr = 1;
 // follow: keep the robot centred — the map pans to the robot on each position update. On by default;
 // ?follow=off disables it, and the ⌖ status-box button toggles it live.
 var followMode = URL_CONFIG.follow !== 'off';
+
+// ---- diagnostics drawer ----------------------------------------------------------------------------------
+// Shown (🔧 row under the tracks row) only when ?diagnostics=on AND the server offered some (it only does so
+// when auth is configured, since /api/diagnostic shells out and is auth-gated). Single-slot: while one runs
+// the buttons disable; the result is held and flashed as "ready" until opened in the overlay.
+function diagnosticsAvailable(){
+  return URL_CONFIG.diagnostics === 'on' && typeof CONFIG !== 'undefined' && Array.isArray(CONFIG.diagnostics) && CONFIG.diagnostics.length > 0;
+}
+// The 🔧 button (in the status button row) toggles this row open/closed.
+function toggleDiagnostics(){ diagOpen = !diagOpen; renderStatusBox(); }
+function renderDiagnosticsRow(){
+  if(!diagnosticsAvailable() || !diagOpen) return '';
+  var left;
+  if(diagState.busy) left = '<span class="diagstat run">running ' + esc(diagState.running) + '…</span>';
+  else if(diagState.ready) left = '<span class="diagstat ready" data-diagopen="1" title="view result">● result ready</span>';
+  else left = '<span class="diagstat idle">diagnostics</span>';
+  var btns = CONFIG.diagnostics.map(function(d){
+    return '<span class="btn' + (diagState.busy ? ' busy' : '') + '" data-diag="' + esc(d.name) + '" title="' + esc(d.label) + '">' + esc(d.icon || '?') + '</span>';
+  }).join('');
+  return '<div class="tracks diag">' + left + '<span class="diagbtns">' + btns + '</span></div>';
+}
+// wire the data-attr buttons after the status box innerHTML is set (avoids inline onclick string args, which
+// don't survive the CLIENT_JS template-literal escaping)
+function attachDiagnosticsHandlers(){
+  var box = document.getElementById('statusbox');
+  if(!box) return;
+  var btns = box.querySelectorAll('.btn[data-diag]');
+  for(var i = 0; i < btns.length; i++)(function(el){ el.addEventListener('click', function(){ runDiagnostic(el.getAttribute('data-diag')); }); })(btns[i]);
+  var open = box.querySelector('[data-diagopen]');
+  if(open) open.addEventListener('click', openDiagnosticOverlay);
+}
+function runDiagnostic(name){
+  if(diagState.busy || !diagnosticsAvailable()) return; // single-slot
+  diagState.busy = true; diagState.running = name; diagState.ready = false; diagState.result = null;
+  renderStatusBox();
+  fetch('api/diagnostic/' + encodeURIComponent(name), { method: 'POST', cache: 'no-store' })
+    .then(function(r){ return r.json().then(function(j){ return { http: r.status, body: j }; }); })
+    .then(function(rsp){
+      diagState.busy = false; diagState.running = null; diagState.ready = true;
+      var b = rsp.body || {};
+      diagState.result = { name: name, label: (b.label || name), ok: !!b.ok, ms: b.ms,
+        output: b.output || ('(no output)' + (b.error ? ' — ' + b.error : '') + (rsp.http !== 200 ? ' [HTTP ' + rsp.http + ']' : '')) };
+      renderStatusBox();
+    })
+    .catch(function(e){
+      diagState.busy = false; diagState.running = null; diagState.ready = true;
+      diagState.result = { name: name, label: name, ok: false, output: 'request failed: ' + e.message };
+      renderStatusBox();
+    });
+}
+function openDiagnosticOverlay(){
+  if(!diagState.result) return;
+  var r = diagState.result;
+  var ov = document.getElementById('diagoverlay');
+  ov.querySelector('.diagtitle').textContent = r.label + (r.ok ? '' : ' — failed') + (typeof r.ms === 'number' ? '  (' + (r.ms/1000).toFixed(1) + 's)' : '');
+  ov.querySelector('.diagpre').textContent = r.output;
+  ov.classList.add('show');
+  diagState.ready = false; // viewing clears the "ready" flash
+  renderStatusBox();
+}
+function closeDiagnosticOverlay(){ document.getElementById('diagoverlay').classList.remove('show'); }
+function copyDiagnosticOutput(){
+  if(!diagState.result) return;
+  var t = diagState.result.output;
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t);
+}
+window.toggleDiagnostics = toggleDiagnostics;
+window.runDiagnostic = runDiagnostic;
+window.openDiagnosticOverlay = openDiagnosticOverlay;
+window.closeDiagnosticOverlay = closeDiagnosticOverlay;
+window.copyDiagnosticOutput = copyDiagnosticOutput;
 
 function applyBoxPosition(id, defaultClass, override){
   var el = document.getElementById(id);
@@ -2671,15 +2847,19 @@ function renderStatusBox(){
     var clrBtn = '<span class="btn" onclick="clearTracks()" title="clear the trail">✕</span>';
     var selBtn = '<span class="btn" onclick="cycleTracksClr()" title="trail filter: how many recent mowing runs to show (∞ = all loaded)">#' + clrLabel + '</span>';
     var trackGroup = '<span class="btngroup" title="trail">' + powerBtn + visBtn + clrBtn + selBtn + '</span>';
-    trk = '<div class="tracks">' + followBtn + refreshBtn + trackGroup + alarmBtn + notifBtn + settingsBtn + '</div>';
+    // 🔧 diagnostics toggle — only exists with ?diagnostics=on (and the server offered it = auth configured);
+    // green when the diagnostics row is open, white when collapsed. Far right, after settings.
+    var diagBtn = diagnosticsAvailable() ? '<span class="btn' + (diagOpen ? ' on' : '') + '" onclick="toggleDiagnostics()" title="diagnostics">🔧</span>' : '';
+    trk = '<div class="tracks">' + followBtn + refreshBtn + trackGroup + alarmBtn + notifBtn + settingsBtn + diagBtn + '</div>';
   }
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
     row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + row('Battery', batt) + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
-    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk;
+    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk + renderDiagnosticsRow();
   attachZonePanelHover();
   attachSchedPanelHover();
   attachMowFlashHover();
+  attachDiagnosticsHandlers();
 }
 
 function table(rows){
