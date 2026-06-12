@@ -1148,6 +1148,7 @@ class WebStatusProcessor {
 <div id="zonepanel"></div>
 <div id="schedpanel"></div>
 <div id="diagoverlay"><div class="diagwin"><div class="diaghdr"><span class="diagtitle"></span><span class="diagtools"><span class="diagcopy" title="copy" onclick="copyDiagnosticOutput()">⧉ copy</span><span class="diagclose" title="close" onclick="closeDiagnosticOverlay()">×</span></span></div><pre class="diagpre"></pre></div></div>
+<div id="diagslider"><span class="dslabel"></span><div class="dsgrad"></div><input type="range" min="0" max="100" value="50" oninput="onDiagSlider(this.value)" title="shift the colour boundaries to reveal gradations"></div>
 <script>
 var CONFIG = ${config};
 var INITIAL_CRUMBS = ${JSON.stringify(encodeCrumbsWire(this.crumbs, crumbStart))};
@@ -1222,6 +1223,12 @@ html,body{margin:0;height:100%}
 #diagoverlay .diagclose{cursor:pointer;color:#9aa0a6;font-weight:700;font-size:18px;line-height:1;user-select:none}
 #diagoverlay .diagclose:hover{color:#ea4335}
 #diagoverlay .diagpre{flex:1;margin:0;padding:12px;overflow:auto;white-space:pre;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#d4d4d4}
+/* heatmap midtone slider — appears with a map overlay; shifts the colour boundaries live */
+#diagslider{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:900;display:none;width:240px;background:rgba(32,33,36,.85);color:#e8eaed;padding:7px 12px 9px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.4);font:11px system-ui,Segoe UI,Arial,sans-serif}
+#diagslider.show{display:block}
+#diagslider .dslabel{display:block;text-align:center;margin-bottom:5px}
+#diagslider .dsgrad{height:6px;border-radius:3px;background:linear-gradient(to right,rgb(255,0,0),rgb(255,255,0) 50%,rgb(0,255,0));margin-bottom:3px}
+#diagslider input[type=range]{width:100%;margin:0;cursor:pointer;accent-color:#e8eaed}
 /* box-level close × shared by the notif + settings boxes (hides the whole box) */
 .boxclose{cursor:pointer;color:#9aa0a6;font-weight:700;margin-right:7px;user-select:none;font-size:13px;line-height:1}
 .boxclose:hover{color:#ea4335}
@@ -1338,6 +1345,7 @@ var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only se
 // Diagnostics drawer (single-slot): one run in flight at a time; result held until viewed in the overlay.
 // diagOpen toggles the 🔧 row's visibility (the 🔧 button lives in the status button row; default collapsed).
 var diagState = { busy: false, running: null, ready: false, result: null }, diagOpen = false, diagHeatmap = [];
+var diagPivot = 0.5; // heatmap midtone pivot (0.5 = neutral); the slider bends the value->colour curve
 var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
@@ -1657,7 +1665,7 @@ function runDiagnostic(name){
       var b = rsp.body || {}, cfg = diagConfig(name), out = b.output || '';
       if(cfg && cfg.type === 'map' && b.ok){
         var parsed = null; try { parsed = JSON.parse(out); } catch(e){ parsed = null; }
-        if(parsed){ renderDiagHeatmap(parsed, cfg.metric); diagState.result = { name: name, type: 'map', label: cfg.label, ok: true }; }
+        if(parsed){ renderDiagHeatmap(parsed, cfg.metric, cfg.label); diagState.result = { name: name, type: 'map', label: cfg.label, ok: true }; }
         else diagState.result = { name: name, type: 'text', label: (cfg.label || name), ok: false, output: 'failed to parse heatmap JSON:\\n' + out };
       } else {
         diagState.result = { name: name, type: 'text', label: (b.label || name), ok: !!b.ok, ms: b.ms,
@@ -1672,7 +1680,30 @@ function runDiagnostic(name){
     });
 }
 // ---- map heatmap overlay (for type:'map' diagnostics) -----------------------------------------------------
-function clearDiagHeatmap(){ for(var i = 0; i < diagHeatmap.length; i++) diagHeatmap[i].setMap(null); diagHeatmap = []; }
+function clearDiagHeatmap(){
+  for(var i = 0; i < diagHeatmap.length; i++) diagHeatmap[i].setMap(null);
+  diagHeatmap = [];
+  var sl = document.getElementById('diagslider'); if(sl) sl.classList.remove('show');
+}
+// Midtone pivot: remap the normalised value so the gradient's midpoint (yellow) sits at diagPivot instead of
+// 0.5 — values around the pivot spread across more of the red→yellow→green range, revealing gradations where
+// readings cluster. pivot<0.5 expands the high end, >0.5 the low end.
+function diagRemap(v){
+  var p = diagPivot;
+  if(p <= 0) return 1; if(p >= 1) return 0;
+  return v < p ? (v / p) * 0.5 : 0.5 + ((v - p) / (1 - p)) * 0.5;
+}
+function applyDiagPivot(){
+  for(var i = 0; i < diagHeatmap.length; i++) diagHeatmap[i].setOptions({ fillColor: valueToColorClient(diagRemap(diagHeatmap[i].heatV)) });
+}
+// slider 0..100 -> pivot 0.1..0.9 (50 = neutral 0.5); recolour live + move the gradient preview's yellow stop.
+function onDiagSlider(val){
+  diagPivot = 0.1 + (Number(val) / 100) * 0.8;
+  applyDiagPivot();
+  var g = document.querySelector('#diagslider .dsgrad');
+  if(g) g.style.background = 'linear-gradient(to right, rgb(255,0,0), rgb(255,255,0) ' + Math.round(diagPivot * 100) + '%, rgb(0,255,0))';
+}
+window.onDiagSlider = onDiagSlider;
 // value 0..1 -> colour. v is normalised so HIGH = good (more satellites / stronger signal), so we use the
 // signal-quality convention: red (low/bad) → yellow → green (high/good).
 function valueToColorClient(v){
@@ -1683,16 +1714,27 @@ function valueToColorClient(v){
   var t = (v - lo[0]) / (hi[0] - lo[0]);
   return 'rgb(' + Math.round(lo[1] + t*(hi[1]-lo[1])) + ',' + Math.round(lo[2] + t*(hi[2]-lo[2])) + ',' + Math.round(lo[3] + t*(hi[3]-lo[3])) + ')';
 }
-function renderDiagHeatmap(json, metric){
+function renderDiagHeatmap(json, metric, label){
   clearDiagHeatmap();
   if(typeof map === 'undefined' || !map || !json || !json.metrics) return;
   var m = json.metrics[metric];
   if(!m || !m.cells) return;
+  diagPivot = 0.5; // reset to neutral for a fresh heatmap
   var radius = (json.cellM || 1.5) * 0.75; // metres; slight overlap reads as a continuous field
   for(var i = 0; i < m.cells.length; i++){
     var c = m.cells[i];
-    diagHeatmap.push(new google.maps.Circle({ center: { lat: c.lat, lng: c.lng }, radius: radius,
-      fillColor: valueToColorClient(c.v), fillOpacity: 0.55, strokeOpacity: 0, clickable: false, zIndex: 5, map: map }));
+    var circle = new google.maps.Circle({ center: { lat: c.lat, lng: c.lng }, radius: radius,
+      fillColor: valueToColorClient(diagRemap(c.v)), fillOpacity: 0.55, strokeOpacity: 0, clickable: false, zIndex: 5, map: map });
+    circle.heatV = c.v;
+    diagHeatmap.push(circle);
+  }
+  // show the midtone slider (reset to neutral) for this overlay
+  var sl = document.getElementById('diagslider');
+  if(sl){
+    var inp = sl.querySelector('input'); if(inp) inp.value = 50;
+    var lab = sl.querySelector('.dslabel'); if(lab) lab.textContent = (label || metric) + ' — drag to reveal gradations';
+    var g = sl.querySelector('.dsgrad'); if(g) g.style.background = 'linear-gradient(to right, rgb(255,0,0), rgb(255,255,0) 50%, rgb(0,255,0))';
+    sl.classList.add('show');
   }
 }
 function openDiagnosticOverlay(){
