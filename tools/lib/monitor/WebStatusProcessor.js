@@ -133,6 +133,17 @@ const ZONE_COMPLETIONS_PER_ZONE_SERVE = 5; // up to N per zone served to the cli
 const ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS = 90; // longer retention than crumbs — they're tiny
 const ZONE_COMPLETION_DEDUPE_WINDOW_MS = 60 * 60 * 1000; // merge same-zone records within 1h: treat as one session
 
+// zone spatial-coverage estimate: at each zone-departure we compute how much of the zone polygon the robot
+// actually drove over while cutting, as a cross-check on the robot's self-reported zoneCompleted%. The
+// positions are the cached crumbs flagged mow=1 (cutting) for the run just ended (walk back to the last zone
+// change); coverage is the fraction of the polygon painted by a swath-width capsule along that path. It's a
+// per-run estimate (so it reads lower than the cumulative reported %), consistent enough to flag a zone the
+// robot calls done but visibly under-covered. SWATH is an estimate (body 40cm, cut ~25-30cm) — recalibrate
+// against a zone known to have finished cleanly so it reads ~100%.
+const CRUMB_SWATH_M = 0.28; // estimated cutting swath width (metres)
+const COVERAGE_GRID_M = 0.25; // rasterisation cell for the swath-capsule paint
+const COVERAGE_MIN_CRUMBS = 20; // need at least this many cutting crumbs in the run to bother computing
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // tracksClr — modular trail-window spec. A comma-separated list of window terms; the effective window is the
 // MAX (furthest-back / most inclusive) of all terms, so combining terms widens rather than narrows. Terms:
@@ -241,7 +252,7 @@ function resolveTracks(tracksParam, tracksClrParam) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 function makeCrumbStore() {
-    return { lat: [], lng: [], t: [], zone: [], col: [], err: [], pal: [] };
+    return { lat: [], lng: [], t: [], zone: [], col: [], err: [], mow: [], pal: [] };
 }
 function crumbPalIndex(store, hex) {
     let k = store.pal.indexOf(hex);
@@ -251,8 +262,9 @@ function crumbPalIndex(store, hex) {
     }
     return k;
 }
-// Append one crumb (degrees in, scaled internally). zone: int or -1; err: string or null/undefined.
-function crumbPush(store, latDeg, lngDeg, t, zone, hex, err) {
+// Append one crumb (degrees in, scaled internally). zone: int or -1; err: string or null/undefined;
+// mow: 1 = cutting (MOWING/CUTTING_BORDER), 0 = not — the semantic flag the coverage calc keys off.
+function crumbPush(store, latDeg, lngDeg, t, zone, hex, err, mow) {
     store.lat.push(Math.round(latDeg * 1e7));
     store.lng.push(Math.round(lngDeg * 1e7));
     store.t.push(t);
@@ -260,6 +272,7 @@ function crumbPush(store, latDeg, lngDeg, t, zone, hex, err) {
     store.col.push(crumbPalIndex(store, hex));
     // eslint-disable-next-line unicorn/no-null
     store.err.push(err || null);
+    store.mow.push(mow ? 1 : 0);
 }
 // First index with t >= cutoff (binary search; t ascending). −∞ cutoff → 0.
 function crumbStartIndex(store, cutoff) {
@@ -284,7 +297,8 @@ function encodeCrumbsWire(store, startIdx) {
         t = [],
         z = [],
         c = [],
-        err = [];
+        err = [],
+        m = [];
     let pl = 0,
         pn = 0,
         pt = 0;
@@ -302,8 +316,9 @@ function encodeCrumbsWire(store, startIdx) {
         z.push(store.zone[i]);
         c.push(store.col[i]);
         err.push(store.err[i]);
+        m.push(store.mow[i]);
     }
-    return { n, pal: store.pal, lat, lng, t, z, c, err };
+    return { n, pal: store.pal, lat, lng, t, z, c, err, m };
 }
 // Build a store from a legacy v2 persist payload (array of { lat, lng, t, zone, color, err } objects).
 function crumbStoreFromV2(arr) {
@@ -311,9 +326,96 @@ function crumbStoreFromV2(arr) {
     for (const c of arr) {
         if (typeof c.lat !== 'number' || typeof c.lng !== 'number') continue;
         const zone = c.zone === undefined || c.zone === null ? -1 : Number(c.zone);
-        crumbPush(store, c.lat, c.lng, c.t, Number.isFinite(zone) ? zone : -1, c.color || '#ffffff', c.err);
+        // legacy v2 has no mow flag — derive it from the rendered colour (green = cutting).
+        crumbPush(store, c.lat, c.lng, c.t, Number.isFinite(zone) ? zone : -1, c.color || '#ffffff', c.err, c.color === '#34a853' ? 1 : 0);
     }
     return store;
+}
+
+// ---- zone spatial-coverage estimate -------------------------------------------------------------------------
+// The "thick calculation": rasterise a swath-width capsule along the cutting path and measure what fraction of
+// the zone polygon it paints. All geometry is in local ENU metres (origin = RTK reference), so the crumb
+// lat/lng and the zone polygon must both be projected through llToMetres against the same reference first.
+function llToMetres(latDeg, lngDeg, ref) {
+    const R = 6_371_000;
+    return {
+        x: ((lngDeg - ref.longitude) * Math.PI * R * Math.cos((ref.latitude * Math.PI) / 180)) / 180,
+        y: ((latDeg - ref.latitude) * Math.PI * R) / 180,
+    };
+}
+function pointInPolygon(x, y, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x,
+            yi = poly[i].y,
+            xj = poly[j].x,
+            yj = poly[j].y;
+        if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+}
+function distToSegment(px, py, ax, ay, bx, by) {
+    const dx = bx - ax,
+        dy = by - ay,
+        l2 = dx * dx + dy * dy;
+    if (l2 === 0) return Math.hypot(px - ax, py - ay);
+    let t = ((px - ax) * dx + (py - ay) * dy) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+// poly/pos are arrays of {x,y} (pos also carry {t}) in metres. Returns coverage 0..100 = painted-in-polygon
+// cells / total-in-polygon cells, where each consecutive cutting pair paints a capsule of width=swath.
+function swathCoveragePercent(poly, pos, swath, cell) {
+    let mnx = Infinity,
+        mxx = -Infinity,
+        mny = Infinity,
+        mxy = -Infinity;
+    for (const p of poly) {
+        if (p.x < mnx) mnx = p.x;
+        if (p.x > mxx) mxx = p.x;
+        if (p.y < mny) mny = p.y;
+        if (p.y > mxy) mxy = p.y;
+    }
+    const nx = Math.ceil((mxx - mnx) / cell) + 1,
+        ny = Math.ceil((mxy - mny) / cell) + 1;
+    const inPoly = new Uint8Array(nx * ny);
+    let total = 0;
+    for (let iy = 0; iy < ny; iy++)
+        for (let ix = 0; ix < nx; ix++)
+            if (pointInPolygon(mnx + (ix + 0.5) * cell, mny + (iy + 0.5) * cell, poly)) {
+                inPoly[iy * nx + ix] = 1;
+                total++;
+            }
+    if (total === 0) return undefined;
+    const r = swath / 2;
+    const vis = new Uint8Array(nx * ny);
+    const paint = (ax, ay, bx, by) => {
+        let ix0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - mnx) / cell)),
+            ix1 = Math.min(nx - 1, Math.ceil((Math.max(ax, bx) + r - mnx) / cell)),
+            iy0 = Math.max(0, Math.floor((Math.min(ay, by) - r - mny) / cell)),
+            iy1 = Math.min(ny - 1, Math.ceil((Math.max(ay, by) + r - mny) / cell));
+        for (let iy = iy0; iy <= iy1; iy++)
+            for (let ix = ix0; ix <= ix1; ix++) {
+                const k = iy * nx + ix;
+                if (!inPoly[k] || vis[k]) continue;
+                if (distToSegment(mnx + (ix + 0.5) * cell, mny + (iy + 0.5) * cell, ax, ay, bx, by) <= r) vis[k] = 1;
+            }
+    };
+    for (let i = 0; i < pos.length; i++) {
+        const p = pos[i];
+        if (i > 0) {
+            const a = pos[i - 1],
+                d = Math.hypot(p.x - a.x, p.y - a.y);
+            if (d < 3 && p.t - a.t < 8000) {
+                paint(a.x, a.y, p.x, p.y); // capsule between consecutive cutting fixes
+                continue;
+            }
+        }
+        paint(p.x, p.y, p.x, p.y); // lone disc at a gap / first point
+    }
+    let covered = 0;
+    for (let k = 0; k < vis.length; k++) if (vis[k]) covered++;
+    return (100 * covered) / total;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -755,12 +857,38 @@ class WebStatusProcessor {
         // (currentZone undefined = docked / going-home / stopped) is 'docked' — a return to base, which can be
         // for many reasons (battery, schedule, rain, fault, …), so the tag is "returned", not "completed".
         if (currentZone !== previousZone && previousZone !== undefined && previousPercent >= ZONE_COMPLETION_THRESHOLD_PERCENT)
-            this._appendZoneCompletions(previousZone, previousPercent, currentZone === undefined ? 'docked' : 'progressed');
+            this._appendZoneCompletions(previousZone, previousPercent, currentZone === undefined ? 'docked' : 'progressed', this._computeZoneCoverage(previousZone));
         this._activeMowingZone = currentZone;
         this._activeMowingPercent = currentZone ? currentPercent : 0;
     }
 
-    _appendZoneCompletions(zone, percent, trigger) {
+    // The thick calc: spatial coverage of the just-ended run as a cross-check on the reported %. Walks the
+    // crumb buffer back to the last zone change, keeps the cutting (mow=1) fixes for this zone, projects them
+    // and the zone polygon into local metres against the RTK reference, and measures swath-capsule coverage.
+    // Returns a rounded percent, or undefined when we can't compute one (no perimeters / unknown zone / too
+    // few fixes) — callers store undefined and the UI renders it as "no estimate".
+    _computeZoneCoverage(zoneStr) {
+        const ref = this.perimeters?.referencePosition;
+        const zone = this.perimeters?.zones?.find((z) => String(z.id) === String(zoneStr));
+        if (!ref?.latitude || !zone?.path || zone.path.length < 3) return undefined;
+        const zid = Number(zoneStr);
+        const s = this.crumbs;
+        const pos = [];
+        // newest→oldest: collect this zone's cutting fixes, stop at the previous run (a different real zone).
+        for (let i = s.t.length - 1; i >= 0; i--) {
+            const z = s.zone[i];
+            if (z === zid) {
+                if (s.mow[i]) pos.push({ ...llToMetres(s.lat[i] / 1e7, s.lng[i] / 1e7, ref), t: s.t[i] });
+            } else if (z !== -1) break; // hit the prior run; -1 (transit) crumbs are skipped, not a boundary
+        }
+        if (pos.length < COVERAGE_MIN_CRUMBS) return undefined;
+        pos.reverse(); // back to chronological for the capsule continuity gate
+        const poly = zone.path.map((p) => llToMetres(p.latitude, p.longitude, ref));
+        const pct = swathCoveragePercent(poly, pos, CRUMB_SWATH_M, COVERAGE_GRID_M);
+        return pct === undefined ? undefined : Math.round(pct);
+    }
+
+    _appendZoneCompletions(zone, percent, trigger, coveragePct) {
         const rounded = Math.round(percent);
         // De-dupe transient oscillations: if the most recent record for this zone is within the
         // dedupe window, treat the new event as a continuation of the same session and update
@@ -775,18 +903,20 @@ class WebStatusProcessor {
         }
         if (recent && Date.now() - recent.t < ZONE_COMPLETION_DEDUPE_WINDOW_MS) {
             const merged = Math.max(recent.percent, rounded);
-            if (merged !== recent.percent || recent.trigger !== trigger || Date.now() - recent.t > 30_000) {
+            if (merged !== recent.percent || recent.trigger !== trigger || coveragePct !== undefined || Date.now() - recent.t > 30_000) {
                 recent.percent = merged;
                 recent.trigger = trigger; // the merged session's tag reflects how it most recently ended
+                if (coveragePct !== undefined) recent.coveragePct = coveragePct; // freshest estimate for the merged run
                 recent.t = Date.now();
                 this.zoneCompletionsDirty = true;
             }
             return;
         }
-        this.zoneCompletions.push({ zone, percent: rounded, t: Date.now(), trigger });
+        this.zoneCompletions.push({ zone, percent: rounded, t: Date.now(), trigger, coveragePct });
         this._pruneZoneCompletions();
         this.zoneCompletionsDirty = true;
-        this.logger(`WebStatus: zone ${zone} completion ${rounded}% (${trigger}) recorded`);
+        const covNote = coveragePct === undefined ? '' : `, ~${coveragePct}% covered`;
+        this.logger(`WebStatus: zone ${zone} completion ${rounded}% (${trigger})${covNote} recorded`);
     }
 
     // Two-axis prune: by absolute age (zoneCompletionDays) and per-zone count cap. The latter
@@ -830,7 +960,7 @@ class WebStatusProcessor {
     _saveZoneCompletions() {
         if (this.zoneCompletionsDirty)
             try {
-                const json = JSON.stringify({ version: 2, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
+                const json = JSON.stringify({ version: 3, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
                 fs.writeFileSync(this._filenameZoneCompletions(), zlib.gzipSync(json));
                 this.zoneCompletionsDirty = false;
             } catch (e) {
@@ -912,10 +1042,14 @@ class WebStatusProcessor {
         if (r.docked) return; // don't collect crumbs while parked — the robot just sits on the dock reporting the same spot
         const zone = r.mowing && !r.docked && r.mowing.zone !== undefined && r.mowing.zone !== null ? Number(r.mowing.zone) : -1;
         const color = this._serverCrumbColor();
+        // mow flag: 1 = actively cutting (MOWING/CUTTING_BORDER), 0 = otherwise. The coverage calc only counts
+        // cutting fixes — driving to/from a zone or pausing in it shouldn't paint coverage.
+        const st = (r.statusType || '').toUpperCase();
+        const mow = st === 'MOWING' || st === 'CUTTING_BORDER' ? 1 : 0;
         // For red ("alarm") crumbs capture a short fault text (stored full-size inline in the err column —
         // ~2% of crumbs, so cheap). lat/lng are scaled to 1e7 ints (~1cm) inside crumbPush.
         const err = color === '#ea4335' ? [r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || undefined : undefined;
-        crumbPush(this.crumbs, lat, lng, Date.now(), Number.isFinite(zone) ? zone : -1, color, err);
+        crumbPush(this.crumbs, lat, lng, Date.now(), Number.isFinite(zone) ? zone : -1, color, err, mow);
         this._pruneCrumbs();
         this.crumbsDirty = true;
     }
@@ -933,6 +1067,7 @@ class WebStatusProcessor {
         s.zone.splice(0, k);
         s.col.splice(0, k);
         s.err.splice(0, k);
+        s.mow.splice(0, k);
         return true;
     }
 
@@ -948,7 +1083,7 @@ class WebStatusProcessor {
             try {
                 const s = this.crumbs;
                 const json = JSON.stringify({
-                    version: 3,
+                    version: 4,
                     robotMac: this.state.robot.mac,
                     savedAt: new Date().toISOString(),
                     retentionDays: this.persistDays,
@@ -959,6 +1094,7 @@ class WebStatusProcessor {
                     zone: s.zone,
                     col: s.col,
                     err: s.err,
+                    mow: s.mow,
                 });
                 fs.writeFileSync(this._filenameCrumbs(), zlib.gzipSync(json));
                 this.crumbsDirty = false;
@@ -973,9 +1109,13 @@ class WebStatusProcessor {
             try {
                 const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
                 const data = JSON.parse(json);
-                if (data?.version === 3 && Array.isArray(data.t)) {
-                    this.crumbs = { lat: data.lat || [], lng: data.lng || [], t: data.t || [], zone: data.zone || [], col: data.col || [], err: data.err || [], pal: data.pal || [] };
-                    this.crumbsDirty = this._pruneCrumbs();
+                if ((data?.version === 3 || data?.version === 4) && Array.isArray(data.t)) {
+                    const pal = data.pal || [];
+                    // v3 predates the mow flag — derive it from the stored colour (green = cutting); v4 has it.
+                    const greenIdx = pal.indexOf('#34a853');
+                    const mow = Array.isArray(data.mow) ? data.mow : (data.col || []).map((c) => (c === greenIdx ? 1 : 0));
+                    this.crumbs = { lat: data.lat || [], lng: data.lng || [], t: data.t || [], zone: data.zone || [], col: data.col || [], err: data.err || [], mow, pal };
+                    this.crumbsDirty = this._pruneCrumbs() || data.version === 3; // re-persist as v4 if migrated
                 } else if (Array.isArray(data?.crumbs)) {
                     this.crumbs = crumbStoreFromV2(data.crumbs); // migrate legacy v2 objects -> columnar
                     this._pruneCrumbs();
@@ -1297,9 +1437,11 @@ html,body{margin:0;height:100%}
 #zonepanel td{padding:2px 0;vertical-align:top;font-size:12px}
 #zonepanel td.zn{padding-right:12px;white-space:nowrap;font-weight:600}
 #zonepanel td.zp{padding-right:8px;white-space:nowrap;text-align:right;color:#137333;font-variant-numeric:tabular-nums}
+#zonepanel td.zc{padding-right:10px;white-space:nowrap;text-align:right;color:#9aa0a6;font-variant-numeric:tabular-nums;cursor:default}
 #zonepanel td.zg{padding-right:10px;text-align:center;color:#5f6368;cursor:default}
 #zonepanel td.zt{color:#80868b;white-space:nowrap;text-align:right;font-size:11px}
 #statusbox .zonelast .ztrig{color:#80868b;cursor:default}
+#statusbox .zonelast .zcov{color:#9aa0a6;cursor:default}
 #zonepanel .zsep td{border-top:1px solid #eee;padding-top:5px}
 #cmdbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
@@ -1568,7 +1710,7 @@ function parseTracksClrSpec(raw){
 }
 // Columnar crumb store (mirror of the server form): parallel arrays + colour palette + inline err column.
 // lat/lng are 1e7-scaled ints; accessors hand back degrees / hex. zone is an int, -1 = unzoned.
-function makeCrumbStore(){ return { lat:[], lng:[], t:[], zone:[], col:[], err:[], pal:[] }; }
+function makeCrumbStore(){ return { lat:[], lng:[], t:[], zone:[], col:[], err:[], mow:[], pal:[] }; }
 function crumbN(){ return crumbs.t.length; }
 function crumbPalIdx(hex){ var k = crumbs.pal.indexOf(hex); if(k < 0){ k = crumbs.pal.length; crumbs.pal.push(hex); } return k; }
 // Number of distinct contiguous runs currently in the client crumb buffer (a run = a contiguous one-zone
@@ -1933,7 +2075,7 @@ function hydrateInitialCrumbs(){
     lo = (i === 0) ? W.lng[i] : lo + W.lng[i];
     tt = (i === 0) ? W.t[i]   : tt + W.t[i];
     crumbs.lat.push(la); crumbs.lng.push(lo); crumbs.t.push(tt);
-    crumbs.zone.push(W.z[i]); crumbs.col.push(W.c[i]); crumbs.err.push(W.err ? W.err[i] : null);
+    crumbs.zone.push(W.z[i]); crumbs.col.push(W.c[i]); crumbs.err.push(W.err ? W.err[i] : null); crumbs.mow.push(W.m ? W.m[i] : 0);
     if(i > 0){
       var hex = crumbs.pal[W.c[i]];
       var seg = new google.maps.Polyline({
@@ -2121,6 +2263,9 @@ function zoneTriggerMark(trigger){
   if(trigger === 'docked') return { sym: '⌂', title: 'returned to dock' };
   return { sym: '?', title: 'undetermined (legacy entry — recorded before trigger tracking)' };
 }
+// Spatial-coverage estimate for a completion entry: the fraction of the zone the robot actually drove over
+// while cutting on that run. Reads lower than the reported % (per-run, not cumulative); '' when unavailable.
+function zoneCoverageText(pct){ return (typeof pct === 'number') ? '~' + pct + '%' : ''; }
 
 function refresh(){
   loadPerimeters();
@@ -2201,13 +2346,15 @@ function recordCrumb(){
   lastCrumbTime = r.updatedPosition;
   var color = crumbColor(r);
   var zone = (r.mowing && !r.docked && r.mowing.zone !== null && r.mowing.zone !== undefined) ? Number(r.mowing.zone) : -1;
+  var st = (r.statusType || '').toUpperCase();
+  var mow = (st === 'MOWING' || st === 'CUTTING_BORDER') ? 1 : 0; // mirror the server mow flag
   // Capture an alarm string for red crumbs so the alarm panel can dedupe by it (stored full-size inline).
   var err = color === '#ea4335' ? ([r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || null) : null;
   var i = crumbN(), hadPrev = i > 0, prevLat, prevLng;
   if(hadPrev){ prevLat = crumbs.lat[i-1]; prevLng = crumbs.lng[i-1]; }
   var latInt = Math.round(r.latitude * 1e7), lngInt = Math.round(r.longitude * 1e7), t = Date.now();
   crumbs.lat.push(latInt); crumbs.lng.push(lngInt); crumbs.t.push(t);
-  crumbs.zone.push(isFinite(zone) ? zone : -1); crumbs.col.push(crumbPalIdx(color)); crumbs.err.push(err);
+  crumbs.zone.push(isFinite(zone) ? zone : -1); crumbs.col.push(crumbPalIdx(color)); crumbs.err.push(err); crumbs.mow.push(mow);
   if(hadPrev){
     var seg = new google.maps.Polyline({
       path: [{ lat: prevLat/1e7, lng: prevLng/1e7 }, { lat: latInt/1e7, lng: lngInt/1e7 }],
@@ -2608,9 +2755,11 @@ function showZonePanel(){
     for(var j = 0; j < entries.length; j++){
       var e = entries[j];
       var mk = zoneTriggerMark(e.trigger);
+      var cov = zoneCoverageText(e.coveragePct);
       html += '<tr' + (j === 0 && i > 0 ? ' class="zsep"' : (j > 0 ? '' : (i === 0 ? '' : ''))) + '>' +
         '<td class="zn">' + (j === 0 ? esc(zoneLabel(z)) : '') + '</td>' +
         '<td class="zp">' + esc(e.percent) + '%</td>' +
+        '<td class="zc" title="estimated spatial coverage of this run (cutting positions painted over the zone area) — a per-run cross-check on the reported %">' + esc(cov) + '</td>' +
         '<td class="zg" title="' + esc(mk.title) + '">' + mk.sym + '</td>' +
         '<td class="zt">' + esc(ago(new Date(e.t).toISOString())) + '</td>' +
       '</tr>';
@@ -2949,7 +3098,8 @@ function renderStatusBox(){
   if(Array.isArray(zc) && zc.length > 0){
     var latest = zc[0];
     var lmk = zoneTriggerMark(latest.trigger);
-    zoneLastRow = '<div class="zonelast" data-zonepanel="1">' + esc(zoneLabel(latest.zone)) + ' - ' + esc(latest.percent) + '% <span class="ztrig" title="' + esc(lmk.title) + '">' + lmk.sym + '</span> · ' + esc(ago(new Date(latest.t).toISOString())) + '</div>';
+    var lcov = zoneCoverageText(latest.coveragePct);
+    zoneLastRow = '<div class="zonelast" data-zonepanel="1">' + esc(zoneLabel(latest.zone)) + ' - ' + esc(latest.percent) + '% ' + (lcov ? '<span class="zcov" title="estimated spatial coverage of this run">' + esc(lcov) + '</span> ' : '') + '<span class="ztrig" title="' + esc(lmk.title) + '">' + lmk.sym + '</span> · ' + esc(ago(new Date(latest.t).toISOString())) + '</div>';
   }
   var link = linkState();
   var linkTag = '<span class="linktag ' + link.cls + '">' + esc(link.label) + '</span>';
