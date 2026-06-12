@@ -355,7 +355,7 @@ class WebStatusProcessor {
         // zone-completion tracking — see ZONE_COMPLETION_* constants for retention/threshold.
         // Hardcoded 90-day default (vs the configurable crumb retention) because the records
         // are tiny and the value of a long trail (seasonal mowing history) outweighs the cost.
-        this.zoneCompletions = []; // chronological [{ zone: "5", percent: 87, t: 1716480000000 }]
+        this.zoneCompletions = []; // chronological [{ zone: "5", percent: 87, t: ..., trigger: 'docked'|'progressed' }] (older entries lack trigger)
         this.zoneCompletionsDirty = false;
         this.zoneCompletionDays = options.zoneCompletionDays || ZONE_COMPLETIONS_PERSIST_DEFAULT_DAYS;
         this._activeMowingZone = undefined; // last seen non-null zone (used for transition detection)
@@ -751,12 +751,16 @@ class WebStatusProcessor {
         const currentPercent = m && typeof m.zoneCompleted === 'number' ? m.zoneCompleted : 0;
         const previousZone = this._activeMowingZone;
         const previousPercent = this._activeMowingPercent;
-        if (currentZone !== previousZone && previousZone !== undefined && previousPercent >= ZONE_COMPLETION_THRESHOLD_PERCENT) this._appendZoneCompletions(previousZone, previousPercent);
+        // Tag how the zone ended: a switch to ANOTHER zone is 'progressed'; leaving to a non-zone state
+        // (currentZone undefined = docked / going-home / stopped) is 'docked' — a return to base, which can be
+        // for many reasons (battery, schedule, rain, fault, …), so the tag is "returned", not "completed".
+        if (currentZone !== previousZone && previousZone !== undefined && previousPercent >= ZONE_COMPLETION_THRESHOLD_PERCENT)
+            this._appendZoneCompletions(previousZone, previousPercent, currentZone === undefined ? 'docked' : 'progressed');
         this._activeMowingZone = currentZone;
         this._activeMowingPercent = currentZone ? currentPercent : 0;
     }
 
-    _appendZoneCompletions(zone, percent) {
+    _appendZoneCompletions(zone, percent, trigger) {
         const rounded = Math.round(percent);
         // De-dupe transient oscillations: if the most recent record for this zone is within the
         // dedupe window, treat the new event as a continuation of the same session and update
@@ -771,17 +775,18 @@ class WebStatusProcessor {
         }
         if (recent && Date.now() - recent.t < ZONE_COMPLETION_DEDUPE_WINDOW_MS) {
             const merged = Math.max(recent.percent, rounded);
-            if (merged !== recent.percent || Date.now() - recent.t > 30_000) {
+            if (merged !== recent.percent || recent.trigger !== trigger || Date.now() - recent.t > 30_000) {
                 recent.percent = merged;
+                recent.trigger = trigger; // the merged session's tag reflects how it most recently ended
                 recent.t = Date.now();
                 this.zoneCompletionsDirty = true;
             }
             return;
         }
-        this.zoneCompletions.push({ zone, percent: rounded, t: Date.now() });
+        this.zoneCompletions.push({ zone, percent: rounded, t: Date.now(), trigger });
         this._pruneZoneCompletions();
         this.zoneCompletionsDirty = true;
-        this.logger(`WebStatus: zone ${zone} completion ${rounded}% recorded`);
+        this.logger(`WebStatus: zone ${zone} completion ${rounded}% (${trigger}) recorded`);
     }
 
     // Two-axis prune: by absolute age (zoneCompletionDays) and per-zone count cap. The latter
@@ -825,7 +830,7 @@ class WebStatusProcessor {
     _saveZoneCompletions() {
         if (this.zoneCompletionsDirty)
             try {
-                const json = JSON.stringify({ version: 1, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
+                const json = JSON.stringify({ version: 2, robotMac: this.state.robot.mac, savedAt: new Date().toISOString(), retentionDays: this.zoneCompletionDays, completions: this.zoneCompletions });
                 fs.writeFileSync(this._filenameZoneCompletions(), zlib.gzipSync(json));
                 this.zoneCompletionsDirty = false;
             } catch (e) {
@@ -1291,8 +1296,10 @@ html,body{margin:0;height:100%}
 #zonepanel table{border-collapse:collapse;width:100%}
 #zonepanel td{padding:2px 0;vertical-align:top;font-size:12px}
 #zonepanel td.zn{padding-right:12px;white-space:nowrap;font-weight:600}
-#zonepanel td.zp{padding-right:12px;white-space:nowrap;text-align:right;color:#137333;font-variant-numeric:tabular-nums}
+#zonepanel td.zp{padding-right:8px;white-space:nowrap;text-align:right;color:#137333;font-variant-numeric:tabular-nums}
+#zonepanel td.zg{padding-right:10px;text-align:center;color:#5f6368;cursor:default}
 #zonepanel td.zt{color:#80868b;white-space:nowrap;text-align:right;font-size:11px}
+#statusbox .zonelast .ztrig{color:#80868b;cursor:default}
 #zonepanel .zsep td{border-top:1px solid #eee;padding-top:5px}
 #cmdbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
@@ -2107,6 +2114,13 @@ function zoneLabel(zoneId){
   if(zoneId === null || zoneId === undefined) return '-';
   return zoneNames[zoneId] ? (zoneNames[zoneId] + ' (' + zoneId + ')') : ('Zone ' + zoneId);
 }
+// How a zone-completion ended: → progressed to the next zone, ⌂ returned to dock (any reason), ? legacy entry
+// recorded before we tracked the trigger (renders as undetermined; expires with the data).
+function zoneTriggerMark(trigger){
+  if(trigger === 'progressed') return { sym: '→', title: 'progressed to next zone' };
+  if(trigger === 'docked') return { sym: '⌂', title: 'returned to dock' };
+  return { sym: '?', title: 'undetermined (legacy entry — recorded before trigger tracking)' };
+}
 
 function refresh(){
   loadPerimeters();
@@ -2593,9 +2607,11 @@ function showZonePanel(){
     var entries = byZone[z];
     for(var j = 0; j < entries.length; j++){
       var e = entries[j];
+      var mk = zoneTriggerMark(e.trigger);
       html += '<tr' + (j === 0 && i > 0 ? ' class="zsep"' : (j > 0 ? '' : (i === 0 ? '' : ''))) + '>' +
         '<td class="zn">' + (j === 0 ? esc(zoneLabel(z)) : '') + '</td>' +
         '<td class="zp">' + esc(e.percent) + '%</td>' +
+        '<td class="zg" title="' + esc(mk.title) + '">' + mk.sym + '</td>' +
         '<td class="zt">' + esc(ago(new Date(e.t).toISOString())) + '</td>' +
       '</tr>';
     }
@@ -2932,7 +2948,8 @@ function renderStatusBox(){
   var zc = state.zoneCompletions;
   if(Array.isArray(zc) && zc.length > 0){
     var latest = zc[0];
-    zoneLastRow = '<div class="zonelast" data-zonepanel="1">' + esc(zoneLabel(latest.zone)) + ' - ' + esc(latest.percent) + '% · ' + esc(ago(new Date(latest.t).toISOString())) + '</div>';
+    var lmk = zoneTriggerMark(latest.trigger);
+    zoneLastRow = '<div class="zonelast" data-zonepanel="1">' + esc(zoneLabel(latest.zone)) + ' - ' + esc(latest.percent) + '% <span class="ztrig" title="' + esc(lmk.title) + '">' + lmk.sym + '</span> · ' + esc(ago(new Date(latest.t).toISOString())) + '</div>';
   }
   var link = linkState();
   var linkTag = '<span class="linktag ' + link.cls + '">' + esc(link.label) + '</span>';
