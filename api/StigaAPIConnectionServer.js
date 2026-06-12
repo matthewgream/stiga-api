@@ -75,7 +75,7 @@ class StigaAPIConnectionServer extends StigaAPIComponent {
         }
     }
 
-    async patch(endpoint, data = {}) {
+    async patch(endpoint, data = {}, extraHeaders = {}) {
         const url = new URL(this.baseUrl + endpoint);
 
         const requestOptions = {
@@ -83,6 +83,7 @@ class StigaAPIConnectionServer extends StigaAPIComponent {
             headers: {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
+                ...extraHeaders, // e.g. a spoofed User-Agent so a perimeter write is recorded as the robot's own
             },
             body: JSON.stringify(data),
         };

@@ -21,11 +21,16 @@ const {
     StigaAPIElements,
 } = require('../api/StigaAPI');
 
+const fs = require('node:fs');
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const LEVELS = { quiet: 1, normal: 2, verbose: 3 };
-const FORMATS = { none: 1, text: 2, json: 3 };
+// none/text/json are display formats; 'native' is an export/import encoding — it means "the command's own raw
+// blob, verbatim" (e.g. the full cloud perimeter resource, or a raw protobuf), used only with --save/--load.
+// The point of native over json is losslessness: it never strips fields we don't happen to parse.
+const FORMATS = { none: 1, text: 2, json: 3, native: 4 };
 
 let globalOptions = {
     debug: false,
@@ -36,7 +41,7 @@ let globalOptions = {
 const display = {
     // progress/help text. In json mode it routes to stderr so stdout stays pure JSON for piping (| jq);
     // in text/none mode it stays on stdout. Suppressed below 'normal' level (e.g. --level quiet) either way.
-    log: (...args) => globalOptions.level >= LEVELS.normal && (globalOptions.format === 'json' ? console.error(...args) : console.log(...args)),
+    log: (...args) => globalOptions.level >= LEVELS.normal && (globalOptions.format === 'json' || globalOptions.format === 'native' ? console.error(...args) : console.log(...args)),
     error: (...args) => console.error(...args),
     debug: (...args) => globalOptions.debug && console.error('[DEBUG]', ...args),
     verbose: (...args) => (globalOptions.level >= LEVELS.verbose || globalOptions.debug) && console.error('[VERBOSE]', ...args),
@@ -44,6 +49,23 @@ const display = {
     text: (...args) => globalOptions.format === 'text' && globalOptions.level >= LEVELS.normal && console.log(...args),
     json: (obj) => globalOptions.format === 'json' && console.log(JSON.stringify(obj)),
 };
+
+// ---- export/import I/O for --save/--load ----------------------------------------------------------------------
+// A command in export mode writes its blob via ioExport (a file path, or '-' = stdout); in import mode it reads
+// via ioImport (a file path, or '-' = stdin). data may be a string or a Buffer. stdout stays clean because
+// progress/log text is routed to stderr under the json/native formats these are used with.
+function ioExport(target, data) {
+    if (target === '-') process.stdout.write(data);
+    else {
+        fs.writeFileSync(target, data);
+        display.log(`wrote ${Buffer.byteLength(data)} bytes to ${target}`);
+    }
+}
+function ioImport(source) {
+    const buf = source === '-' ? fs.readFileSync(0) : fs.readFileSync(source);
+    if (source !== '-') display.log(`read ${buf.length} bytes from ${source}`);
+    return buf; // always a Buffer; the command decodes per its format
+}
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -82,6 +104,12 @@ function commandShowHelp(cmd) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+// validate a flag value against a keyed table (LEVELS/FORMATS), returning it or throwing with the valid set.
+function validateChoice(value, table, flag) {
+    if (!table[value]) throw new Error(`Invalid ${flag} value '${value}': must be ${Object.keys(table).join('|')}`);
+    return value;
+}
+
 function parseArgs() {
     const args = process.argv.slice(2);
     const options = {
@@ -92,49 +120,47 @@ function parseArgs() {
         level: 'normal',
         watch: undefined,
         format: 'text',
+        save: undefined, // --save/--export/--output <file|-> : commands that support it export their blob here
+        load: undefined, // --load/--import/--input  <file|-> : ...and import it from here
         username: undefined,
         password: undefined,
         mqttBroker: undefined,
     };
-    for (let i = 0; i < args.length; i++)
-        // eslint-disable-next-line unicorn/prefer-switch
-        if (args[i] === '--username') {
-            if (++i >= args.length) throw new Error('--username requires a value');
-            options.username = args[i];
-        } else if (args[i] === '--password') {
-            if (++i >= args.length) throw new Error('--password requires a value');
-            options.password = args[i];
-        } else if (args[i] === '--mqtt-broker' || args[i] === '--broker') {
-            if (++i >= args.length) throw new Error('--mqtt-broker/--broker requires a value (e.g. broker, broker1, broker2)');
-            options.mqttBroker = args[i];
-        } else if (args[i] === '--base') {
-            options.target = ['robot', 'both'].includes(options.target) ? 'both' : 'base';
-        } else if (args[i] === '--robot') {
-            options.target = ['base', 'both'].includes(options.target) ? 'both' : 'robot';
-        } else if (args[i] === '--both') {
-            options.target = 'both';
-        } else if (args[i] === '--watch') {
-            options.watch = 5;
-            if (++i < args.length && /^\d+$/.test(args[i])) options.watch = Number.parseInt(args[i]);
-        } else if (args[i] === '--passive') {
-            options.watch = 0;
-        } else if (args[i] === '--level') {
-            if (++i >= args.length) throw new Error(`--level requires a value (${Object.keys(LEVELS).join('|')})`);
-            const v = args[i].toLowerCase();
-            if (!LEVELS[v]) throw new Error(`Invalid --level value '${v}': must be ${Object.keys(LEVELS).join('|')}`);
-            options.level = v;
-        } else if (args[i] === '--format') {
-            if (++i >= args.length) throw new Error(`--format requires a value (${Object.keys(FORMATS).join('|')})`);
-            const v = args[i].toLowerCase();
-            if (!FORMATS[v]) throw new Error(`Invalid --format value '${v}': must be ${Object.keys(FORMATS).join('|')}`);
-            options.format = v;
-        } else if (args[i] === '--debug') {
-            options.debug = true;
-        } else if (options.command === undefined) {
-            options.command = args[i];
-        } else {
-            options.params.push(args[i]);
-        }
+    // value-consuming flags (alias -> option key). Kept as a table so adding aliases doesn't grow the branching
+    // below: --save/--export/--output set 'save'; --load/--import/--input set 'load'.
+    const VALUE_FLAGS = new Map([
+        ['--username', 'username'],
+        ['--password', 'password'],
+        ['--save', 'save'],
+        ['--export', 'save'],
+        ['--output', 'save'],
+        ['--load', 'load'],
+        ['--import', 'load'],
+        ['--input', 'load'],
+    ]);
+    // consume args left-to-right; flags that take a value shift the next token (so '-' and filenames pass through
+    // untouched). A while/shift loop avoids mutating a for-counter and keeps each flag a single flat branch.
+    const next = (label) => {
+        if (args.length === 0) throw new Error(`${label} requires a value`);
+        return args.shift();
+    };
+    /* eslint-disable unicorn/prefer-switch -- compound + table-driven guards don't map cleanly to a switch */
+    while (args.length > 0) {
+        const a = args.shift();
+        if (VALUE_FLAGS.has(a)) options[VALUE_FLAGS.get(a)] = next(a);
+        else if (a === '--mqtt-broker' || a === '--broker') options.mqttBroker = next('--mqtt-broker/--broker (e.g. broker, broker1, broker2)');
+        else if (a === '--base') options.target = ['robot', 'both'].includes(options.target) ? 'both' : 'base';
+        else if (a === '--robot') options.target = ['base', 'both'].includes(options.target) ? 'both' : 'robot';
+        else if (a === '--both') options.target = 'both';
+        else if (a === '--watch') options.watch = args.length > 0 && /^\d+$/.test(args[0]) ? Number.parseInt(args.shift()) : 5;
+        else if (a === '--passive') options.watch = 0;
+        else if (a === '--level') options.level = validateChoice(next('--level').toLowerCase(), LEVELS, '--level');
+        else if (a === '--format') options.format = validateChoice(next('--format').toLowerCase(), FORMATS, '--format');
+        else if (a === '--debug') options.debug = true;
+        else if (options.command === undefined) options.command = a;
+        else options.params.push(a);
+    }
+    /* eslint-enable unicorn/prefer-switch */
     if (!options.target) options.target = 'both';
     globalOptions = { debug: options.debug, level: LEVELS[options.level], format: options.format };
     return options;
@@ -1103,7 +1129,11 @@ function perimeterGeometry(path) {
     };
 }
 
-async function runPerimeters(credentials) {
+async function runPerimeters(credentials, options = {}) {
+    const { save, load, format } = options;
+    if (save && load) throw throwExit('use --save or --load, not both', 1);
+    if ((save || load) && format !== 'native' && format !== 'json') throw throwExit('--save/--load require --format native (lossless, restorable) or json', 1);
+
     const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
     if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
     const server = new StigaAPIConnectionServer(auth);
@@ -1113,6 +1143,25 @@ async function runPerimeters(credentials) {
     const device = garage.getDevices()?.[0];
     if (!device) throw throwExit('no device found in garage', 2);
     const perimeters = new StigaAPIPerimeters(server, device);
+
+    // IMPORT: restore a previously-saved native blob straight back to the cloud. We replace, not merge, and
+    // don't load() first — the file is the source of truth (its uuid targets the PATCH). write() re-stamps the
+    // timestamp/checksum so it supersedes the current record.
+    if (load) {
+        if (format === 'json') throw throwExit('--format json import is not supported yet — use --format native', 1);
+        let data;
+        try {
+            data = JSON.parse(ioImport(load).toString('utf8'));
+        } catch (e) {
+            throw throwExit(`invalid native perimeter file: ${e.message}`, 1);
+        }
+        perimeters.setRawData(data);
+        display.log('restoring perimeter to the cloud...');
+        if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
+        display.log('perimeter restored — cloud copy updated (the robot owns the master; issue a cloudsync to make it pull this)');
+        return;
+    }
+
     if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
 
     const ref = perimeters.getReferencePosition();
@@ -1141,7 +1190,7 @@ async function runPerimeters(credentials) {
         display.text(`    [${obstacle.getId()}] ${area} ${points}`);
     }
 
-    display.json({
+    const jsonValue = {
         source: 'robot',
         kind: 'perimeters',
         value: {
@@ -1154,23 +1203,105 @@ async function runPerimeters(credentials) {
             zones: zones.map((zone) => ({ id: zone.getId(), name: zone.getName() ?? null, area: zone.getArea(), numPoints: zone.getNumPoints(), path: zone.getPath() })),
             obstacles: obstacles.map((obstacle) => ({ id: obstacle.getId(), area: obstacle.getArea(), numPoints: obstacle.getNumPoints(), path: obstacle.getPath() })),
         },
-    });
+    };
+    // EXPORT: native = the full raw cloud resource (lossless + restorable via --load); json = the curated view.
+    if (save) {
+        ioExport(save, format === 'native' ? JSON.stringify(perimeters.getRawData()) : JSON.stringify(jsonValue));
+        return;
+    }
+    display.json(jsonValue);
 }
 
 commandRegister('perimeters', {
-    description: 'Display garden zones and obstacles from the cloud',
+    description: 'Display, back up, or restore garden zones and obstacles from the cloud',
     targets: ['robot'],
-    usage: 'stiga-command perimeters [help]',
-    summary: 'Fetch the garden perimeter map (zones and obstacles, with geometry) from the Stiga Cloud.',
+    usage: 'stiga-command perimeters [--format native|json] [--save <file|->] [--load <file|->] [help]',
+    summary: 'Fetch the garden perimeter map (zones and obstacles, with geometry) from the Stiga Cloud, or back it up / restore it.',
     details: [
         '',
         'Each zone is listed with its id, name, area, point count, bounding-box size and',
         'centre coordinate; obstacles are listed with id, area and point count. JSON output',
         'additionally includes the full polygon path (lat/lng) of every zone and obstacle.',
+        '',
+        'Backup / restore (- means stdout/stdin):',
+        '  --format native --save <file>   back up the FULL raw cloud perimeter (lossless, restorable)',
+        '  --format native --load <file>   restore that backup to the cloud (PATCH; re-stamped so it sticks)',
+        '  --format json   --save <file>   save the curated view (geometry only — NOT restorable)',
+        '',
+        'native is the raw cloud resource verbatim, so no fields are stripped. Restore updates the CLOUD',
+        'copy only — the robot owns the master and will re-publish its own unless told to pull via cloudsync.',
     ],
-    examples: ['stiga-command perimeters', 'stiga-command perimeters --format json | jq .'],
+    examples: [
+        'stiga-command perimeters',
+        'stiga-command perimeters --format json | jq .',
+        'stiga-command perimeters --format native --save perimeters.backup',
+        'stiga-command perimeters --format native --load perimeters.backup',
+    ],
+    // marks this command as backup-capable: the `backup`/`restore` meta-commands drive its export/import with
+    // this format and the standard data/<name>.backup file. native = lossless + restorable.
+    backup: { format: 'native' },
     skipDefaultSetup: true,
-    execute: async (options, context) => runPerimeters(context.credentials),
+    execute: async (options, context) => runPerimeters(context.credentials, options),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Bulk backup/restore: iterate every command that declares `backup` support and drive its existing export/import
+// (--save/--load) against the standard data/<name>.backup file. New backup-capable commands are picked up for
+// free — they only need a `backup: { format }` tag and working save/load.
+
+const BACKUP_DIR = 'data';
+
+async function runBackupRestore(mode, options, context) {
+    const targets = Object.values(commands).filter((c) => c.backup);
+    if (targets.length === 0) throw throwExit('no backup-capable commands are registered', 1);
+    if (mode === 'backup') fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+    let failures = 0;
+    for (const cmd of targets) {
+        const file = `${BACKUP_DIR}/${cmd.name}.backup`;
+        if (mode === 'restore' && !fs.existsSync(file)) {
+            display.log(`restore ${cmd.name}: skipped (no ${file})`);
+            continue;
+        }
+        const sub = { ...options, format: cmd.backup.format, save: mode === 'backup' ? file : undefined, load: mode === 'restore' ? file : undefined };
+        display.log(`${mode} ${cmd.name} ${mode === 'backup' ? '→' : '←'} ${file}`);
+        // run the sub-command under ITS backup format so its normal text/json display is suppressed (the
+        // global display helpers key off globalOptions.format) — we only want the blob written, not a dump.
+        const prevFormat = globalOptions.format;
+        globalOptions.format = cmd.backup.format;
+        try {
+            await cmd.execute(sub, context);
+        } catch (e) {
+            failures++;
+            display.error(`${mode} ${cmd.name} failed: ${e.message}`);
+        } finally {
+            globalOptions.format = prevFormat;
+        }
+    }
+    display.log(`${mode} complete: ${targets.length - failures}/${targets.length} ok`);
+    if (failures > 0) throw throwExit(`${failures} ${mode}(s) failed`, 2);
+}
+
+commandRegister('backup', {
+    description: 'Back up every backup-capable command to data/<command>.backup',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command backup [help]',
+    summary: 'Export each backup-capable command (its lossless native blob) to the standard data/ directory.',
+    details: ['', 'Iterates the command set and exports every command that supports it (currently: perimeters)', 'to data/<command>.backup. Restore the set with `restore`.'],
+    examples: ['stiga-command backup'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runBackupRestore('backup', options, context),
+});
+
+commandRegister('restore', {
+    description: 'Restore every backup-capable command from data/<command>.backup',
+    targets: ['robot', 'base'],
+    usage: 'stiga-command restore [help]',
+    summary: 'Import each backup-capable command from its data/<command>.backup file (skips any that are missing).',
+    details: ['', 'Iterates the command set and imports every command that supports it (currently: perimeters)', 'from data/<command>.backup. For perimeters this PATCHes the cloud copy.'],
+    examples: ['stiga-command restore'],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runBackupRestore('restore', options, context),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------

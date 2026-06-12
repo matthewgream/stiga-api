@@ -240,6 +240,16 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         return false;
     }
 
+    // Raw cloud resource accessors for lossless backup/restore (stiga-command --format native --save/--load).
+    // getRawData() is the exact { id, type, attributes } object load() received; setRawData() installs one to
+    // be PATCHed back by write() (which re-stamps timestamp/checksum). No parsing/curation, so nothing is lost.
+    getRawData() {
+        return this.perimeterData;
+    }
+    setRawData(data) {
+        this.perimeterData = data;
+    }
+
     // Write the currently-loaded perimeter back to the cloud. Mutate the geometry first (via
     // this.perimeterData) then call write(). NOTE: this updates the CLOUD copy only — the robot owns
     // the authoritative map and will re-publish its own copy unless it is told to pull this one with a
@@ -256,16 +266,20 @@ class StigaAPIPerimeters extends StigaAPIComponent {
             return false;
         }
 
-        // Refresh timestamp+checksum so the write supersedes the current record (checksum is the
-        // string form of the epoch-ms timestamp), and drop null-valued top-level fields the write
+        // Normalise the record so a write looks like the robot's own. Refresh timestamp to now (so the write
+        // supersedes the current record), but set checksum to the data_points geometry blob's BYTE LENGTH, not
+        // the timestamp — reverse-engineered 2026-06-12 from a robot-written record whose preview AND
+        // data_points both carried checksum "7134" == data_points.data.length (an epoch-ms cannot equal that).
+        // Both preview and data_points share that one checksum. Drop null-valued top-level fields the write
         // schema rejects (e.g. base_position). Body envelope is { data: <attributes> }.
         // eslint-disable-next-line unicorn/prefer-structured-clone
         const attributes = JSON.parse(JSON.stringify(this.perimeterData.attributes));
         const now = Date.now();
+        const checksum = String(attributes.data_points?.data?.length ?? 0);
         const stamp = (obj) => {
             if (obj) {
                 obj.timestamp = now;
-                obj.checksum = String(now);
+                obj.checksum = checksum;
             }
         };
         stamp(attributes.preview);
@@ -273,7 +287,9 @@ class StigaAPIPerimeters extends StigaAPIComponent {
         for (const key of Object.keys(attributes)) if (attributes[key] === null) delete attributes[key];
 
         try {
-            const response = await this.server.patch(`/api/perimeters/${uuid}`, { data: attributes });
+            // Spoof the robot's user-agent: the cloud stamps data_points.user_agent from this header, so without
+            // it our write is fingerprinted "node" instead of "Stig-A.<mac>".
+            const response = await this.server.patch(`/api/perimeters/${uuid}`, { data: attributes }, { 'User-Agent': `Stig-A.${this.device.getMacAddress()}` });
             if (response.ok) {
                 this.perimeterData.attributes = attributes;
                 this._parseData();
