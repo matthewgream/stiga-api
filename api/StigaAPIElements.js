@@ -9,6 +9,7 @@ function toInt32(value) {
     return value;
 }
 function hexToDouble(hexStr) {
+    if (typeof hexStr !== 'string' || hexStr.length === 0) return undefined; // missing/empty FIXED64 -> no value
     return Buffer.from(hexStr, 'hex').readDoubleLE(0);
 }
 
@@ -91,6 +92,10 @@ function upgradeVersion(version) {
 function _decodeLocationStatus(latitudeOffset, longitudeOffset) {
     const offsetLatitudeCm = hexToDouble(latitudeOffset),
         offsetLongitudeCm = hexToDouble(longitudeOffset);
+    // The RTK offset is a 2D vector — if either component is missing (e.g. the partial location block the robot
+    // emits in STARTUP_REQUIRED, which carries coverage/satellites but no offset) there's nothing meaningful to
+    // report, so omit the offset fields rather than computing an angle/distance from undefined.
+    if (offsetLatitudeCm === undefined || offsetLongitudeCm === undefined) return {};
     // offsetDegrees is a math angle (0°=East, anticlockwise); offsetCompass is a compass bearing (0°=North, clockwise).
     const offsetDegrees = (Math.atan2(offsetLatitudeCm, offsetLongitudeCm) * 180) / Math.PI,
         offsetCompass = (90 - offsetDegrees + 360) % 360;
