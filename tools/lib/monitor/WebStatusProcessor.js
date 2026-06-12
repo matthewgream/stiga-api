@@ -144,6 +144,19 @@ const CRUMB_SWATH_M = 0.28; // estimated cutting swath width (metres)
 const COVERAGE_GRID_M = 0.25; // rasterisation cell for the swath-capsule paint
 const COVERAGE_MIN_CRUMBS = 20; // need at least this many cutting crumbs in the run to bother computing
 
+// geofence violation: for EVERY recorded position (not just cutting — the robot can wander through an obstacle
+// in transit, it doesn't strictly follow the connector paths), compute how far the fix is into a place it
+// shouldn't be. Signed depth in cm stored per crumb: +ve = inside an obstacle (permanent or temporary), -ve =
+// out of bounds (outside every zone), 0 = clean. Out-of-bounds excuses fixes within a corridor of a
+// connect/docking path or near the dock, since transiting those is legitimate. The display/alarm margin is
+// applied to |depth| at render time, so it stays tunable later without recomputing history. Computed once at
+// capture against the perimeter as it was THEN (temp obstacles are transient), with a bbox pre-reject so the
+// per-position cost is a couple of comparisons in the common (clean) case.
+const VIOLATION_MARGIN_CM = 20; // |depth| must exceed this to count as a violation (absorbs GNSS noise / polygon granularity)
+const VIOLATION_PATH_CORRIDOR_M = 0.6; // out-of-bounds fixes within this of a connect/docking path are legitimate transit
+const VIOLATION_BASE_RADIUS_M = 2; // ...as are fixes within this of the dock/reference origin (undock manoeuvring)
+const VIOLATION_DEPTH_CAP_CM = 6000; // clamp stored magnitude (~60 m) so one wild fix can't blow up the int
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // tracksClr — modular trail-window spec. A comma-separated list of window terms; the effective window is the
 // MAX (furthest-back / most inclusive) of all terms, so combining terms widens rather than narrows. Terms:
@@ -252,7 +265,7 @@ function resolveTracks(tracksParam, tracksClrParam) {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 function makeCrumbStore() {
-    return { lat: [], lng: [], t: [], zone: [], col: [], err: [], mow: [], pal: [] };
+    return { lat: [], lng: [], t: [], zone: [], col: [], err: [], mow: [], vdepth: [], pal: [] };
 }
 function crumbPalIndex(store, hex) {
     let k = store.pal.indexOf(hex);
@@ -264,7 +277,8 @@ function crumbPalIndex(store, hex) {
 }
 // Append one crumb (degrees in, scaled internally). zone: int or -1; err: string or null/undefined;
 // mow: 1 = cutting (MOWING/CUTTING_BORDER), 0 = not — the semantic flag the coverage calc keys off.
-function crumbPush(store, latDeg, lngDeg, t, zone, hex, err, mow) {
+// vdepth: signed cm geofence violation depth (+inside obstacle / −out of bounds / 0 clean).
+function crumbPush(store, latDeg, lngDeg, t, zone, hex, err, mow, vdepth) {
     store.lat.push(Math.round(latDeg * 1e7));
     store.lng.push(Math.round(lngDeg * 1e7));
     store.t.push(t);
@@ -273,6 +287,7 @@ function crumbPush(store, latDeg, lngDeg, t, zone, hex, err, mow) {
     // eslint-disable-next-line unicorn/no-null
     store.err.push(err || null);
     store.mow.push(mow ? 1 : 0);
+    store.vdepth.push(vdepth || 0);
 }
 // First index with t >= cutoff (binary search; t ascending). −∞ cutoff → 0.
 function crumbStartIndex(store, cutoff) {
@@ -298,7 +313,8 @@ function encodeCrumbsWire(store, startIdx) {
         z = [],
         c = [],
         err = [],
-        m = [];
+        m = [],
+        v = [];
     let pl = 0,
         pn = 0,
         pt = 0;
@@ -317,19 +333,9 @@ function encodeCrumbsWire(store, startIdx) {
         c.push(store.col[i]);
         err.push(store.err[i]);
         m.push(store.mow[i]);
+        v.push(store.vdepth[i]);
     }
-    return { n, pal: store.pal, lat, lng, t, z, c, err, m };
-}
-// Build a store from a legacy v2 persist payload (array of { lat, lng, t, zone, color, err } objects).
-function crumbStoreFromV2(arr) {
-    const store = makeCrumbStore();
-    for (const c of arr) {
-        if (typeof c.lat !== 'number' || typeof c.lng !== 'number') continue;
-        const zone = c.zone === undefined || c.zone === null ? -1 : Number(c.zone);
-        // legacy v2 has no mow flag — derive it from the rendered colour (green = cutting).
-        crumbPush(store, c.lat, c.lng, c.t, Number.isFinite(zone) ? zone : -1, c.color || '#ffffff', c.err, c.color === '#34a853' ? 1 : 0);
-    }
-    return store;
+    return { n, pal: store.pal, lat, lng, t, z, c, err, m, v };
 }
 
 // ---- zone spatial-coverage estimate -------------------------------------------------------------------------
@@ -416,6 +422,42 @@ function swathCoveragePercent(poly, pos, swath, cell) {
     let covered = 0;
     for (let k = 0; k < vis.length; k++) if (vis[k]) covered++;
     return (100 * covered) / total;
+}
+
+// ---- geofence violation geometry ----------------------------------------------------------------------------
+// Project a {path:[{latitude,longitude}]} ring/line into local-metre points plus its bbox, for cheap pre-reject.
+function projectRing(path, ref) {
+    const pts = path.map((p) => llToMetres(p.latitude, p.longitude, ref));
+    let mnx = Infinity,
+        mxx = -Infinity,
+        mny = Infinity,
+        mxy = -Infinity;
+    for (const p of pts) {
+        if (p.x < mnx) mnx = p.x;
+        if (p.x > mxx) mxx = p.x;
+        if (p.y < mny) mny = p.y;
+        if (p.y > mxy) mxy = p.y;
+    }
+    return { pts, mnx, mxx, mny, mxy };
+}
+// Distance from a point to a polygon's boundary (min over its edges). Used as the "how deep" magnitude.
+function distToRingEdges(x, y, pts) {
+    let best = Infinity;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const d = distToSegment(x, y, pts[j].x, pts[j].y, pts[i].x, pts[i].y);
+        if (d < best) best = d;
+    }
+    return best;
+}
+// Distance from a point to an open polyline (connect/docking path), min over its segments.
+function distToPolyline(x, y, pts) {
+    if (pts.length === 1) return Math.hypot(x - pts[0].x, y - pts[0].y);
+    let best = Infinity;
+    for (let i = 1; i < pts.length; i++) {
+        const d = distToSegment(x, y, pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
+        if (d < best) best = d;
+    }
+    return best;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -749,6 +791,7 @@ class WebStatusProcessor {
     async _handleRefreshPost(req, res) {
         try {
             this.perimeters = undefined;
+            this._perimMetres = undefined; // invalidate the projected-metre cache; rebuilt on next violation check
             await this._loadPerimeters(); // perimeters incl. per-zone settings (cloud)
             if (this.notificationsTimer) clearTimeout(this.notificationsTimer);
             this._startNotificationPoll(); // notifications (cloud)
@@ -886,6 +929,56 @@ class WebStatusProcessor {
         const poly = zone.path.map((p) => llToMetres(p.latitude, p.longitude, ref));
         const pct = swathCoveragePercent(poly, pos, CRUMB_SWATH_M, COVERAGE_GRID_M);
         return pct === undefined ? undefined : Math.round(pct);
+    }
+
+    // Lazily project the current perimeter into local metres (+ bboxes) for the violation check. Cached and
+    // rebuilt only when the perimeter reloads (which sets this._perimMetres = undefined). Combines permanent
+    // and temporary obstacles — both are no-go — and connect+docking paths as legitimate-transit corridors.
+    _perimGeometry() {
+        if (this._perimMetres) return this._perimMetres;
+        const ref = this.perimeters?.referencePosition;
+        if (!ref?.latitude) return undefined;
+        const rings = (list, minPts) => (list || []).filter((e) => Array.isArray(e?.path) && e.path.length >= minPts).map((e) => projectRing(e.path, ref));
+        this._perimMetres = {
+            zones: rings(this.perimeters.zones, 3),
+            obstacles: rings([...(this.perimeters.obstacles || []), ...(this.perimeters.tempObstacles || [])], 3),
+            paths: rings([...(this.perimeters.connectPaths || []), ...(this.perimeters.dockingPaths || [])], 2),
+        };
+        return this._perimMetres;
+    }
+
+    // Signed violation depth in cm for one position: +ve = inside an obstacle (deepest), -ve = out of bounds
+    // (distance past the nearest zone edge), 0 = clean or excused. Bbox pre-reject keeps the clean case cheap.
+    _violationDepthCm(latDeg, lngDeg) {
+        const pm = this._perimGeometry();
+        if (!pm || pm.zones.length === 0) return 0;
+        const { x, y } = llToMetres(latDeg, lngDeg, this.perimeters.referencePosition);
+        const cap = (m) => Math.min(Math.round(m * 100), VIOLATION_DEPTH_CAP_CM);
+        // inside any obstacle? (always a violation — covers transit-through-obstacle). Take the deepest.
+        let deepest = 0;
+        for (const o of pm.obstacles) {
+            if (x < o.mnx || x > o.mxx || y < o.mny || y > o.mxy) continue; // bbox reject
+            if (pointInPolygon(x, y, o.pts)) {
+                const d = distToRingEdges(x, y, o.pts);
+                if (d > deepest) deepest = d;
+            }
+        }
+        if (deepest > 0) return cap(deepest);
+        // inside any zone? then it's in bounds — clean.
+        for (const z of pm.zones) {
+            if (x < z.mnx || x > z.mxx || y < z.mny || y > z.mxy) continue;
+            if (pointInPolygon(x, y, z.pts)) return 0;
+        }
+        // outside every zone: excuse legitimate transit (on a path corridor, or manoeuvring at the dock)
+        if (Math.hypot(x, y) <= VIOLATION_BASE_RADIUS_M) return 0;
+        for (const p of pm.paths) if (distToPolyline(x, y, p.pts) <= VIOLATION_PATH_CORRIDOR_M) return 0;
+        // genuinely out of bounds: depth = distance past the nearest zone boundary, negative
+        let nearest = Infinity;
+        for (const z of pm.zones) {
+            const d = distToRingEdges(x, y, z.pts);
+            if (d < nearest) nearest = d;
+        }
+        return nearest === Infinity ? 0 : -cap(nearest);
     }
 
     _appendZoneCompletions(zone, percent, trigger, coveragePct) {
@@ -1046,10 +1139,15 @@ class WebStatusProcessor {
         // cutting fixes — driving to/from a zone or pausing in it shouldn't paint coverage.
         const st = (r.statusType || '').toUpperCase();
         const mow = st === 'MOWING' || st === 'CUTTING_BORDER' ? 1 : 0;
+        // Geofence violation depth for THIS fix, against the perimeter as it is right now (temp obstacles are
+        // transient — capture-time is the only correct moment). Mirror the current value into state so the
+        // browser can flag the live position and border the "!" button without re-doing the geometry.
+        const vdepth = this._violationDepthCm(lat, lng);
+        r.violationDepthCm = vdepth;
         // For red ("alarm") crumbs capture a short fault text (stored full-size inline in the err column —
         // ~2% of crumbs, so cheap). lat/lng are scaled to 1e7 ints (~1cm) inside crumbPush.
         const err = color === '#ea4335' ? [r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || undefined : undefined;
-        crumbPush(this.crumbs, lat, lng, Date.now(), Number.isFinite(zone) ? zone : -1, color, err, mow);
+        crumbPush(this.crumbs, lat, lng, Date.now(), Number.isFinite(zone) ? zone : -1, color, err, mow, vdepth);
         this._pruneCrumbs();
         this.crumbsDirty = true;
     }
@@ -1068,6 +1166,7 @@ class WebStatusProcessor {
         s.col.splice(0, k);
         s.err.splice(0, k);
         s.mow.splice(0, k);
+        s.vdepth.splice(0, k);
         return true;
     }
 
@@ -1083,7 +1182,7 @@ class WebStatusProcessor {
             try {
                 const s = this.crumbs;
                 const json = JSON.stringify({
-                    version: 4,
+                    version: 5,
                     robotMac: this.state.robot.mac,
                     savedAt: new Date().toISOString(),
                     retentionDays: this.persistDays,
@@ -1095,6 +1194,7 @@ class WebStatusProcessor {
                     col: s.col,
                     err: s.err,
                     mow: s.mow,
+                    vdepth: s.vdepth,
                 });
                 fs.writeFileSync(this._filenameCrumbs(), zlib.gzipSync(json));
                 this.crumbsDirty = false;
@@ -1109,18 +1209,13 @@ class WebStatusProcessor {
             try {
                 const json = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
                 const data = JSON.parse(json);
-                if ((data?.version === 3 || data?.version === 4) && Array.isArray(data.t)) {
-                    const pal = data.pal || [];
-                    // v3 predates the mow flag — derive it from the stored colour (green = cutting); v4 has it.
-                    const greenIdx = pal.indexOf('#34a853');
-                    const mow = Array.isArray(data.mow) ? data.mow : (data.col || []).map((c) => (c === greenIdx ? 1 : 0));
-                    this.crumbs = { lat: data.lat || [], lng: data.lng || [], t: data.t || [], zone: data.zone || [], col: data.col || [], err: data.err || [], mow, pal };
-                    this.crumbsDirty = this._pruneCrumbs() || data.version === 3; // re-persist as v4 if migrated
-                } else if (Array.isArray(data?.crumbs)) {
-                    this.crumbs = crumbStoreFromV2(data.crumbs); // migrate legacy v2 objects -> columnar
-                    this._pruneCrumbs();
-                    this.crumbsDirty = true; // re-persist as v3 on next save
-                } else return;
+                if (!Array.isArray(data?.t)) return; // only the columnar persist is supported (v4+)
+                // vdepth (v5) is the only field that may be absent in a current file; missing → zeros now and a
+                // one-off backfill once perimeters load. (Pre-v4 object-array persists are no longer migrated.)
+                const vdepth = Array.isArray(data.vdepth) ? data.vdepth : data.t.map(() => 0);
+                if (!Array.isArray(data.vdepth)) this._violationBackfillPending = true;
+                this.crumbs = { lat: data.lat || [], lng: data.lng || [], t: data.t || [], zone: data.zone || [], col: data.col || [], err: data.err || [], mow: data.mow || data.t.map(() => 0), vdepth, pal: data.pal || [] };
+                this.crumbsDirty = this._pruneCrumbs() || !Array.isArray(data.vdepth); // re-persist as v5 if migrated
                 this.logger(`WebStatus: crumbs load ${this.crumbs.t.length} from ${file}`);
             } catch (e) {
                 this.logger(`WebStatus: crumbs load failed: ${e.message}`);
@@ -1207,6 +1302,7 @@ class WebStatusProcessor {
             // priority, customAngleActive, customAngle, borderCut }. Cloud-sourced (reloaded on refresh).
             zoneSettings: perimeters.getAllZoneSettings(),
         };
+        this._perimMetres = undefined; // invalidate the projected-metre cache; rebuilt lazily on next check
         if (ref?.latitude && ref?.longitude) {
             this.location = ref;
             this.state.base.latitude = ref.latitude;
@@ -1218,6 +1314,26 @@ class WebStatusProcessor {
                 `${this.perimeters.connectPaths.length} connect-paths, ${this.perimeters.dockingPaths.length} docking-paths, ` +
                 `${this.perimeters.pickupPoints.length} pickup-points`
         );
+        this._backfillCrumbViolations(); // one-off: populate vdepth on crumbs migrated from a pre-violation persist
+    }
+
+    // One-time migration helper: when crumbs were loaded from a v3/v4 persist (no vdepth column), they come in
+    // flagged _violationBackfillPending. Once the perimeter is available we compute each crumb's vdepth against
+    // the CURRENT map and persist forward as v5, so it never runs again. Not temporally exact for crumbs from
+    // when a since-changed temp obstacle existed, but it lights up recent incidents (whose temp obstacle is
+    // still present) and is correct for the unchanging zones + permanent obstacles.
+    _backfillCrumbViolations() {
+        if (!this._violationBackfillPending || !this._perimGeometry()) return;
+        const s = this.crumbs;
+        let hits = 0;
+        for (let i = 0; i < s.t.length; i++) {
+            const v = this._violationDepthCm(s.lat[i] / 1e7, s.lng[i] / 1e7);
+            s.vdepth[i] = v;
+            if (Math.abs(v) >= VIOLATION_MARGIN_CM) hits++;
+        }
+        this._violationBackfillPending = false;
+        this.crumbsDirty = true; // re-persist as v5 so this is a one-time cost
+        this.logger(`WebStatus: backfilled violation depth on ${s.t.length} crumbs (${hits} over threshold)`);
     }
 
     // poll the cloud for notifications. Frequency is adaptive: a fast cadence while the
@@ -1271,6 +1387,7 @@ class WebStatusProcessor {
             pollMs: POLL_MS,
             notifPollMs: NOTIF_POLL_MS_UNDOCKED,
             scheduleTimezone: this.scheduleTimezone,
+            violationMarginCm: VIOLATION_MARGIN_CM, // |vdepth| threshold for flagging a geofence violation (tunable)
             // diagnostics are auth-gated, so only offer them when a credential is configured. The client
             // shows the 🔧 row when ?diagnostics=on AND this list is non-empty.
             diagnostics: this.basicAuth ? Object.entries(DIAGNOSTICS).map(([name, d]) => ({ name, label: d.label, icon: d.icon, type: d.type, metric: d.metric })) : [],
@@ -1346,6 +1463,9 @@ html,body{margin:0;height:100%}
 #statusbox .btngroup .btn{margin-left:0;border:0;border-left:1px solid #c4c7c5;border-radius:0}
 #statusbox .btngroup .btn:first-child{border-left:0}
 #statusbox .btn.on{background:#34a853;border-color:#34a853;color:#fff}
+/* discreet "look under the hood" cue: a red border ring + soft glow, layered over either the default or .on
+   state via box-shadow so it shows regardless. Deliberately static (no pulse) so false positives stay quiet. */
+#statusbox .btn.alert{border-color:#ea4335;box-shadow:0 0 0 1px #ea4335,0 0 4px rgba(234,67,53,.6)}
 #statusbox .btn.dirty{background:#ea4335;border-color:#ea4335;color:#fff;animation:wheelDirtyPulse 1.3s ease-in-out infinite}
 @keyframes wheelDirtyPulse{0%,100%{opacity:1}50%{opacity:.5}}
 #statusbox .btn.busy{opacity:.4;pointer-events:none}
@@ -1710,7 +1830,17 @@ function parseTracksClrSpec(raw){
 }
 // Columnar crumb store (mirror of the server form): parallel arrays + colour palette + inline err column.
 // lat/lng are 1e7-scaled ints; accessors hand back degrees / hex. zone is an int, -1 = unzoned.
-function makeCrumbStore(){ return { lat:[], lng:[], t:[], zone:[], col:[], err:[], mow:[], pal:[] }; }
+function makeCrumbStore(){ return { lat:[], lng:[], t:[], zone:[], col:[], err:[], mow:[], vdepth:[], pal:[] }; }
+var VIOLATION_MARGIN_CM = CONFIG.violationMarginCm || 20; // |vdepth| at/above this counts as a violation
+var VIOLATION_RECENT_MS = 20 * 60 * 1000; // a violation within this window borders the "!" button
+function isViolation(vd){ return Math.abs(vd || 0) >= VIOLATION_MARGIN_CM; }
+// True if any crumb within the recent window breached the margin — drives the discreet "!" button border.
+// Walks newest→oldest and stops at the window edge, so it only ever touches the tail (cheap each poll).
+function hasRecentViolation(){
+  var cutoff = Date.now() - VIOLATION_RECENT_MS;
+  for(var i = crumbs.t.length - 1; i >= 0; i--){ if(crumbs.t[i] < cutoff) break; if(isViolation(crumbs.vdepth[i])) return true; }
+  return false;
+}
 function crumbN(){ return crumbs.t.length; }
 function crumbPalIdx(hex){ var k = crumbs.pal.indexOf(hex); if(k < 0){ k = crumbs.pal.length; crumbs.pal.push(hex); } return k; }
 // Number of distinct contiguous runs currently in the client crumb buffer (a run = a contiguous one-zone
@@ -2076,6 +2206,7 @@ function hydrateInitialCrumbs(){
     tt = (i === 0) ? W.t[i]   : tt + W.t[i];
     crumbs.lat.push(la); crumbs.lng.push(lo); crumbs.t.push(tt);
     crumbs.zone.push(W.z[i]); crumbs.col.push(W.c[i]); crumbs.err.push(W.err ? W.err[i] : null); crumbs.mow.push(W.m ? W.m[i] : 0);
+    crumbs.vdepth.push(W.v ? W.v[i] : 0);
     if(i > 0){
       var hex = crumbs.pal[W.c[i]];
       var seg = new google.maps.Polyline({
@@ -2085,6 +2216,7 @@ function hydrateInitialCrumbs(){
       });
       seg.crumbColor = hex;
       seg.crumbT = tt;
+      seg.violation = isViolation(W.v ? W.v[i] : 0) || isViolation(W.v ? W.v[i-1] : 0); // either endpoint over threshold
       crumbSegments.push(seg);
     }
   }
@@ -2348,13 +2480,14 @@ function recordCrumb(){
   var zone = (r.mowing && !r.docked && r.mowing.zone !== null && r.mowing.zone !== undefined) ? Number(r.mowing.zone) : -1;
   var st = (r.statusType || '').toUpperCase();
   var mow = (st === 'MOWING' || st === 'CUTTING_BORDER') ? 1 : 0; // mirror the server mow flag
+  var vdepth = (typeof r.violationDepthCm === 'number') ? r.violationDepthCm : 0; // server-computed for this fix
   // Capture an alarm string for red crumbs so the alarm panel can dedupe by it (stored full-size inline).
   var err = color === '#ea4335' ? ([r.statusMessage || r.statusType, r.statusText].filter(Boolean).join(' · ') || null) : null;
-  var i = crumbN(), hadPrev = i > 0, prevLat, prevLng;
-  if(hadPrev){ prevLat = crumbs.lat[i-1]; prevLng = crumbs.lng[i-1]; }
+  var i = crumbN(), hadPrev = i > 0, prevLat, prevLng, prevVd;
+  if(hadPrev){ prevLat = crumbs.lat[i-1]; prevLng = crumbs.lng[i-1]; prevVd = crumbs.vdepth[i-1]; }
   var latInt = Math.round(r.latitude * 1e7), lngInt = Math.round(r.longitude * 1e7), t = Date.now();
   crumbs.lat.push(latInt); crumbs.lng.push(lngInt); crumbs.t.push(t);
-  crumbs.zone.push(isFinite(zone) ? zone : -1); crumbs.col.push(crumbPalIdx(color)); crumbs.err.push(err); crumbs.mow.push(mow);
+  crumbs.zone.push(isFinite(zone) ? zone : -1); crumbs.col.push(crumbPalIdx(color)); crumbs.err.push(err); crumbs.mow.push(mow); crumbs.vdepth.push(vdepth);
   if(hadPrev){
     var seg = new google.maps.Polyline({
       path: [{ lat: prevLat/1e7, lng: prevLng/1e7 }, { lat: latInt/1e7, lng: lngInt/1e7 }],
@@ -2363,12 +2496,15 @@ function recordCrumb(){
     });
     seg.crumbColor = color;
     seg.crumbT = t;
+    seg.violation = isViolation(vdepth) || isViolation(prevVd); // either endpoint over threshold
     crumbSegments.push(seg);
     if(color === '#ea4335' && alarmsHighlighted){
       styleAlarmSegment(seg, true);
       // Rebuild clusters so a freshly-recorded alarm shows up as a circle straight away.
       buildAlarmClusters();
     }
+    // a freshly-recorded violation joins the flashing set immediately (the running timer styles it next tick)
+    if(seg.violation && alarmsHighlighted) styleViolationSegment(seg, violationFlashOn);
   }
   applyTracksClr();
 }
@@ -2475,10 +2611,43 @@ function scheduleAlarmTooltipClose(){
   alarmTipCloseTimer = setTimeout(function(){ if(alarmInfoWindow) alarmInfoWindow.close(); alarmTipCloseTimer = null; }, 250);
 }
 
+// Geofence-violation flashing. When alarms are highlighted, segments whose endpoint is inside an obstacle /
+// out of bounds pulse between their own colour and a gamma-lifted (brighter) version of it, so a run that
+// drove somewhere it shouldn't have stands out from the ordinary track without recolouring it to a fixed hue.
+var violationFlashOn = false, violationFlashTimer = null;
+function brightenHex(hex, amt){ // lift toward white by amt (0..1) — the "more gamma" enrichment
+  if(typeof hex !== 'string' || !/^#[0-9a-f]{6}$/i.test(hex)) return hex;
+  var r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  function up(x){ return Math.round(x + (255 - x) * amt); }
+  function h2(x){ return ('0' + x.toString(16)).slice(-2); }
+  return '#' + h2(up(r)) + h2(up(g)) + h2(up(b));
+}
+function styleViolationSegment(seg, bright){
+  if(bright) seg.setOptions({ strokeColor: brightenHex(seg.crumbColor, 0.6), strokeOpacity: 1, strokeWeight: 6, zIndex: 8 });
+  else seg.setOptions({ strokeColor: seg.crumbColor, strokeOpacity: 0.95, strokeWeight: 5, zIndex: 8 });
+}
+function tickViolationFlash(){
+  violationFlashOn = !violationFlashOn;
+  for(var i = 0; i < crumbSegments.length; i++) if(crumbSegments[i].violation) styleViolationSegment(crumbSegments[i], violationFlashOn);
+}
+function startViolationFlash(){
+  if(violationFlashTimer) return;
+  tickViolationFlash();
+  violationFlashTimer = setInterval(tickViolationFlash, 650);
+}
+function stopViolationFlash(){
+  if(violationFlashTimer){ clearInterval(violationFlashTimer); violationFlashTimer = null; }
+  violationFlashOn = false;
+  // restore violation segments to the ordinary track style (red alarm segments are restyled separately below)
+  for(var i = 0; i < crumbSegments.length; i++){
+    var s = crumbSegments[i];
+    if(s.violation && s.crumbColor !== '#ea4335') s.setOptions({ strokeColor: s.crumbColor, strokeOpacity: 0.55, strokeWeight: 3, zIndex: 1 });
+  }
+}
 function applyAlarmsHighlight(){
   applyAlarmSegmentHighlight();
-  if(alarmsHighlighted) buildAlarmClusters();
-  else clearAlarmClusters();
+  if(alarmsHighlighted){ buildAlarmClusters(); startViolationFlash(); }
+  else { clearAlarmClusters(); stopViolationFlash(); }
 }
 function setAlarmsHighlight(on){
   if(alarmsHighlighted === on) return;
@@ -3109,7 +3278,12 @@ function renderStatusBox(){
     // spaced functional buttons (follow, refresh, errors, notifications, settings)
     var followBtn = '<span class="btn' + (followMode ? ' on' : '') + '" onclick="toggleFollow()" title="follow: keep the robot centred as it moves">⌖</span>';
     var refreshBtn = '<span class="btn" onclick="triggerRefresh()" title="re-sync everything: perimeters, zone settings, notifications, robot settings">' + (refreshBusy ? '↻…' : '↻') + '</span>';
-    var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + '" onclick="toggleAlarmsHighlight()" title="highlight error tracks and reveal deduped alarm log on hover">!</span>';
+    // Discreet alert border: robot in an error state OR a geofence violation in the recent window. It's a
+    // quiet "something under the hood" cue (not a loud alarm), so false positives from the synthetic check
+    // stay low-key. Independent of whether the highlight is toggled on.
+    var alarmAlert = (state && state.robot && crumbColor(state.robot) === '#ea4335') || hasRecentViolation();
+    var alarmTitle = alarmAlert ? 'error or geofence violation detected — click to highlight tracks and reveal the alarm log on hover' : 'highlight error tracks and reveal deduped alarm log on hover';
+    var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + (alarmAlert ? ' alert' : '') + '" onclick="toggleAlarmsHighlight()" title="' + alarmTitle + '">!</span>';
     var notifBtn = '<span class="btn' + (notifBoxClosed ? '' : ' on') + '" onclick="toggleNotifBox()" title="show/hide the notifications box">#</span>';
     var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsDirtyFlag ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
     // tracks cluster — bundled tight in one segmented box (power=record, eye=show/hide, ✕=clear, #N=run filter)
