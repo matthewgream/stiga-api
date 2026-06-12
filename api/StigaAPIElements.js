@@ -409,7 +409,7 @@ const ROBOT_STATUS_INFO_CODES = {
     0x0064: 'LOW_BATTERY', // 3/1/1 (100)
     0x00da: 'BLADE_MOTOR_TROUBLE', // 2/3/1
     0x0191: 'BLOCKED', // 3/1/1 (401)
-    // 0x0195: 'UNKNOWN_0195', // 3/1/1 (405) [when BLOCKED]
+    0x0195: 'UNKNOWN_0195', // 3/1/1 (405) [when BLOCKED] ... doesn't surface in the app ...
     // 0x019e: 'UNKNOWN_019E', // 3/1/1 (414)
     0x01a2: 'LID_SENSOR', // 2/1/1 (418)
     0x01a9: 'RAIN_SENSOR', // 3/1/1 (425)
