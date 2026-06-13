@@ -24,6 +24,9 @@
 //                                                        client also console.logs at startup so you can copy it).
 //                                                        Units required on at least one part: 'm' or 'cm'.
 //                                                        Examples: mapPosition=+5m,-5m  mapPosition=+23cm,0m,19
+//                           fit                          Frame the zones bounding box and keep it framed —
+//                                                        re-fits on window resize, ignores the robot-centric
+//                                                        auto-fit. Good for a fixed wall display.
 //                           (omitted)                    Default: fit to zones bounding box once perimeters arrive.
 //   mapControls             on | off                     'off' = disableDefaultUI (no zoom/fullscreen/etc.).
 //
@@ -1758,6 +1761,7 @@ function parseUnitToMeters(s){
 }
 function parseMapPositionSpec(spec){
   if(!spec) return null;
+  if(spec.trim().toLowerCase() === 'fit') return { fit: true, raw: spec }; // declarative "frame the zones"
   var parts = spec.split(',').map(function(s){ return s.trim(); });
   if(parts.length < 2) return null;
   var hasUnit = /(m|cm)$/i.test(parts[0]) || /(m|cm)$/i.test(parts[1]);
@@ -1797,6 +1801,7 @@ function computeZonesBoundsCenter(zones){
 }
 var MAP_POSITION = parseMapPositionSpec(URL_CONFIG.mapPosition);
 var ZONES_CENTRE = null; // populated when perimeters arrive; used as the offset reference
+var PERIMETER_BOUNDS = null; // google.maps.LatLngBounds of the zones; retained so mapPosition=fit can re-fit on resize
 
 // tracksClr — modular trail window (mirror of the server-side parser; same syntax). The #N status button is
 // a simple client-side DISPLAY filter over the crumbs already loaded: it keeps the last N contiguous runs,
@@ -2159,6 +2164,8 @@ function initMap(){
   infoWindow = new google.maps.InfoWindow();
   map.addListener('dragstart', function(){ userMoved = true; });
   map.addListener('idle', logMapPositionFromCurrentView);
+  // mapPosition=fit: keep the garden framed as the window changes size (until the user pans/zooms away)
+  if(MAP_POSITION && MAP_POSITION.fit) window.addEventListener('resize', function(){ if(PERIMETER_BOUNDS && !userMoved) map.fitBounds(PERIMETER_BOUNDS, 60); });
 
   var basePin = new google.maps.marker.PinElement({ background:'#1a73e8', borderColor:'#ffffff', glyphColor:'#ffffff', glyphText:'B' });
   baseMarker = new google.maps.marker.AdvancedMarkerElement({ map: map, position: base, title: 'Base station', content: basePin });
@@ -2327,6 +2334,7 @@ function loadPerimeters(){
       highlightActiveZone();
       ZONES_CENTRE = computeZonesBoundsCenter(p.zones || []);
       if(ZONES_CENTRE) console.log('WebStatus: zones centre = ' + ZONES_CENTRE.lat.toFixed(7) + ', ' + ZONES_CENTRE.lng.toFixed(7) + ' (use as mapPosition reference)');
+      if(any) PERIMETER_BOUNDS = bounds; // retained for mapPosition=fit re-fit on resize
       if(MAP_POSITION && MAP_POSITION.offset && ZONES_CENTRE){
         var target = applyOffsetFromCenter(ZONES_CENTRE, MAP_POSITION.offset.latM, MAP_POSITION.offset.lonM);
         map.setCenter(target);
@@ -2425,7 +2433,8 @@ function refresh(){
         // the status-box strategy line (attachMowFlashHover -> showProposalCircles).
         if(followMode){
           map.panTo(pos); // keep the robot centred (zoom unchanged); takes precedence over the one-time fit
-        } else if(!didFit && !userMoved){
+        } else if(!didFit && !userMoved && !(MAP_POSITION && MAP_POSITION.fit)){
+          // mapPosition=fit stays framed on the whole garden, so skip the robot-centric base+robot auto-fit
           didFit = true;
           var b = new google.maps.LatLngBounds();
           b.extend({ lat: CONFIG.baseLat, lng: CONFIG.baseLng });
