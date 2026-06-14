@@ -1103,6 +1103,10 @@ commandRegister('schedule', {
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // bounding box (width/height in metres) and centroid of a lat/lng polygon
+// One text line for a connector/docking path: id, from-zone -> to-zone (or "dock" when there's no toZone).
+function perimeterPathLine(p) {
+    return `    [${p.getId()}] zone ${p.getFromZone()} -> ${p.getToZone() == null ? 'dock' : 'zone ' + p.getToZone()}`.padEnd(28) + `${p.getPath().length} pts`.padStart(8);
+}
 function perimeterGeometry(path) {
     if (!path || path.length === 0) return undefined;
     let minLat = Infinity,
@@ -1168,6 +1172,11 @@ async function runPerimeters(credentials, options = {}) {
     const timestamp = perimeters.getTimestamp();
     const zones = perimeters.getZones();
     const obstacles = perimeters.getObstacles();
+    const tempObstacles = perimeters.getTempObstacles();
+    const closedZones = perimeters.getClosedZones();
+    const connectPaths = perimeters.getConnectPaths();
+    const dockingPaths = perimeters.getDockingPaths();
+    const pickupPoints = perimeters.getPickupPoints();
 
     display.text('Garden Perimeters:');
     display.text(`  Total: ${perimeters.getTotalArea().toFixed(1)} m² across ${perimeters.getZoneCount()} zones, ${perimeters.getObstacleCount()} obstacles (${perimeters.getTotalPoints()} points)`);
@@ -1189,6 +1198,40 @@ async function runPerimeters(credentials, options = {}) {
         const points = `${obstacle.getNumPoints()} pts`.padStart(8);
         display.text(`    [${obstacle.getId()}] ${area} ${points}`);
     }
+    // Temporary obstacles — auto-expiring no-go zones (app circles, or robot sensor-detected polygons). Same
+    // geometry shape as permanent obstacles; listed separately so they're not mistaken for the fixed map.
+    if (tempObstacles.length > 0) {
+        display.text(`  Temp obstacles (${tempObstacles.length}):`);
+        for (const obstacle of tempObstacles) {
+            const area = `${obstacle.getArea().toFixed(2)} m²`.padStart(11);
+            const points = `${obstacle.getNumPoints()} pts`.padStart(8);
+            display.text(`    [${obstacle.getId()}] ${area} ${points}`);
+        }
+    }
+    // Closed zones — defined but currently disabled in the app (same shape as live zones).
+    if (closedZones.length > 0) {
+        display.text(`  Closed zones (${closedZones.length}):`);
+        for (const zone of closedZones) {
+            const name = (zone.getName() || '-').padEnd(16);
+            const area = `${zone.getArea().toFixed(1)} m²`.padStart(11);
+            const points = `${zone.getNumPoints()} pts`.padStart(8);
+            display.text(`    [${zone.getId()}] ${name} ${area} ${points}`);
+        }
+    }
+    // Connector + docking paths — polylines the robot follows between zones / into the dock (see perimeterPathLine).
+    if (connectPaths.length > 0) {
+        display.text(`  Connect paths (${connectPaths.length}):`);
+        for (const p of connectPaths) display.text(perimeterPathLine(p));
+    }
+    if (dockingPaths.length > 0) {
+        display.text(`  Docking paths (${dockingPaths.length}):`);
+        for (const p of dockingPaths) display.text(perimeterPathLine(p));
+    }
+    // Pickup points — geometry layout still TBD (no sample data yet); dump raw so they're visible if they appear.
+    if (pickupPoints.length > 0) {
+        display.text(`  Pickup points (${pickupPoints.length}):`);
+        for (const pt of pickupPoints) display.text(`    ${JSON.stringify(pt)}`);
+    }
 
     const jsonValue = {
         source: 'robot',
@@ -1202,6 +1245,11 @@ async function runPerimeters(credentials, options = {}) {
             timestamp: timestamp ? timestamp.toISOString() : null,
             zones: zones.map((zone) => ({ id: zone.getId(), name: zone.getName() ?? null, area: zone.getArea(), numPoints: zone.getNumPoints(), path: zone.getPath() })),
             obstacles: obstacles.map((obstacle) => ({ id: obstacle.getId(), area: obstacle.getArea(), numPoints: obstacle.getNumPoints(), path: obstacle.getPath() })),
+            tempObstacles: tempObstacles.map((obstacle) => ({ id: obstacle.getId(), area: obstacle.getArea(), numPoints: obstacle.getNumPoints(), path: obstacle.getPath() })),
+            closedZones: closedZones.map((zone) => ({ id: zone.getId(), name: zone.getName() ?? null, area: zone.getArea(), numPoints: zone.getNumPoints(), path: zone.getPath() })),
+            connectPaths: connectPaths.map((p) => ({ id: p.getId(), fromZone: p.getFromZone(), toZone: p.getToZone() ?? null, numPoints: p.getPath().length, path: p.getPath() })),
+            dockingPaths: dockingPaths.map((p) => ({ id: p.getId(), fromZone: p.getFromZone(), toZone: p.getToZone() ?? null, numPoints: p.getPath().length, path: p.getPath() })),
+            pickupPoints,
         },
     };
     // EXPORT: native = the full raw cloud resource (lossless + restorable via --load); json = the curated view.
@@ -1219,9 +1267,9 @@ commandRegister('perimeters', {
     summary: 'Fetch the garden perimeter map (zones and obstacles, with geometry) from the Stiga Cloud, or back it up / restore it.',
     details: [
         '',
-        'Each zone is listed with its id, name, area, point count, bounding-box size and',
-        'centre coordinate; obstacles are listed with id, area and point count. JSON output',
-        'additionally includes the full polygon path (lat/lng) of every zone and obstacle.',
+        'Each zone is listed with its id, name, area, point count, bounding-box size and centre',
+        'coordinate; permanent and temporary obstacles are listed with id, area and point count.',
+        'JSON output additionally includes the full polygon path (lat/lng) of every zone and obstacle.',
         '',
         'Backup / restore (- means stdout/stdin):',
         '  --format native --save <file>   back up the FULL raw cloud perimeter (lossless, restorable)',
