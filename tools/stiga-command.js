@@ -1016,7 +1016,7 @@ commandRegister('schedule', {
     description: 'Display/enable/disable/insert/remove mowing schedule',
     targets: ['robot'],
     args: '[subcommand]',
-    usage: 'stiga-command --robot schedule [subcommand] [params...] [help]',
+    usage: 'stiga-command --robot schedule [subcommand] [params...] [--save <file|->] [--load <file|->] [help]',
     summary: "Manage the robot's mowing schedule.",
     details: [
         '',
@@ -1026,6 +1026,11 @@ commandRegister('schedule', {
         '  disable              - Disable the schedule',
         '  insert|add <specs>   - Insert time blocks',
         '  remove <specs>       - Remove time blocks',
+        '',
+        'Backup / restore (- means stdout/stdin):',
+        '  --save <file>        - back up the active schedule as JSON',
+        '  --load <file>        - restore a saved schedule to the robot',
+        '  (this is the MQTT schedule the robot runs; the cloud names/multi-session are separate)',
         '',
         'Schedule specification format:',
         '  days:HH:MM-HH:MM',
@@ -1042,10 +1047,31 @@ commandRegister('schedule', {
         'stiga-command --robot schedule add Mon,Wed,Fri:09:00-11:30',
         'stiga-command --robot schedule insert Sat,Sun:08:00-10:00 Sat,Sun:14:00-16:00',
         'stiga-command --robot schedule remove Tue:14:00-16:00',
+        'stiga-command --robot schedule --save data/schedule.backup',
+        'stiga-command --robot schedule --load data/schedule.backup',
     ],
+    // backup-capable via the `backup`/`restore` meta-commands. transport:'mqtt' tells the meta to open a device
+    // connection (perimeters is cloud-only); format json since the schedule isn't a lossless native blob.
+    backup: { format: 'json', transport: 'mqtt' },
     execute: async (options, context) => {
         const { params, device, connectors } = context;
         await connectToRobot(device, connectors);
+        // Phase-one backup/restore of the ACTIVE schedule (the one insert/remove act on). Stored as JSON for
+        // inspectability/hand-editing. This is the MQTT schedule only — the cloud's named multi-session
+        // (working_daytimes) is a separate, later piece. - means stdout/stdin.
+        if (options.load) {
+            const data = JSON.parse(ioImport(options.load).toString('utf8'));
+            display.log('restoring schedule to the robot...');
+            await device.setScheduleSettings(data);
+            const updated = await device.getScheduleSettings({ refresh: 'force' });
+            displaySchedule(updated.value);
+            return;
+        }
+        if (options.save) {
+            const schedule = await device.getScheduleSettings({ refresh: 'force' });
+            ioExport(options.save, JSON.stringify(schedule.value, undefined, 2));
+            return;
+        }
         if (params.length === 0) {
             const schedule = await device.getScheduleSettings({ refresh: 'force' });
             displaySchedule(schedule.value);
@@ -1304,6 +1330,19 @@ async function runBackupRestore(mode, options, context) {
     if (targets.length === 0) throw throwExit('no backup-capable commands are registered', 1);
     if (mode === 'backup') fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
+    // The meta-commands run cloud-only (skipDefaultSetup → just credentials). Cloud-backed commands (perimeters)
+    // use context.credentials; MQTT-backed ones (schedule, tagged transport:'mqtt') need a device + connectors.
+    // Set those up once, lazily, only when a tagged command needs them, and expose both on the sub-context.
+    let connectors;
+    if (targets.some((c) => c.backup.transport === 'mqtt')) {
+        const framework = new StigaAPIFramework({ debug: options.debug });
+        if (!(await framework.load(context.credentials.username, context.credentials.password))) throw throwExit('framework load failed', 2);
+        const { device } = framework.getDeviceAndBasePair();
+        if (!device) throw throwExit('no robot found', 2);
+        connectors = { auth: framework.auth, device, base: undefined, deviceConnection: undefined, connectedDevice: undefined, connectedBase: undefined };
+    }
+    const subContext = { ...context, device: connectors?.device, connectors };
+
     let failures = 0;
     for (const cmd of targets) {
         const file = `${BACKUP_DIR}/${cmd.name}.backup`;
@@ -1313,18 +1352,23 @@ async function runBackupRestore(mode, options, context) {
         }
         const sub = { ...options, format: cmd.backup.format, save: mode === 'backup' ? file : undefined, load: mode === 'restore' ? file : undefined };
         display.log(`${mode} ${cmd.name} ${mode === 'backup' ? '→' : '←'} ${file}`);
-        // run the sub-command under ITS backup format so its normal text/json display is suppressed (the
-        // global display helpers key off globalOptions.format) — we only want the blob written, not a dump.
+        // suppress the sub-command's own text/json dump (display keys off globalOptions.format) — we only want
+        // the blob written. 'none' covers both native and json sub-formats (json would otherwise print).
         const prevFormat = globalOptions.format;
-        globalOptions.format = cmd.backup.format;
+        globalOptions.format = 'none';
         try {
-            await cmd.execute(sub, context);
+            await cmd.execute(sub, subContext);
         } catch (e) {
             failures++;
             display.error(`${mode} ${cmd.name} failed: ${e.message}`);
         } finally {
             globalOptions.format = prevFormat;
         }
+    }
+    // tidy the MQTT connection if we opened one (process.exit on the skipDefaultSetup path also covers this)
+    if (connectors) {
+        if (connectors.connectedDevice) connectors.connectedDevice.destroy();
+        if (connectors.deviceConnection) connectors.deviceConnection.disconnect();
     }
     display.log(`${mode} complete: ${targets.length - failures}/${targets.length} ok`);
     if (failures > 0) throw throwExit(`${failures} ${mode}(s) failed`, 2);
@@ -1335,7 +1379,7 @@ commandRegister('backup', {
     targets: ['robot', 'base'],
     usage: 'stiga-command backup [help]',
     summary: 'Export each backup-capable command (its lossless native blob) to the standard data/ directory.',
-    details: ['', 'Iterates the command set and exports every command that supports it (currently: perimeters)', 'to data/<command>.backup. Restore the set with `restore`.'],
+    details: ['', 'Iterates the command set and exports every command that supports it (perimeters, schedule)', 'to data/<command>.backup. Restore the set with `restore`. Schedule needs a robot/MQTT connection.'],
     examples: ['stiga-command backup'],
     skipDefaultSetup: true,
     execute: async (options, context) => runBackupRestore('backup', options, context),
@@ -1346,7 +1390,7 @@ commandRegister('restore', {
     targets: ['robot', 'base'],
     usage: 'stiga-command restore [help]',
     summary: 'Import each backup-capable command from its data/<command>.backup file (skips any that are missing).',
-    details: ['', 'Iterates the command set and imports every command that supports it (currently: perimeters)', 'from data/<command>.backup. For perimeters this PATCHes the cloud copy.'],
+    details: ['', 'Iterates the command set and imports every command that supports it (perimeters, schedule)', 'from data/<command>.backup. Perimeters PATCHes the cloud; schedule pushes to the robot over MQTT.'],
     examples: ['stiga-command restore'],
     skipDefaultSetup: true,
     execute: async (options, context) => runBackupRestore('restore', options, context),
