@@ -1473,7 +1473,7 @@ html,body{margin:0;height:100%}
 @keyframes wheelDirtyPulse{0%,100%{opacity:1}50%{opacity:.5}}
 #statusbox .btn.busy{opacity:.4;pointer-events:none}
 /* diagnostics drawer row (🔧) under the tracks row */
-#statusbox .tracks.diag{display:flex;align-items:center;gap:6px}
+#statusbox .tracks.diag,#statusbox .tracks.perim{display:flex;align-items:center;gap:6px}
 #statusbox .diagbtns{margin-left:auto}
 #statusbox .diagstat{font-size:11px}
 #statusbox .diagstat.idle{color:#9aa0a6}
@@ -1617,6 +1617,9 @@ var settingsOpen = false, settingsZone = '*', zoneSettings = []; // read-only se
 // Diagnostics drawer (single-slot): one run in flight at a time; result held until viewed in the overlay.
 // diagOpen toggles the 🔧 row's visibility (the 🔧 button lives in the status button row; default collapsed).
 var diagState = { busy: false, running: null, ready: false, result: null }, diagOpen = false, diagHeatmap = [];
+// Perimeters tool row (🗺️ button in the status row; always available — no auth/CGI gate). perimVertices is
+// collected from the perimeter geometry as it's drawn (no extra fetch); the "points" toggle illuminates them.
+var perimOpen = false, perimPointsOn = false, perimVertices = [], perimPointMarkers = [];
 var diagPivot = 0.5; // heatmap midtone pivot (0.5 = neutral); the slider bends the value->colour curve
 var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
@@ -2043,6 +2046,34 @@ window.openDiagnosticOverlay = openDiagnosticOverlay;
 window.closeDiagnosticOverlay = closeDiagnosticOverlay;
 window.copyDiagnosticOutput = copyDiagnosticOutput;
 
+// ---- Perimeters tool row (🗺️) ---------------------------------------------------------------------------------
+// Mirrors the diagnostics row, but always available (no auth/CGI gate). The buttons act on the perimeter
+// geometry already drawn on the map — no extra fetch. First button: illuminate every perimeter vertex.
+function togglePerimeters(){ perimOpen = !perimOpen; renderStatusBox(); }
+// Collected as the perimeter is drawn (loadPerimeters): one entry per vertex, tagged with its line colour.
+function perimAddVerts(path, color){ if(!path) return; for(var i = 0; i < path.length; i++) perimVertices.push({ lat: path[i].latitude, lng: path[i].longitude, color: color }); }
+function clearPerimeterPoints(){ for(var i = 0; i < perimPointMarkers.length; i++) perimPointMarkers[i].setMap(null); perimPointMarkers = []; }
+function drawPerimeterPoints(){
+  clearPerimeterPoints();
+  if(!map) return;
+  for(var i = 0; i < perimVertices.length; i++){
+    var v = perimVertices[i], c = brightenHex(v.color, 0.45); // the line's own colour, gamma-lifted for contrast
+    perimPointMarkers.push(new google.maps.Circle({
+      center: { lat: v.lat, lng: v.lng }, radius: 0.18, // a touch wider than the polyline so vertices read clearly
+      fillColor: c, fillOpacity: 0.95, strokeColor: c, strokeOpacity: 1, strokeWeight: 1,
+      clickable: false, zIndex: 6, map: map
+    }));
+  }
+}
+function togglePerimeterPoints(){ perimPointsOn = !perimPointsOn; if(perimPointsOn) drawPerimeterPoints(); else clearPerimeterPoints(); renderStatusBox(); }
+function renderPerimetersRow(){
+  if(!perimOpen) return '';
+  var pointsBtn = '<span class="btn' + (perimPointsOn ? ' on' : '') + '" onclick="togglePerimeterPoints()" title="illuminate perimeter vertices (borders, obstacles, paths)">⦿</span>';
+  return '<div class="tracks perim"><span class="diagstat idle">perimeters</span><span class="diagbtns">' + pointsBtn + '</span></div>';
+}
+window.togglePerimeters = togglePerimeters;
+window.togglePerimeterPoints = togglePerimeterPoints;
+
 function applyBoxPosition(id, defaultClass, override){
   var el = document.getElementById(id);
   if(!el) return;
@@ -2259,6 +2290,7 @@ function loadPerimeters(){
       perimetersLoading = false;
       if(!p.zones || p.zones.length === 0) return; // server still fetching from cloud — retried on next poll
       perimetersDrawn = true;
+      perimVertices = []; // rebuilt below as each element is drawn, for the perimeters "points" toggle
       // valid zones for the force-cut selector (id + name)
       cutZones = p.zones.filter(function(z){ return typeof z.id === 'number'; }).map(function(z){ return { id: z.id, name: z.name }; });
       var ids = cutZones.map(function(z){ return z.id; });
@@ -2276,6 +2308,7 @@ function loadPerimeters(){
       (p.zones || []).forEach(function(z, i){
         var color = ZONE_COLORS[i % ZONE_COLORS.length];
         var poly = makePolygon(z.path, color, 0.12, 4, 3);
+        perimAddVerts(z.path, color);
         if(poly){
           poly.getPath().forEach(function(ll){ bounds.extend(ll); });
           any = true;
@@ -2288,14 +2321,17 @@ function loadPerimeters(){
       (p.closedZones || []).forEach(function(z, i){
         var color = ZONE_COLORS[(p.zones.length + i) % ZONE_COLORS.length];
         makePolygon(z.path, color, 0.05, 2, 3);
+        perimAddVerts(z.path, color);
       });
       (p.obstacles || []).forEach(function(o){
         makePolygon(o.path, '#ea4335', 0.20, 3, 4);
+        perimAddVerts(o.path, '#ea4335');
       });
       // Temporary obstacles — same shape treatment as permanent obstacles but a brighter red
       // with stronger fill, since they're transient and the user should notice them.
       (p.tempObstacles || []).forEach(function(o){
         makePolygon(o.path, '#ff3b30', 0.32, 3, 4);
+        perimAddVerts(o.path, '#ff3b30');
       });
       // Inter-zone connector paths — drawn ABOVE tracks now, as a thinner grey line. With
       // tracks made semi-transparent below, the bright crumb colours still show through the
@@ -2308,6 +2344,7 @@ function loadPerimeters(){
           strokeColor: '#9aa0a6', strokeOpacity: 0.40, strokeWeight: 7,
           clickable: false, zIndex: 2, map: map
         });
+        perimAddVerts(pp.path, '#9aa0a6');
       });
       // Docking paths — same treatment in base-pin blue. Slightly higher opacity since blue is
       // less dominant visually than the grey at the same opacity.
@@ -2318,6 +2355,7 @@ function loadPerimeters(){
           strokeColor: '#1a73e8', strokeOpacity: 0.50, strokeWeight: 7,
           clickable: false, zIndex: 2, map: map
         });
+        perimAddVerts(pp.path, '#1a73e8');
       });
       // Pickup points — small red circles, top of the stack so they're never hidden.
       (p.pickupPoints || []).forEach(function(pt){
@@ -2331,6 +2369,7 @@ function loadPerimeters(){
           clickable: false, zIndex: 5, map: map
         });
       });
+      if(perimPointsOn) drawPerimeterPoints(); // re-illuminate if the toggle was on before perimeters arrived
       highlightActiveZone();
       ZONES_CENTRE = computeZonesBoundsCenter(p.zones || []);
       if(ZONES_CENTRE) console.log('WebStatus: zones centre = ' + ZONES_CENTRE.lat.toFixed(7) + ', ' + ZONES_CENTRE.lng.toFixed(7) + ' (use as mapPosition reference)');
@@ -3304,7 +3343,9 @@ function renderStatusBox(){
     // 🔧 diagnostics toggle — only exists with ?diagnostics=on (and the server offered it = auth configured);
     // green when the diagnostics row is open, white when collapsed. Far right, after settings.
     var diagBtn = diagnosticsAvailable() ? '<span class="btn' + (diagOpen ? ' on' : '') + '" onclick="toggleDiagnostics()" title="diagnostics">🔧</span>' : '';
-    trk = '<div class="tracks">' + followBtn + refreshBtn + trackGroup + alarmBtn + notifBtn + settingsBtn + diagBtn + '</div>';
+    // perimeters tool row toggle — always shown (no auth/CGI gate)
+    var perimBtn = '<span class="btn' + (perimOpen ? ' on' : '') + '" onclick="togglePerimeters()" title="perimeters">🗺️</span>';
+    trk = '<div class="tracks">' + followBtn + refreshBtn + trackGroup + alarmBtn + notifBtn + settingsBtn + diagBtn + perimBtn + '</div>';
   }
   // firmware OTA progress qualifies the status while an update runs (from JSON_NOTIFICATION). Expire it if
   // it goes stale (~20s without an update — the robot finished or rebooted mid-flight).
@@ -3316,7 +3357,7 @@ function renderStatusBox(){
   box.innerHTML =
     '<h1><span class="dot" style="background:' + robotColor(r) + '"></span>' + (r.name ? "'" + esc(r.name) + "'" : 'Stiga Robot') + linkTag + '</h1>' +
     row('State', place) + row('Status', op, r.interventionRequired ? 'alert' : '') + fwRow + row('Battery', batt) + schedRow + row('Mowing', mow) + tgtRow + zoneLastRow +
-    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk + renderDiagnosticsRow();
+    '<div class="muted">status ' + ago(r.updatedStatus) + ' · position ' + ago(r.updatedPosition) + '</div>' + trk + renderDiagnosticsRow() + renderPerimetersRow();
   attachZonePanelHover();
   attachSchedPanelHover();
   attachMowFlashHover();
