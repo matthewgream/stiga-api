@@ -17,6 +17,7 @@ const StigaAPIUser = require('./StigaAPIUser');
 const StigaAPINotifications = require('./StigaAPINotifications');
 const StigaAPIGarage = require('./StigaAPIGarage');
 const StigaAPIPerimeters = require('./StigaAPIPerimeters');
+const StigaAPIOptimisePerimeters = require('./StigaAPIOptimisePerimeters');
 const StigaAPIBase = require('./StigaAPIBase');
 const StigaAPIDevice = require('./StigaAPIDevice');
 
@@ -45,6 +46,7 @@ module.exports = {
     StigaAPINotifications,
     StigaAPIGarage,
     StigaAPIPerimeters,
+    StigaAPIOptimisePerimeters,
     StigaAPIBase,
     StigaAPIDevice,
     //

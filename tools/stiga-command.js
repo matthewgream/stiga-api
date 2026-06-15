@@ -11,6 +11,7 @@ const {
     StigaAPIConnectionServer,
     StigaAPIGarage,
     StigaAPIPerimeters,
+    StigaAPIOptimisePerimeters,
     StigaAPIUser,
     StigaAPINotifications,
     StigaAPIConnectionDevice,
@@ -122,6 +123,7 @@ function parseArgs() {
         format: 'text',
         save: undefined, // --save/--export/--output <file|-> : commands that support it export their blob here
         load: undefined, // --load/--import/--input  <file|-> : ...and import it from here
+        commit: false, // --commit : commands that mutate (e.g. optimise) only write when this is set; else dry-run
         username: undefined,
         password: undefined,
         mqttBroker: undefined,
@@ -156,6 +158,7 @@ function parseArgs() {
         else if (a === '--passive') options.watch = 0;
         else if (a === '--level') options.level = validateChoice(next('--level').toLowerCase(), LEVELS, '--level');
         else if (a === '--format') options.format = validateChoice(next('--format').toLowerCase(), FORMATS, '--format');
+        else if (a === '--commit') options.commit = true;
         else if (a === '--debug') options.debug = true;
         else if (options.command === undefined) options.command = a;
         else options.params.push(a);
@@ -1316,6 +1319,114 @@ commandRegister('perimeters', {
     backup: { format: 'native' },
     skipDefaultSetup: true,
     execute: async (options, context) => runPerimeters(context.credentials, options),
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// optimise — run a geometry optimisation over the cloud perimeter. The geometry work lives in
+// StigaAPIOptimisePerimeters (so the API, CLI and a future front-end share it); loading + committing live here.
+// Dry-run by default — mutates only the in-memory model and reports; --commit writes to the cloud.
+
+async function runOptimise(credentials, options, rawParams) {
+    // pull eps=/iters=/strength= out of the params, leaving positional grammar: perimeter <op> [type] [id]
+    let epsilon = StigaAPIOptimisePerimeters.REDUCE_DEFAULT_EPSILON_CM;
+    let iterations = StigaAPIOptimisePerimeters.SMOOTH_DEFAULT_ITERATIONS;
+    let strength = StigaAPIOptimisePerimeters.SMOOTH_DEFAULT_STRENGTH;
+    const params = [];
+    for (const p of rawParams) {
+        const eM = /^eps=(\d+(?:\.\d+)?)$/i.exec(p),
+            iM = /^iters=(\d+)$/i.exec(p),
+            sM = /^strength=(\d+(?:\.\d+)?)$/i.exec(p);
+        if (eM) epsilon = Number(eM[1]);
+        else if (iM) iterations = Number(iM[1]);
+        else if (sM) strength = Number(sM[1]);
+        else params.push(p);
+    }
+    const subject = (params[0] || '').toLowerCase();
+    const operation = (params[1] || '').toLowerCase();
+    if (subject !== 'perimeter' || !['reduce', 'smooth'].includes(operation)) throw throwExit('usage: optimise perimeter <reduce|smooth> [zone|obstacle|path|docking] [id] [eps=<cm> | iters=<n> strength=<0..1>] [--commit]', 1);
+    const type = params[2]; // zone|obstacle|path|docking, or undefined = zones+obstacles+connect-paths
+    const id = params[3]; // optional specific element id
+
+    const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+    if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
+    const server = new StigaAPIConnectionServer(auth);
+    if (!(await server.isConnected())) throw throwExit('server connection failed', 2);
+    const garage = new StigaAPIGarage(server);
+    if (!(await garage.load())) throw throwExit('garage load failed', 2);
+    const device = garage.getDevices()?.[0];
+    if (!device) throw throwExit('no device found in garage', 2);
+    const perimeters = new StigaAPIPerimeters(server, device);
+    if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
+
+    if (operation === 'smooth') {
+        // No boundary/guard awareness — it can move points across borders (the future front-end shows the
+        // result before commit). Dry-run by default; --commit writes the moved geometry to the cloud.
+        const pkg = StigaAPIOptimisePerimeters.smoothPerimeter(perimeters, { type, id, iterations, strength });
+        display.text(`Optimise perimeter — smooth (iters=${iterations}, strength=${strength})${options.commit ? '' : '  [dry-run]'}:`);
+        for (const c of pkg.changes) display.text(`  ${c.type} ${c.id} (${c.points}pts): avg move ${c.avgMoveCm.toFixed(1)}cm, max ${c.maxMoveCm.toFixed(1)}cm`);
+        const { moved } = pkg.totals;
+        if (options.commit && moved > 0) {
+            display.log('EXPERIMENTAL — committing smoothed perimeter (edited outside the app guard rails) to the cloud...');
+            if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
+            display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect (cloudsync is manual)');
+        } else if (options.commit) {
+            display.log('nothing to commit (no points moved)');
+        } else {
+            display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud)');
+        }
+        display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && moved > 0), value: pkg });
+        return;
+    }
+
+    const pkg = StigaAPIOptimisePerimeters.reducePerimeter(perimeters, { type, id, epsilon });
+    display.text(`Optimise perimeter — reduce (eps=${epsilon}cm)${options.commit ? '' : '  [dry-run]'}:`);
+    for (const c of pkg.changes.filter((c) => c.removed > 0)) display.text(`  ${c.type} ${c.id}: ${c.before} -> ${c.after} pts (-${c.removed})`);
+    const t = pkg.totals;
+    display.text(`  total: removed ${t.removed} of ${t.numPointsBefore} points, ${t.bytesBefore} -> ${t.bytesAfter} bytes, area Δ ${t.areaDeltaM2.toFixed(4)} m²`);
+
+    if (options.commit && t.removed > 0) {
+        display.log('EXPERIMENTAL — committing optimised perimeter (edited outside the app guard rails) to the cloud...');
+        if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
+        display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect (cloudsync is manual)');
+    } else if (options.commit) {
+        display.log('nothing to commit (no points removed)');
+    } else {
+        display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud)');
+    }
+    display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && t.removed > 0), value: pkg });
+}
+
+commandRegister('optimise', {
+    description: '[EXPERIMENTAL] Optimise the cloud perimeter geometry (reduce: collinear vertex removal; smooth: corner-rounding)',
+    targets: ['robot'],
+    usage: 'stiga-command optimise perimeter <reduce|smooth> [zone|obstacle|path|docking] [id] [eps=<cm> | iters=<n> strength=<0..1>] [--commit]',
+    summary: 'Run a geometry optimisation over the cloud perimeter. Dry-run by default; --commit writes to the cloud.',
+    details: [
+        '',
+        '  *** EXPERIMENTAL *** — this edits perimeter geometry OUTSIDE the robot/app guard rails. Those',
+        '  boundaries are physically grounded (RTK-surveyed lines that may keep the robot from water, roads,',
+        '  drops); committed changes are not validated by the app. Dry-run and review first; keep a backup',
+        '  (stiga-command perimeters --format native --save), and remember the robot owns the master.',
+        '',
+        '  reduce  [type] [id]    drop redundant collinear vertices (zones, obstacles, connect-paths; docking',
+        '                         excluded by default). eps=<cm> = tolerance (default 1cm; 0 = exactly lossless).',
+        '  smooth  [type] [id]    Laplacian corner-rounding — iters=<n> (default 2), strength=<0..1> (default 0.5).',
+        '                         No boundary guards (can move points across borders); --commit writes it.',
+        '  <type>                 limit to one of zone|obstacle|path|docking; [id] limits to one element.',
+        '  --commit               write the result to the cloud (reduce only; otherwise dry-run + report).',
+        '',
+        'A committed change updates the CLOUD copy only — the robot owns the master and must be force-synced',
+        '(cloudsync) for it to take effect. Reduce is shape-preserving (area Δ is sub-cm² at eps=1cm).',
+    ],
+    examples: [
+        'stiga-command optimise perimeter reduce',
+        'stiga-command optimise perimeter reduce zone 1',
+        'stiga-command optimise perimeter reduce obstacle 7 --commit',
+        'stiga-command optimise perimeter smooth path',
+        'stiga-command optimise perimeter smooth path 10 iters=3 strength=0.5',
+    ],
+    skipDefaultSetup: true,
+    execute: async (options, context) => runOptimise(context.credentials, options, context.params),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
