@@ -74,6 +74,12 @@
 //                                                        coloured heatmap on the live map. AUTH-GATED like
 //                                                        commands (only offered when a credential is
 //                                                        configured); single-slot (one run at a time).
+//   settingsAlert           off | 0 | <n>[smhd]         Settings-change alert: the ⚙ wheel reddens and the
+//                                                        panel red-dots each changed global setting (cleared
+//                                                        when you next view the panel). 'off'/'0' disables it;
+//                                                        <n>[smhd] sets how long accumulated changes persist
+//                                                        unseen before auto-clearing (default 24h, bare n=h) —
+//                                                        so an unattended kiosk doesn't stay red forever.
 //
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&follow=on
@@ -1533,6 +1539,7 @@ html,body{margin:0;height:100%}
 #settingsbox td.k{color:#80868b;padding-right:14px;white-space:nowrap}
 #settingsbox td.sv{text-align:right;font-weight:600}
 #settingsbox .cloudtag{color:#1a73e8;font-size:11px;margin-left:4px}
+#settingsbox .schg{color:#ea4335;font-size:18px;line-height:0;margin-right:3px;vertical-align:middle}
 #statusbox h1 .linktag{margin-left:auto;font-size:9px;padding:2px 8px;border-radius:10px;
   font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:#fff;background:#9aa0a6}
 #statusbox h1 .linktag.online{background:#34a853}
@@ -1621,7 +1628,25 @@ var diagState = { busy: false, running: null, ready: false, result: null }, diag
 // collected from the perimeter geometry as it's drawn (no extra fetch); the "points" toggle illuminates them.
 var perimOpen = false, perimPointsOn = false, perimVertices = [], perimPointMarkers = [];
 var diagPivot = 0.5; // heatmap midtone pivot (0.5 = neutral); the slider bends the value->colour curve
-var settingsSeenSig = null, settingsDirtyFlag = false; // wheel turns red when global settings change while panel hidden
+// The ⚙ wheel turns red when global settings change while the panel is hidden, and the panel suffixes each
+// changed setting with a red dot. settingsChanged accumulates the keys that changed since the panel was last
+// shown (NOT self-healing — a value that flip-flops back still counts, so multiple changes over a long unseen
+// stretch are all surfaced); settingsPrev is the previous snapshot we diff each update against. A staleness
+// timer (restarted on every change) clears the accumulation after a long idle stretch, so an unattended kiosk
+// doesn't stay red forever.
+var SETTINGS_CHANGE_EXPIRY_DEFAULT_MS = 24 * 60 * 60 * 1000;
+// ?settingsAlert : 'off' or '0' disables the alert entirely; '<n>[smhd]' sets the staleness auto-clear window
+// (default unit hours); absent -> default 24h. Returns { on, expiryMs }.
+function parseSettingsAlert(v){
+  if(v === undefined || v === null || v === '') return { on: true, expiryMs: SETTINGS_CHANGE_EXPIRY_DEFAULT_MS };
+  var s = String(v).toLowerCase();
+  if(s === 'off' || s === '0') return { on: false, expiryMs: 0 };
+  var m = /^(\\d+(?:\\.\\d+)?)([smhd])?$/.exec(s);
+  if(m){ var u = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] || 'h']; return { on: true, expiryMs: Math.round(parseFloat(m[1]) * u) }; }
+  return { on: true, expiryMs: SETTINGS_CHANGE_EXPIRY_DEFAULT_MS };
+}
+var settingsAlertCfg = { on: true, expiryMs: SETTINGS_CHANGE_EXPIRY_DEFAULT_MS }; // re-parsed from URL_CONFIG once that's defined
+var settingsPrev = null, settingsChanged = {}, settingsChangeTimer = null;
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
   if(proposalFlash){ clearInterval(proposalFlash); proposalFlash = null; }
@@ -1747,9 +1772,11 @@ var URL_CONFIG = (function(){
     statusTracksControls: p.get('statusTracksControls'),
     commands: p.get('commands'),
     diagnostics: p.get('diagnostics'),
-    experimental: p.get('experimental')
+    experimental: p.get('experimental'),
+    settingsAlert: p.get('settingsAlert')
   };
 })();
+settingsAlertCfg = parseSettingsAlert(URL_CONFIG.settingsAlert); // now URL_CONFIG is defined; re-parse from it
 
 // mapPosition supports two forms:
 //   absolute: "lat,lon[,zoom]" e.g. "59.6624,12.9952,19"
@@ -3179,27 +3206,36 @@ window.triggerRefresh = triggerRefresh;
 window.sendCommand = sendCommand;
 
 // ---- Read-only settings panel (⚙ in the status box; stacked below status/command/notifications) ----
-// The "dirty" wheel: when the live global settings change while the panel is hidden, the wheel goes red
-// until the panel is opened. Keyed on the global settings only (the live, user-changeable ones); the
-// first non-null value seeds the baseline so the initial load is not flagged as a change.
-function settingsCurrentSig(){ var s = state && state.robot && state.robot.settings; return s ? JSON.stringify(s) : null; }
+// settingsChanged accumulates the global-setting keys changed-but-not-yet-acknowledged. It reddens the ⚙ wheel
+// while the panel is hidden, and the open panel red-dots each changed setting (a PREFIX dot, so the right-
+// justified value doesn't jump when it clears). It is NOT cleared on routine re-renders — so the dots persist
+// the whole time the panel is open and new changes add to them live — only when the panel is CLOSED (the user
+// has seen them; a reopen then starts fresh) or when the staleness timer fires after a long idle stretch (so an
+// unattended kiosk doesn't stay red forever). Not self-healing: a value that flip-flops back still counts.
+// Keyed on the global settings only; the first snapshot seeds the baseline so the initial load isn't flagged.
 function noteSettingsForDirty(){
-  var sig = settingsCurrentSig();
-  if(sig === null) return;
-  if(settingsSeenSig === null){ settingsSeenSig = sig; return; }
-  if(settingsOpen){ settingsSeenSig = sig; settingsDirtyFlag = false; return; }
-  // Self-healing: dirty iff the settings DIFFER from the last-acknowledged baseline. A change that reverts
-  // (e.g. the cloud's config recycle on dock that round-trips back to the original) clears itself once it
-  // settles, instead of latching the wheel red forever; a real, persistent change stays red.
-  settingsDirtyFlag = (sig !== settingsSeenSig);
+  if(!settingsAlertCfg.on) return;
+  var s = state && state.robot && state.robot.settings;
+  if(!s) return;
+  if(settingsPrev){
+    var any = false;
+    for(var k in s) if(JSON.stringify(s[k]) !== JSON.stringify(settingsPrev[k])){ settingsChanged[k] = true; any = true; }
+    if(any && settingsAlertCfg.expiryMs > 0){
+      if(settingsChangeTimer) clearTimeout(settingsChangeTimer);
+      settingsChangeTimer = setTimeout(function(){ clearSettingsChanges(); renderStatusBox(); renderSettingsBox(); }, settingsAlertCfg.expiryMs);
+    }
+  }
+  settingsPrev = s;
 }
+function settingsHasChanges(){ if(!settingsAlertCfg.on) return false; for(var k in settingsChanged) return true; return false; }
+function clearSettingsChanges(){ settingsChanged = {}; if(settingsChangeTimer){ clearTimeout(settingsChangeTimer); settingsChangeTimer = null; } }
 function toggleSettings(){
   settingsOpen = !settingsOpen;
-  if(settingsOpen){ settingsSeenSig = settingsCurrentSig(); settingsDirtyFlag = false; }
+  if(!settingsOpen) clearSettingsChanges(); // closing acknowledges the changes (clears dots + red); reopen starts fresh
   renderSettingsBox();
   renderStatusBox();
 }
-function closeSettings(){ settingsOpen = false; renderSettingsBox(); renderStatusBox(); }
+function closeSettings(){ settingsOpen = false; clearSettingsChanges(); renderSettingsBox(); renderStatusBox(); }
 window.toggleSettings = toggleSettings;
 
 // camelCase / snake_case key -> "Title case" label.
@@ -3217,17 +3253,19 @@ function fmtSettingValue(k, v){
   if(typeof v === 'number' && SETTINGS_UNITS[k] !== undefined) return v + SETTINGS_UNITS[k];
   return String(v);
 }
-// Turn a settings object into [label, value] rows, skipping plumbing keys and any functions.
-function settingsRows(obj){
+// Turn a settings object into [label, value, tag, changed] rows, skipping plumbing keys and any functions.
+// 'changed' (a key->true map, optional) flags rows whose setting changed since the panel was last shown.
+function settingsRows(obj, changed){
   if(!obj) return [];
   var skip = { id: 1, name: 1, unknown: 1 }; // id/name shown as the panel title; unknown is internal
   var rows = [];
   Object.keys(obj).forEach(function(k){
     if(skip[k]) return;
     if(typeof obj[k] === 'function' || (obj[k] && typeof obj[k] === 'object')) return;
+    var chg = !!(changed && changed[k]);
     // zone 'enabled' reads better as yes/no than the on/off used for the other booleans
-    if(k === 'enabled'){ rows.push(['Enabled', obj[k] ? 'yes' : 'no']); return; }
-    rows.push([humanizeKey(k), fmtSettingValue(k, obj[k])]);
+    if(k === 'enabled'){ rows.push(['Enabled', obj[k] ? 'yes' : 'no', undefined, chg]); return; }
+    rows.push([humanizeKey(k), fmtSettingValue(k, obj[k]), undefined, chg]);
   });
   return rows;
 }
@@ -3243,7 +3281,7 @@ function renderSettingsBox(){
   // Rows + title for the current selection.
   var rows, title;
   if(settingsZone === '*'){
-    rows = settingsRows(state && state.robot && state.robot.settings);
+    rows = settingsRows(state && state.robot && state.robot.settings, settingsAlertCfg.on ? settingsChanged : null);
     // Cloud-only settings (from the garage, not the robot) stack at the bottom, each tagged with a cloud icon.
     var cloud = state && state.robot && state.robot.cloudSettings;
     if(cloud){
@@ -3265,7 +3303,8 @@ function renderSettingsBox(){
   if(rows.length === 0) tbl += '<tr><td class="k">' + (settingsZone === '*' ? 'waiting for settings…' : 'no settings') + '</td><td class="sv"></td></tr>';
   else for(var j = 0; j < rows.length; j++){
     var klab = esc(rows[j][0]) + (rows[j][2] === 'cloud' ? ' <span class="cloudtag" title="cloud setting (read-only, not stored on the robot)">☁</span>' : '');
-    tbl += '<tr><td class="k">' + klab + '</td><td class="sv">' + esc(rows[j][1]) + '</td></tr>';
+    var chgdot = rows[j][3] ? '<span class="schg" title="changed since you last viewed">·</span>' : '';
+    tbl += '<tr><td class="k">' + klab + '</td><td class="sv">' + chgdot + esc(rows[j][1]) + '</td></tr>';
   }
   tbl += '</table>';
   box.innerHTML = '<h2><span class="boxclose" title="close (or toggle the ⚙)">×</span>Settings · ' + esc(title) + '</h2>' +
@@ -3333,7 +3372,7 @@ function renderStatusBox(){
     var alarmTitle = alarmAlert ? 'error or geofence violation detected — click to highlight tracks and reveal the alarm log on hover' : 'highlight error tracks and reveal deduped alarm log on hover';
     var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + (alarmAlert ? ' alert' : '') + '" onclick="toggleAlarmsHighlight()" title="' + alarmTitle + '">!</span>';
     var notifBtn = '<span class="btn' + (notifBoxClosed ? '' : ' on') + '" onclick="toggleNotifBox()" title="show/hide the notifications box">#</span>';
-    var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsDirtyFlag ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
+    var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsHasChanges() ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
     // tracks cluster — bundled tight in one segmented box (power=record, eye=show/hide, ✕=clear, #N=run filter)
     var powerBtn = '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()" title="trail recording on/off">⏻</span>';
     var visBtn = '<span class="btn' + (tracksVisible ? ' on' : '') + '" onclick="toggleTracksVisible()" title="show/hide the trail (recording continues)">◉</span>';
