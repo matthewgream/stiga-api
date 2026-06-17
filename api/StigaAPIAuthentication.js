@@ -9,6 +9,30 @@ const URL_DEFAULT = 'https://www.googleapis.com/identitytoolkit/v3/relyingparty/
 
 const TOKEN_EXPIRY_GRACE_PERIOD = 5 * 60 * 1000;
 
+// Firebase verifyPassword returns distinct errors, so the message itself is diagnostic — notably
+// INVALID_PASSWORD implies the EMAIL is recognised (the account exists; only the password was rejected).
+const AUTH_ERROR_HINTS = new Map([
+    ['INVALID_PASSWORD', 'email is recognised but the password was rejected — check for stray/invisible characters in the password (a smart quote, a trailing newline, a non-breaking space, shell/env mangling)'],
+    ['EMAIL_NOT_FOUND', 'no account exists for this email'],
+    ['INVALID_EMAIL', 'the email is malformed'],
+    ['USER_DISABLED', 'the account is disabled'],
+    ['MISSING_PASSWORD', 'no password was supplied'],
+]);
+
+// Render a credential for --debug so character anomalies stand out: char count, utf-8 byte length (a mismatch
+// flags non-ASCII), any anomaly flags, and the value with every non printable-ASCII char escaped — a smart
+// quote shows as \u{2019}, a trailing newline as \u{a}, a non-breaking space as \u{a0}.
+function _inspectCredential(s) {
+    if (typeof s !== 'string') return `(not a string: ${typeof s})`;
+    const chars = [...s];
+    const escaped = chars.map((ch) => (ch.codePointAt(0) >= 0x20 && ch.codePointAt(0) <= 0x7e ? ch : `\\u{${ch.codePointAt(0).toString(16)}}`)).join('');
+    const flags = [];
+    if (chars.length > 0 && (/\s/u.test(chars[0]) || /\s/u.test(chars[chars.length - 1]))) flags.push('LEADING/TRAILING WHITESPACE');
+    if (chars.some((ch) => ch.codePointAt(0) > 0x7f)) flags.push('NON-ASCII');
+    if (chars.some((ch) => ch.codePointAt(0) < 0x20 || ch.codePointAt(0) === 0x7f)) flags.push('CONTROL CHAR');
+    return `chars=${chars.length} utf8bytes=${Buffer.byteLength(s, 'utf8')}${flags.length > 0 ? ' [' + flags.join(', ') + ']' : ''} value="${escaped}"`;
+}
+
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -52,6 +76,12 @@ class StigaAPIAuthentication extends StigaAPIComponent {
         };
         const params = new URL(this.url);
         params.searchParams.append('key', this.apiKey);
+        // --debug surfaces exactly what is being submitted, with character anomalies made visible, so a mangled
+        // credential (smart quote, stray whitespace, non-ASCII, shell/env damage) is obvious. Sensitive: the
+        // password value is shown, so only under --debug.
+        this.display.debug(`auth: POST ${this.url} (key ${String(this.apiKey).slice(0, 8)}…)`);
+        this.display.debug(`auth: email    ${_inspectCredential(this.email)}`);
+        this.display.debug(`auth: password ${_inspectCredential(this.password)}`);
         try {
             const response = await fetch(params.toString(), {
                 method: 'POST',
@@ -66,7 +96,8 @@ class StigaAPIAuthentication extends StigaAPIComponent {
                 const expiresIn = Number.parseInt(data.expiresIn) || 3600;
                 this.tokenExpiry = Date.now() + expiresIn * 1000;
             } else {
-                this.display.error(`auth: authentication failed, status: ${response.status} - ${JSON.stringify(data)}`);
+                const hint = AUTH_ERROR_HINTS.get(data?.error?.message);
+                this.display.error(`auth: authentication failed, status: ${response.status} - ${JSON.stringify(data)}${hint ? '\n      -> ' + hint : ''}`);
                 throw new Error('Authentication failed');
             }
         } catch (e) {

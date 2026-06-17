@@ -18,7 +18,7 @@ class StigaAPIFramework extends StigaAPIComponent {
 
     async load(username, password) {
         this.display.verbose('Collecting authentication token...');
-        this.auth = new StigaAPIAuthentication(username, password);
+        this.auth = new StigaAPIAuthentication(username, password, undefined, undefined, { debug: this.debug, verbose: this.verbose });
         if (!(await this.auth.isValid())) {
             this.display.error('Authentication failed');
             return false;

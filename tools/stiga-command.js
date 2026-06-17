@@ -418,7 +418,7 @@ async function runChecks(credentials, target) {
     });
 
     await step('authentication', ['credentials'], async () => {
-        state.auth = new StigaAPIAuthentication(credentials.username, credentials.password);
+        state.auth = new StigaAPIAuthentication(credentials.username, credentials.password, undefined, undefined, { debug: globalOptions.debug, verbose: globalOptions.level >= LEVELS.verbose });
         if (!(await state.auth.isValid())) throw new Error('firebase rejected credentials');
         return 'token obtained';
     });
