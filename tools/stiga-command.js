@@ -870,6 +870,31 @@ commandRegister('status', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+commandRegister('position', {
+    description: "Get the robot's actual position (live offset from base, with lat/lon when the reference is known)",
+    targets: ['robot'],
+    usage: 'stiga-command [--robot] position [help]',
+    summary: "Get the robot's live position from LOG/ROBOT_POSITION.",
+    details: [
+        '',
+        "This is the robot's ACTUAL position: its offset from the base (distance, bearing,",
+        'orientation) plus an absolute latitude/longitude when the RTK reference position is',
+        'known. The GNSS/RTK fix quality (satellites, DOP, coverage) lives separately under',
+        '`status location`.',
+    ],
+    examples: ['stiga-command --robot position'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        const position = await device.getPosition({ refresh: 'force' });
+        display.text('Robot Position:');
+        display.text(`  ${position.value?.toString() || 'unknown'}`);
+        display.json({ source: 'robot', kind: 'position', value: position.value ?? null });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 function formatSettingValue(value) {
     if (typeof value === 'boolean') return value ? 'on' : 'off';
     if (value === undefined || value === null) return '-';
