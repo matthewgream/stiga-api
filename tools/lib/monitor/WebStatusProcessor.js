@@ -125,6 +125,7 @@ const { protobufDecode, stringToBytes, formatNetworkId } = StigaAPIUtilities;
 
 const DEFAULT_PORT = 3001;
 const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
+const SUMMARY_STALE_MS = 120 * 1000; // /api/summary 'online' flag flips false once the freshest update is older than this
 const NOTIF_POLL_MS_UNDOCKED = 60 * 1000; // notifications poll interval when robot is active
 const NOTIF_POLL_MS_DOCKED = 5 * 60 * 1000; // notifications poll interval when robot is parked
 const SCHEDULE_TIMEZONE_DEFAULT = 'Europe/Stockholm'; // garden tz fallback if not configured
@@ -592,6 +593,7 @@ class WebStatusProcessor {
             });
         app.get('/', (req, res) => res.type('html').send(this._renderPage(req)));
         app.get('/api/state', (req, res) => res.json({ generated: new Date().toISOString(), ...this.state, zoneCompletions: this._serializeZoneCompletions() }));
+        app.get('/api/summary', (req, res) => res.json(this._summary()));
         app.get('/api/perimeters', (req, res) => res.json(this.perimeters ?? { zones: [], obstacles: [] }));
         app.get('/api/notifications', (req, res) => res.json(this.notifications));
         app.post('/api/command/:name', (req, res) => this._handleCommandPost(req, res));
@@ -605,6 +607,14 @@ class WebStatusProcessor {
         this.poller?.acquire();
 
         if (this.persistEnabled) {
+            // Ensure the persist dir exists — the default (/dev/shm) always does, but an explicit
+            // --persist=/some/dir (e.g. a mounted Docker volume subdir) may not, and the save path
+            // only catches+logs, so without this persistence would silently never write.
+            try {
+                fs.mkdirSync(this.persistDir, { recursive: true });
+            } catch (e) {
+                this.logger(`WebStatus: could not create persist dir ${this.persistDir}: ${e.message}`);
+            }
             this._loadCrumbs();
             this._loadZoneCompletions();
             this.persistanceTimer = setInterval(() => {
@@ -1267,6 +1277,65 @@ class WebStatusProcessor {
             rsrq: network.rsrq,
             sq: network.sq,
         };
+    }
+
+    // A flat, stable, versioned projection of the live state for external integrations (Home Assistant,
+    // scripts, dashboards). Unlike /api/state — which mirrors the internal UI model and may change shape as
+    // the page evolves — the field names and structure here are a deliberate contract: additive changes only,
+    // a breaking change bumps the `schema` string. See integration/INTEGRATION.md.
+    _summary() {
+        /* eslint-disable unicorn/no-null -- explicit JSON null is intentional: every contract key stays present so consumers (HA templates) see a stable shape; undefined would silently drop keys. */
+        const r = this.state.robot,
+            b = this.state.base;
+        const now = Date.now();
+        const stamps = [r.updatedStatus, r.updatedPosition, b.updatedStatus].map((s) => (s ? Date.parse(s) : 0));
+        const freshest = Math.max(0, ...stamps);
+        const type = (r.statusType || '').toUpperCase();
+        const active = ['MOWING', 'CUTTING_BORDER', 'REACHING_FIRST_POINT', 'NAVIGATING_TO_AREA', 'PLANNING_ONGOING', 'GOING_HOME'].includes(type);
+        const errored = type === 'ERROR' || type === 'BLOCKED' || type === 'LID_OPEN' || Boolean(r.interventionRequired) || /error|fault|stuck|blocked|fail|trapped/iu.test(r.statusText || '');
+        return {
+            schema: 'stiga-summary/1',
+            generated: new Date().toISOString(),
+            online: freshest > 0 && now - freshest < SUMMARY_STALE_MS,
+            age_seconds: freshest > 0 ? Math.round((now - freshest) / 1000) : null,
+            robot: {
+                name: r.name ?? null,
+                mac: r.mac ?? null,
+                status: r.statusType ?? null,
+                status_detail: r.statusMessage || r.statusText || null,
+                docked: r.docked ?? null,
+                active,
+                error: errored,
+                intervention_required: Boolean(r.interventionRequired),
+                battery_percent: r.battery?.charge ?? null,
+                latitude: r.latitude ?? null,
+                longitude: r.longitude ?? null,
+                heading_compass: r.orientationCompass ?? null,
+                distance_from_base_m: r.offsetDistanceMetres ?? null,
+                zone: r.mowing?.zone ?? null,
+                zone_completed_percent: r.mowing?.zoneCompleted ?? null,
+                garden_completed_percent: r.mowing?.gardenCompleted ?? null,
+                satellites: r.location?.satellites ?? null,
+                rtk_quality_percent: r.location?.rtkQuality ?? null,
+                gps_coverage: r.location?.coverage ?? null,
+                signal_rssi_dbm: r.network?.rssi ?? null,
+                firmware: r.version?.firmware ?? null,
+                schedule_enabled: r.schedule?.enabled ?? null,
+                updated_status: r.updatedStatus ?? null,
+                updated_position: r.updatedPosition ?? null,
+            },
+            base: {
+                mac: b.mac ?? null,
+                latitude: b.latitude ?? null,
+                longitude: b.longitude ?? null,
+                satellites: b.location?.satellites ?? null,
+                rtk_quality_percent: b.location?.rtkQuality ?? null,
+                gps_coverage: b.location?.coverage ?? null,
+                firmware: b.version?.firmware ?? null,
+                updated_status: b.updatedStatus ?? null,
+            },
+        };
+        /* eslint-enable unicorn/no-null */
     }
 
     // fetch the garden perimeters from the Cloud (once, at startup). Uses the perimeter

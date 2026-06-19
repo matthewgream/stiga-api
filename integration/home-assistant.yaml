@@ -1,0 +1,92 @@
+# Home Assistant integration for the Stiga monitor container.
+#
+# Setup:
+#   1. Run the container with command auth scoped to commands only, so these read sensors need no
+#      credential and only the actions do:   --webstatus=3001/<pass>/commands
+#   2. Replace STIGA_HOST below with the container's host/IP.
+#   3. Put the command password in secrets.yaml:
+#        stiga_user: x          # any username (password-only realm)
+#        stiga_pass: your-password
+#   4. Merge into configuration.yaml (or `!include integration/home-assistant.yaml` the relevant
+#      blocks) and restart Home Assistant.
+#
+# All reads come from the STABLE /api/summary contract (schema: stiga-summary/1).
+
+# ---- Sensors + binary sensors (poll the stable summary) -----------------------------------------
+rest:
+  - resource: "http://STIGA_HOST:3001/api/summary"
+    scan_interval: 30
+    sensor:
+      - name: "Mower status"
+        unique_id: stiga_mower_status
+        value_template: "{{ value_json.robot.status }}"
+        icon: mdi:robot-mower
+      - name: "Mower battery"
+        unique_id: stiga_mower_battery
+        value_template: "{{ value_json.robot.battery_percent }}"
+        unit_of_measurement: "%"
+        device_class: battery
+      - name: "Mower zone"
+        unique_id: stiga_mower_zone
+        value_template: "{{ value_json.robot.zone }}"
+        icon: mdi:select-group
+      - name: "Mower garden completed"
+        unique_id: stiga_mower_garden_completed
+        value_template: "{{ value_json.robot.garden_completed_percent }}"
+        unit_of_measurement: "%"
+        icon: mdi:progress-check
+      - name: "Mower satellites"
+        unique_id: stiga_mower_satellites
+        value_template: "{{ value_json.robot.satellites }}"
+        icon: mdi:satellite-variant
+      - name: "Mower RTK quality"
+        unique_id: stiga_mower_rtk_quality
+        value_template: "{{ value_json.robot.rtk_quality_percent }}"
+        unit_of_measurement: "%"
+        icon: mdi:crosshairs-gps
+    binary_sensor:
+      - name: "Mower online"
+        unique_id: stiga_mower_online
+        value_template: "{{ 'on' if value_json.online else 'off' }}"
+        device_class: connectivity
+      - name: "Mower docked"
+        unique_id: stiga_mower_docked
+        value_template: "{{ 'on' if value_json.robot.docked else 'off' }}"
+        icon: mdi:home-import-outline
+      - name: "Mower problem"
+        unique_id: stiga_mower_problem
+        value_template: "{{ 'on' if value_json.robot.error else 'off' }}"
+        device_class: problem
+
+# ---- Commands (POST to /api/command/*; password-gated in 'commands' scope) -----------------------
+rest_command:
+  stiga_start:
+    url: "http://STIGA_HOST:3001/api/command/start"
+    method: POST
+    username: !secret stiga_user
+    password: !secret stiga_pass
+  stiga_stop:
+    url: "http://STIGA_HOST:3001/api/command/stop"
+    method: POST
+    username: !secret stiga_user
+    password: !secret stiga_pass
+  stiga_home:
+    url: "http://STIGA_HOST:3001/api/command/home"
+    method: POST
+    username: !secret stiga_user
+    password: !secret stiga_pass
+  stiga_force_cut:
+    # Call with: service: rest_command.stiga_force_cut  /  data: { zone: 3 }
+    url: "http://STIGA_HOST:3001/api/command/force-cut?zone={{ zone }}"
+    method: POST
+    username: !secret stiga_user
+    password: !secret stiga_pass
+
+# ---- Optional: expose the robot on the HA map ---------------------------------------------------
+# Uncomment to track the mower's RTK position as a device_tracker. Requires the sensors above.
+# template:
+#   - trigger:
+#       - platform: time_pattern
+#         seconds: "/30"
+#     ... (or use a `device_tracker` via a REST-fed automation calling device_tracker.see with
+#          latitude = value_json.robot.latitude, longitude = value_json.robot.longitude)

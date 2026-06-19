@@ -1,0 +1,26 @@
+# Keep the Docker build context small and — critically — keep secrets/live data OUT of the image.
+# The Dockerfile only COPYs api/, tools/ and the package manifests, but this also stops these from
+# ever being sent to the daemon or accidentally embedded.
+
+.git
+node_modules
+
+# Secrets and live data (NEVER bake into an image)
+stiga-config*.js
+stiga_user_and_pass.js
+capture.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Local/dev clutter
+.claude
+scripts/
+*.log
+listen.log
+sim-live.txt
+undecoded.txt
+temp.log
+export.log

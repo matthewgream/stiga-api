@@ -1,0 +1,35 @@
+# Stiga monitor — background server.
+#
+#   cd integration && docker compose up -d --build
+#
+# Then:
+#   - Web page / API:  http://<host>:3001/  and  http://<host>:3001/api/summary
+#   - Live console:    docker compose exec stiga-monitor node tools/stiga-monitor.js --connect
+#   - Capture DB:      ./data/capture.db   (retained on the host)
+
+services:
+  stiga-monitor:
+    build:
+      # Context is the repo root so the Dockerfile can COPY api/ and tools/.
+      context: ..
+      dockerfile: integration/Dockerfile
+    image: stiga-monitor
+    container_name: stiga-monitor
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      # (A) Your credentials + reference position + Maps API key. See stiga-config-example.js.
+      - ./config:/config:ro
+      # (B) Retained state: capture.db and the persisted breadcrumb trail.
+      - ./data:/data
+    # Default command lives in the Dockerfile. Uncomment to require a password on the command
+    # endpoints (read-only /api/* stays open; only /api/command/* + /api/diagnostic/* are gated):
+    # command:
+    #   - node
+    #   - tools/stiga-monitor.js
+    #   - --background
+    #   - --directory=/data
+    #   - --capture
+    #   - --persist=/data/persist
+    #   - --webstatus=3001/CHANGE_ME/commands
