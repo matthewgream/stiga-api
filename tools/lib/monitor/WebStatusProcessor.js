@@ -1825,6 +1825,8 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   tracks                 on|off|<window>  (tracks state + window: off disables; on/absent = default window; a window-spec e.g. tracks=8,p20k enables AND sets it. window = MAX of comma terms: N runs / pN points / tX time / off=all. #N button is a live runs display filter. default on, 1 run)
 //   tracksClr              <window>         (deprecated alias for the tracks window, still honoured; a window in tracks= wins)
 //   follow                 on|off           (keep the robot centred — pan to it each update; ⌖ button toggles live; default ON, follow=off disables)
+//   followCenter           area|screen      (where follow centres the robot: 'area' (default) = centre of the VISIBLE area, accounting for the status/command/notification boxes; 'screen' = geometric centre of the map (old behaviour))
+//   followOffset           x:y              (manual nudge applied ON TOP of followCenter, for either mode. Each value is a percentage of map width/height by default, or suffix 'px' for pixels; +x = right, +y = down. e.g. followOffset=8:0 (8% further right), followOffset=-40px:0 (40px left))
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
 //   diagnostics            on|off           (🔧 row: run whitelisted stiga-analyse.js reports server-side into a console overlay; auth-gated like commands, single-slot; default off)
@@ -1838,6 +1840,8 @@ var URL_CONFIG = (function(){
     tracks: p.get('tracks'),
     tracksClr: p.get('tracksClr'),
     follow: p.get('follow'),
+    followCenter: p.get('followCenter'),
+    followOffset: p.get('followOffset'),
     statusTracksControls: p.get('statusTracksControls'),
     commands: p.get('commands'),
     diagnostics: p.get('diagnostics'),
@@ -1846,6 +1850,24 @@ var URL_CONFIG = (function(){
   };
 })();
 settingsAlertCfg = parseSettingsAlert(URL_CONFIG.settingsAlert); // now URL_CONFIG is defined; re-parse from it
+
+// followOffset=x:y -> a manual nudge added to the follow centring. Each term is a percentage of the
+// map dimension (default) or pixels (suffix 'px'); stored split so it can be resolved against the live
+// map size at pan time. Returns null on absent/malformed input.
+function parseFollowOffset(spec){
+  if(!spec) return null;
+  var parts = String(spec).split(':');
+  if(parts.length !== 2) return null;
+  function term(s){
+    var m = s.trim().match(/^([+-]?\\d+(?:\\.\\d+)?)(px|%)?$/i);
+    if(!m) return null;
+    var v = Number.parseFloat(m[1]);
+    return (m[2] && m[2].toLowerCase() === 'px') ? { px: v, pct: 0 } : { px: 0, pct: v };
+  }
+  var x = term(parts[0]), y = term(parts[1]);
+  return (x && y) ? { x: x, y: y } : null;
+}
+var FOLLOW_OFFSET = parseFollowOffset(URL_CONFIG.followOffset);
 
 // mapPosition supports two forms:
 //   absolute: "lat,lon[,zoom]" e.g. "59.6624,12.9952,19"
@@ -1881,6 +1903,75 @@ function applyOffsetFromCenter(center, latM, lonM){
   var dLat = latM / 111_320;
   var dLon = lonM / (111_320 * Math.cos(center.lat * Math.PI / 180));
   return { lat: center.lat + dLat, lng: center.lng + dLon };
+}
+
+// The floating overlay panels that occlude the map. Each is anchored to a corner (or stacked under
+// the status box), so the truly visible area is the map rectangle minus whatever these cover.
+var OVERLAY_BOX_IDS = ['statusbox', 'cmdbox', 'notifbox', 'settingsbox', 'zonepanel', 'schedpanel'];
+function visibleOverlayRects(){
+  var rects = [];
+  for(var i = 0; i < OVERLAY_BOX_IDS.length; i++){
+    var el = document.getElementById(OVERLAY_BOX_IDS[i]);
+    if(!el || el.classList.contains('pos-no') || el.classList.contains('empty')) continue;
+    var cs = window.getComputedStyle(el);
+    if(cs.display === 'none' || cs.visibility === 'hidden' || Number.parseFloat(cs.opacity) === 0) continue;
+    var r = el.getBoundingClientRect();
+    if(r.width > 0 && r.height > 0) rects.push(r);
+  }
+  return rects;
+}
+// Pixel offset from the map's geometric centre to the centre of the unoccluded (visible) area. The
+// overlay boxes form a vertical lane down one side, so their WIDTH defines the visible horizontal band
+// — independent of how tall they are. We deliberately do NOT gate the horizontal shift on the box
+// reaching the robot's row: otherwise collapsing the stacked notif/settings boxes (which shortens the
+// column so it no longer crosses the middle) would snap centring back to the screen centre. Vertical
+// shifting is reserved for a box that actually spans the horizontal centre (a full-width top/bottom
+// banner); the side lanes never move the robot vertically. Returns {x,y} in CSS px (x right, y down),
+// unclamped (followTarget combines this with the manual nudge and clamps the total).
+function visibleCenterOffsetPx(m){
+  var cx = m.left + m.width / 2, cy = m.top + m.height / 2;
+  var left = m.left, right = m.right, top = m.top, bottom = m.bottom;
+  var rects = visibleOverlayRects();
+  for(var i = 0; i < rects.length; i++){
+    var r = rects[i];
+    if(r.right <= cx) left = Math.max(left, r.right);        // a box wholly left of centre -> left lane
+    else if(r.left >= cx) right = Math.min(right, r.left);   // a box wholly right of centre -> right lane
+    else if(r.left < cx && r.right > cx){                    // straddles the vertical centre -> a banner; shift up/down
+      if(r.top <= cy) top = Math.max(top, Math.min(r.bottom, cy));
+      if(r.bottom >= cy) bottom = Math.min(bottom, Math.max(r.top, cy));
+    }
+  }
+  return { x: (left + right) / 2 - cx, y: (top + bottom) / 2 - cy };
+}
+// The followOffset manual nudge resolved to CSS px against the live map size (% terms need the size).
+function manualFollowOffsetPx(m){
+  if(!FOLLOW_OFFSET) return { x: 0, y: 0 };
+  return {
+    x: FOLLOW_OFFSET.x.px + (FOLLOW_OFFSET.x.pct / 100) * m.width,
+    y: FOLLOW_OFFSET.y.px + (FOLLOW_OFFSET.y.pct / 100) * m.height
+  };
+}
+// The latLng to pan to so the robot lands in the centre of the VISIBLE area (followCenter=screen reverts
+// to the geometric centre), plus any followOffset nudge. Converts the combined pixel offset to a lat/lng
+// shift via the Web-Mercator metres-per-pixel at the current zoom/latitude (accurate enough for centring
+// aesthetics): to place the robot ox px right / oy px down of centre, the map centre must sit ox px west
+// and oy px north of the robot. The total is clamped to 45% so the robot is never jammed against an edge.
+function followTarget(pos){
+  var zoom = map.getZoom();
+  if(typeof zoom !== 'number') return pos;
+  var mapEl = document.getElementById('map');
+  if(!mapEl) return pos;
+  var m = mapEl.getBoundingClientRect();
+  if(m.width === 0 || m.height === 0) return pos;
+  var base = (URL_CONFIG.followCenter === 'screen') ? { x: 0, y: 0 } : visibleCenterOffsetPx(m);
+  var man = manualFollowOffsetPx(m);
+  var ox = base.x + man.x, oy = base.y + man.y;
+  var maxX = m.width * 0.45, maxY = m.height * 0.45;
+  ox = Math.max(-maxX, Math.min(maxX, ox));
+  oy = Math.max(-maxY, Math.min(maxY, oy));
+  if(!ox && !oy) return pos;
+  var mpp = 156543.03392 * Math.cos(pos.lat * Math.PI / 180) / Math.pow(2, zoom);
+  return applyOffsetFromCenter(pos, oy * mpp, -ox * mpp);
 }
 function computeZonesBoundsCenter(zones){
   if(!zones || zones.length === 0) return null;
@@ -2567,7 +2658,7 @@ function refresh(){
         // the mowing strategy's cut position is no longer drawn on the map; it flashes only on hover of
         // the status-box strategy line (attachMowFlashHover -> showProposalCircles).
         if(followMode){
-          map.panTo(pos); // keep the robot centred (zoom unchanged); takes precedence over the one-time fit
+          map.panTo(followTarget(pos)); // keep the robot in the visible-area centre (zoom unchanged); takes precedence over the one-time fit
         } else if(!didFit && !userMoved && !(MAP_POSITION && MAP_POSITION.fit)){
           // mapPosition=fit stays framed on the whole garden, so skip the robot-centric base+robot auto-fit
           didFit = true;
@@ -2817,7 +2908,7 @@ window.cycleTracksClr = cycleTracksClr;
 function toggleFollow(){
   followMode = !followMode;
   if(followMode && state && state.robot && typeof state.robot.latitude === 'number' && typeof state.robot.longitude === 'number')
-    map.panTo({ lat: state.robot.latitude, lng: state.robot.longitude });
+    map.panTo(followTarget({ lat: state.robot.latitude, lng: state.robot.longitude }));
   renderStatusBox();
 }
 window.toggleFollow = toggleFollow;
