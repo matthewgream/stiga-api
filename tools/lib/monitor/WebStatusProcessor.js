@@ -537,6 +537,7 @@ class WebStatusProcessor {
                 docked: undefined,
                 statusType: undefined,
                 statusMessage: undefined,
+                statusNote: undefined,
                 statusText: undefined,
                 statusValid: undefined,
                 statusFlag: undefined,
@@ -883,6 +884,8 @@ class WebStatusProcessor {
         // statusType (which color logic, isRobotActive, etc. still key off). When the message
         // takes over we suppress the error from statusText so it isn't shown twice.
         r.statusMessage = r.statusType === 'ERROR' && errorObj?.message ? errorObj.message : undefined;
+        // Optional consequence note shown alongside the message (e.g. HIGH_GRASS -> "going home").
+        r.statusNote = r.statusMessage && errorObj?.note ? errorObj.note : undefined;
         const info = elements.formatRobotStatusInfo(elements.decodeRobotStatusInfo(decoded[10])).replaceAll('-', '');
         const error = r.statusMessage ? '' : elements.formatRobotStatusError(errorObj).replaceAll('-', '');
         r.statusText = [info, error].filter(Boolean).join(', ');
@@ -1303,6 +1306,7 @@ class WebStatusProcessor {
                 mac: r.mac ?? null,
                 status: r.statusType ?? null,
                 status_detail: r.statusMessage || r.statusText || null,
+                status_note: r.statusNote ?? null,
                 docked: r.docked ?? null,
                 active,
                 error: errored,
@@ -3505,6 +3509,7 @@ function renderStatusBox(){
   // SOFTEN_ACRONYMS list ensures GPS/RTK/etc keep their caps). Raw type stays in r.statusType
   // for color and active-state logic to key off unchanged.
   var op = fmt(soften(r.statusMessage || r.statusType));
+  if(r.statusNote) op += ' (' + esc(r.statusNote) + ')'; // consequence note, e.g. High grass (going home)
   if(r.statusText) op += ' · ' + soften(r.statusText);
   var batt = r.battery ? (r.battery.charge + '%') : '-';
   var sched = formatScheduleSummary();
@@ -3612,7 +3617,7 @@ function robotInfo(){
   var heading = (typeof r.orientationCompass === 'number') ? ('oriented ' + Math.round(r.orientationCompass) + '°') : null;
   var location = [fromBase, heading].filter(Boolean).join(', ') || '-';
   var rows = [
-    ['Status', fmt(r.statusMessage || r.statusType) + (r.statusText ? ' · ' + r.statusText : '')],
+    ['Status', fmt(r.statusMessage || r.statusType) + (r.statusNote ? ' (' + r.statusNote + ')' : '') + (r.statusText ? ' · ' + r.statusText : '')],
     ['Validity', fmt(r.statusValid) + ' · ' + fmt(r.statusFlag)],
     ['Docked', r.docked === undefined ? '-' : (r.docked ? 'yes' : 'no')],
     ['Battery', r.battery ? (r.battery.charge + '% · ' + r.battery.capacity + ' mAh') : '-'],

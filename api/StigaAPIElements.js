@@ -385,6 +385,12 @@ const ROBOT_STATUS_ERROR_MESSAGES = {
     '2,20': 'GPS_SEARCHING',
     '2,22': 'STUCK',
 };
+// Optional extra context shown ALONGSIDE a status error — typically the robot's resulting action —
+// keyed by the error enum above. Surfaced as "Label (note)" (e.g. "High grass (going home)"). Purely
+// additive/advisory; absent for errors with no useful consequence to spell out.
+const ROBOT_STATUS_ERROR_NOTES = {
+    HIGH_GRASS: 'going home',
+};
 // NB: there is no reliable "user can reset this error" predicate yet. RESET_ERROR (CMD_ROBOT 37) clears a
 // recoverable fault (confirmed 2026-06-05 on a STUCK/2,22), but the same STUCK code also occurs when the
 // robot is stuck in a way the user cannot reset, and state [3]=255 additionally covers transient,
@@ -397,11 +403,12 @@ function decodeRobotStatusError(decoded) {
     const code1 = decoded[1];
     const code2 = decoded[2];
     const message = ROBOT_STATUS_ERROR_MESSAGES[`${code1},${code2}`];
-    return upgradeRobotStatusError({ code1, code2, message });
+    const note = message ? ROBOT_STATUS_ERROR_NOTES[message] : undefined;
+    return upgradeRobotStatusError({ code1, code2, message, note });
 }
 function formatRobotStatusError(statusError) {
     if (!statusError) return '-';
-    if (statusError.message) return statusError.message;
+    if (statusError.message) return statusError.note ? `${statusError.message} (${statusError.note})` : statusError.message;
     return formatStruct({ code1: statusError.code1, code2: statusError.code2 }, 'statusError');
 }
 function upgradeRobotStatusError(statusError) {
