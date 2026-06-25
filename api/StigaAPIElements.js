@@ -373,12 +373,14 @@ function formatRobotStatusType(statusType) {
 //   2,18  leaving dock / reference station initiating
 //   2,20  out of perimeter
 //   2,22  blocked / lid sensor / stuck / trapped
+//   1,30  high grass (robot abandons the cut and goes home; advisory, self-resolving — not a fault to reset)
 const ROBOT_STATUS_ERROR_MESSAGES = {
     // Confirmed against the official app. Stored in ENUM_STYLE so the on-the-wire shape
     // matches ROBOT_STATUS_TYPES / ROBOT_STATUS_INFO_CODES — the webstatus UI softens these
     // for display (preserving known acronyms like GPS). The accompanying StatusInfo code
     // (e.g. TRAPPED, LID_SENSOR) gives the specific cause and is shown alongside as the
     // status detail.
+    '1,30': 'HIGH_GRASS', // confirmed 2026-06-25: parent ERROR(255), no StatusInfo code; robot goes home, app shows "Your robot is going home due to high grass" (cloud notification info/user-robot "High grass")
     '2,18': 'NAVIGATION_INITIALISING',
     '2,20': 'GPS_SEARCHING',
     '2,22': 'STUCK',
