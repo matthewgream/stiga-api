@@ -760,6 +760,17 @@ commandRegister('version', {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+// Operation line with the error detail + note and the StatusInfo cause appended when present, so a
+// CLI `status` surfaces e.g. "ERROR (error=HIGH_GRASS (going home))" or "...(error=BLADES_NOT_CALIBRATED)"
+// instead of a bare "ERROR". error/info are decoded objects (toString-aware); absent in normal states.
+function formatOperationStatus(op) {
+    if (!op) return 'unknown';
+    let s = `${op.type}, valid=${op.valid}, docking=${op.docking}`;
+    if (op.error) s += `, error=${op.error.toString()}`;
+    if (op.info) s += `, info=${op.info.toString()}`;
+    return s;
+}
+
 commandRegister('status', {
     description: 'Get operation/battery/mowing/location/network status',
     targets: ['robot', 'base'],
@@ -788,7 +799,7 @@ commandRegister('status', {
             if (params.length === 0) {
                 const status = await device.getStatusAll({ refresh: 'force' });
                 display.text('Robot Status:');
-                if (status.operation) display.text(`  Operation: ${status.operation.type}, valid=${status.operation.valid}, docking=${status.operation.docking}`);
+                if (status.operation) display.text(`  Operation: ${formatOperationStatus(status.operation)}`);
                 if (status.battery) display.text(`  Battery: ${status.battery.toString()}`);
                 if (status.mowing) display.text(`  Mowing: ${status.mowing.toString()}`);
                 if (status.location) display.text(`  Location: ${status.location.toString()}`);
@@ -803,7 +814,7 @@ commandRegister('status', {
                     switch (type.trim().toLowerCase()) {
                         case 'operation':
                             const opStatus = await device.getStatusOperation({ refresh: 'force' });
-                            display.text(`Operation: ${opStatus.value?.type || 'unknown'}, valid=${opStatus.value?.valid}, docking=${opStatus.value?.docking}`);
+                            display.text(`Operation: ${formatOperationStatus(opStatus.value)}`);
                             display.json({ source: 'robot', kind: 'operation', value: opStatus.value ?? null });
                             break;
                         case 'battery':
