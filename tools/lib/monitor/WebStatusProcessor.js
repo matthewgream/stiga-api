@@ -3389,9 +3389,24 @@ function noteSettingsForDirty(){
 }
 function settingsHasChanges(){ if(!settingsAlertCfg.on) return false; for(var k in settingsChanged) return true; return false; }
 function clearSettingsChanges(){ settingsChanged = {}; if(settingsChangeTimer){ clearTimeout(settingsChangeTimer); settingsChangeTimer = null; } }
+// The zone the robot is actively mowing right now, as a numeric id — but only when we actually hold
+// settings for it (so a matching chip exists). null when docked / not in a zone / unknown / no settings.
+function currentMowingZone(){
+  if(!(state && state.robot && state.robot.mowing && !state.robot.docked)) return null;
+  var z = parseInt(state.robot.mowing.zone, 10);
+  if(isNaN(z)) return null;
+  for(var i = 0; i < zoneSettings.length; i++) if(zoneSettings[i].id === z) return z;
+  return null;
+}
 function toggleSettings(){
   settingsOpen = !settingsOpen;
-  if(!settingsOpen) clearSettingsChanges(); // closing acknowledges the changes (clears dots + red); reopen starts fresh
+  if(settingsOpen){
+    // Open straight to the zone being mowed, if any (otherwise keep the last/global selection).
+    var z = currentMowingZone();
+    if(z !== null) settingsZone = z;
+  } else {
+    clearSettingsChanges(); // closing acknowledges the changes (clears dots + red); reopen starts fresh
+  }
   renderSettingsBox();
   renderStatusBox();
 }
