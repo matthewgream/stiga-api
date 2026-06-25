@@ -373,23 +373,30 @@ function formatRobotStatusType(statusType) {
 //   2,18  leaving dock / reference station initiating
 //   2,20  out of perimeter
 //   2,22  blocked / lid sensor / stuck / trapped
-//   1,30  high grass (robot abandons the cut and goes home; advisory, self-resolving — not a fault to reset)
+//   1,30  high grass — same condition, robot is going home (advisory, self-resolving — not a fault to reset)
+//   1,31  high grass — same condition, robot has reached home/docked ([13]=1)
 const ROBOT_STATUS_ERROR_MESSAGES = {
     // Confirmed against the official app. Stored in ENUM_STYLE so the on-the-wire shape
     // matches ROBOT_STATUS_TYPES / ROBOT_STATUS_INFO_CODES — the webstatus UI softens these
     // for display (preserving known acronyms like GPS). The accompanying StatusInfo code
     // (e.g. TRAPPED, LID_SENSOR) gives the specific cause and is shown alongside as the
     // status detail.
-    '1,30': 'HIGH_GRASS', // confirmed 2026-06-25: parent ERROR(255), no StatusInfo code; robot goes home, app shows "Your robot is going home due to high grass" (cloud notification info/user-robot "High grass")
+    // High grass is one condition with two phases: the message is the same (HIGH_GRASS) and the phase
+    // is carried as the note below ("going home" -> "at home"), so the status reads naturally and we
+    // don't fork a single fault into two enums. Confirmed 2026-06-25: parent ERROR(255), no StatusInfo;
+    // app shows "going home due to high grass" then "at home…" (cloud notification info/user-robot "High grass").
+    '1,30': 'HIGH_GRASS',
+    '1,31': 'HIGH_GRASS',
     '2,18': 'NAVIGATION_INITIALISING',
     '2,20': 'GPS_SEARCHING',
     '2,22': 'STUCK',
 };
-// Optional extra context shown ALONGSIDE a status error — typically the robot's resulting action —
-// keyed by the error enum above. Surfaced as "Label (note)" (e.g. "High grass (going home)"). Purely
-// additive/advisory; absent for errors with no useful consequence to spell out.
+// Optional extra context shown ALONGSIDE a status error — typically the robot's resulting action or
+// phase — keyed by the (code1,code2) tuple (NOT the message, so two tuples that share a message can
+// carry different notes). Surfaced as "Label (note)", e.g. "High grass (going home)". Additive/advisory.
 const ROBOT_STATUS_ERROR_NOTES = {
-    HIGH_GRASS: 'going home',
+    '1,30': 'going home',
+    '1,31': 'at home',
 };
 // NB: there is no reliable "user can reset this error" predicate yet. RESET_ERROR (CMD_ROBOT 37) clears a
 // recoverable fault (confirmed 2026-06-05 on a STUCK/2,22), but the same STUCK code also occurs when the
@@ -403,7 +410,7 @@ function decodeRobotStatusError(decoded) {
     const code1 = decoded[1];
     const code2 = decoded[2];
     const message = ROBOT_STATUS_ERROR_MESSAGES[`${code1},${code2}`];
-    const note = message ? ROBOT_STATUS_ERROR_NOTES[message] : undefined;
+    const note = ROBOT_STATUS_ERROR_NOTES[`${code1},${code2}`];
     return upgradeRobotStatusError({ code1, code2, message, note });
 }
 function formatRobotStatusError(statusError) {
