@@ -373,6 +373,7 @@ function formatRobotStatusType(statusType) {
 //   2,18  leaving dock / reference station initiating
 //   2,20  out of perimeter
 //   2,22  blocked / lid sensor / stuck / trapped
+//   1,28  blade not calibrated (run blade calibration to clear)
 //   1,30  high grass — same condition, robot is going home (advisory, self-resolving — not a fault to reset)
 //   1,31  high grass — same condition, robot has reached home/docked ([13]=1)
 const ROBOT_STATUS_ERROR_MESSAGES = {
@@ -385,6 +386,7 @@ const ROBOT_STATUS_ERROR_MESSAGES = {
     // is carried as the note below ("going home" -> "at home"), so the status reads naturally and we
     // don't fork a single fault into two enums. Confirmed 2026-06-25: parent ERROR(255), no StatusInfo;
     // app shows "going home due to high grass" then "at home…" (cloud notification info/user-robot "High grass").
+    '1,28': 'BLADES_NOT_CALIBRATED', // confirmed 2026-06-25: parent ERROR(255), no StatusInfo; cleared by running blade calibration
     '1,30': 'HIGH_GRASS',
     '1,31': 'HIGH_GRASS',
     '2,18': 'NAVIGATION_INITIALISING',
