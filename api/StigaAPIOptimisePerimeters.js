@@ -31,23 +31,41 @@ function _distToSegment(px, py, ax, ay, bx, by) {
 }
 
 // ---- pure geometry -----------------------------------------------------------------------------------------
+// A ring is STORED with its first vertex repeated as its last; that trailing duplicate is a closure marker, not
+// a vertex. Every closed-mode routine here must exclude it from the geometry it operates on: it is an ENDPOINT
+// of the segment through its own neighbours (so any collinearity test scores it 0 and deletes it), and it must
+// track whatever happens to vertex 0 (so any smoothing that treats it as independent tears the ring open at the
+// seam). Both mistakes were live bugs — see the reduceCollinear/smoothLine notes below.
+function _hasClosingDuplicate(points) {
+    return points.length > 1 && points[0].x === points[points.length - 1].x && points[0].y === points[points.length - 1].y;
+}
+const _MIN_RING_VERTICES = 3; // a polygon needs three; an open line keeps both endpoints plus something between
+
 // Greedily remove vertices that sit within `epsilon` of the segment between their two neighbours (i.e. add no
 // shape). `closed` = polygon (wrap-around); otherwise an open line (endpoints fixed). points: [{x,y}] in any
-// consistent unit (epsilon in the same unit). Returns { removed: Set<originalIndex>, kept }. Index 0 is never
-// removed — for perimeter geometry it is the anchor-coincident vertex. Because a collinear vertex contributes
-// nothing to the shoelace area, removing these is lossless: the boundary and the enclosed area are unchanged.
+// consistent unit (epsilon in the same unit). Returns { removed: Set<originalIndex>, kept }. Because a collinear
+// vertex contributes nothing to the shoelace area, removing these is lossless: the boundary and the enclosed
+// area are unchanged.
+//
+// A closed ring's trailing closure marker is never a candidate (it would always score 0 — see above; until
+// 2026-07-17 it was a candidate, and it was the ONLY thing this ever removed on a real map: 28 of 28 "removals"
+// across the garden were closure markers, unclosing every ring while reporting a saving). Index 0 is likewise
+// never removed: the closure marker is a copy of it, so dropping it would leave the ring's last vertex no longer
+// matching its first.
 function reduceCollinear(points, { closed = true, epsilon = REDUCE_DEFAULT_EPSILON_CM } = {}) {
     const removed = new Set();
-    if (!Array.isArray(points) || points.length < (closed ? 4 : 3)) return { removed, kept: points?.length ?? 0 };
-    const work = points.map((p, i) => ({ x: p.x, y: p.y, i }));
+    if (!Array.isArray(points)) return { removed, kept: 0 };
+    const vertices = closed && _hasClosingDuplicate(points) ? points.slice(0, -1) : points;
+    if (vertices.length < _MIN_RING_VERTICES) return { removed, kept: points.length };
+    const work = vertices.map((p, i) => ({ x: p.x, y: p.y, i }));
     let changed = true;
-    while (changed && work.length > (closed ? 4 : 3)) {
+    while (changed && work.length > _MIN_RING_VERTICES) {
         changed = false;
         const n = work.length;
         const hi = closed ? n : n - 1;
         for (let k = 1; k < hi; k++) {
             const b = work[k];
-            if (b.i === 0) continue; // keep the anchor vertex
+            if (b.i === 0) continue; // keep vertex 0 — the closure marker is a copy of it
             const a = work[(k - 1 + n) % n],
                 c = work[(k + 1) % n];
             if (_distToSegment(b.x, b.y, a.x, a.y, c.x, c.y) <= epsilon) {
@@ -247,9 +265,17 @@ const SMOOTH_DEFAULT_STRENGTH = 0.5;
 // endpoints are pinned (an open line — e.g. a connector path docks into its zones and must not move there).
 // NO boundary/guard awareness — it can move points across borders; that's intentional for now (the future
 // front-end will show the result before commit). points: [{x,y}]. Returns new [{x,y}] (same length).
+//
+// A closed ring is smoothed over its DISTINCT vertices and re-closed afterwards. Until 2026-07-17 the trailing
+// closure marker was smoothed as if it were an independent vertex, which both gave vertex 0 and the marker the
+// wrong neighbours (each saw the other instead of the true adjacent vertex) and let them drift apart — tearing
+// a test ring open by 23cm at the seam.
 function smoothLine(points, { closed = false, iterations = SMOOTH_DEFAULT_ITERATIONS, strength = SMOOTH_DEFAULT_STRENGTH } = {}) {
-    if (!Array.isArray(points) || points.length < 3) return (points || []).map((p) => ({ x: p.x, y: p.y }));
-    let p = points.map((q) => ({ x: q.x, y: q.y }));
+    if (!Array.isArray(points)) return [];
+    const closing = closed && _hasClosingDuplicate(points);
+    const vertices = closing ? points.slice(0, -1) : points;
+    if (vertices.length < _MIN_RING_VERTICES) return points.map((q) => ({ x: q.x, y: q.y }));
+    let p = vertices.map((q) => ({ x: q.x, y: q.y }));
     for (let it = 0; it < iterations; it++) {
         const n = p.length;
         const lo = closed ? 0 : 1,
@@ -263,6 +289,7 @@ function smoothLine(points, { closed = false, iterations = SMOOTH_DEFAULT_ITERAT
         }
         p = next;
     }
+    if (closing) p.push({ ...p[0] }); // re-close on the smoothed vertex 0, keeping the caller's point count
     return p;
 }
 
