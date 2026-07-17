@@ -13,7 +13,7 @@
 // [1]=id and repeated [2] point sub-messages { 1:x, 2:y } as zigzag-cm offsets from the entry anchor.
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-const { protobufDecode, protobufScan, protobufField, protobufEncode } = require('./StigaAPIUtilitiesProtobuf');
+const { protobufDecode, protobufScan, protobufField, protobufEncode, protobufSetFields } = require('./StigaAPIUtilitiesProtobuf');
 
 const REDUCE_DEFAULT_EPSILON_CM = 1; // a vertex within this of the line through its neighbours is redundant
 
@@ -325,4 +325,535 @@ function smoothPerimeter(perimeters, { type, id, iterations = SMOOTH_DEFAULT_ITE
     return { operation: 'smooth', iterations, strength, totals: { elements: changes.length, moved, bytesBefore: dataBuf.length, bytesAfter: optimisedData.length }, byType, changes };
 }
 
-module.exports = { reduceCollinear, reducePerimeter, smoothLine, smoothPerimeter, REDUCE_DEFAULT_EPSILON_CM, SMOOTH_DEFAULT_ITERATIONS, SMOOTH_DEFAULT_STRENGTH };
+// ---- pure geometry: shape fitting ---------------------------------------------------------------------------
+// Regularise a hand-driven trace into the ideal shape it was meant to be. Driving a mower round a tree by hand
+// yields a wobbly 4-8 vertex polygon; these fits recover the underlying circle/rectangle from it.
+//
+// WHY LEAST SQUARES ON THE VERTICES, and not centroid+mean-radius or an area-preserving radius: a traced polygon
+// is INSCRIBED in the curve it was sampled from, so its area falls short of the true disc (a 4-gon holds only
+// 64% of its circle, a 6-gon 83%) — sizing by area therefore shrinks the obstacle, badly, exactly when points
+// are sparse. The vertices themselves sit ON the true curve (that is where the robot actually was), so solving
+// for centre and radius together lets the drive wobble average out. Verified against ground truth — the app's
+// own circular obstacles (a known r=100cm 16-gon, and decimated 8/9-point copies of it): the vertex fit recovers
+// r=99.5-99.7cm from as few as 8 points, while the area-equivalent radius errs by -1.6cm (16pts) to -5.6cm
+// (8pts), always small. Robust/outlier-rejecting fits (Tukey IRLS) were tried and REJECTED: at 4-8 vertices
+// there is no statistical basis to identify an outlier, so they reject nothing and merely perturb the fit. A bad
+// trace is instead surfaced honestly through the reported residual (rms/rMin/rMax) for the caller to judge.
+const CIRCLE_DEFAULT_POINTS = 16; // matches the app's own circular obstacles: a 16-gon (+ the closing vertex)
+const RECT_RESAMPLE_CM = 5; // side fits are driven by boundary length, not vertex count — see fitRectangle
+
+// A closed ring stores its first vertex again as its last; strip that to get the distinct vertices.
+function _ring(points) {
+    const p = points.map((q) => ({ x: q.x, y: q.y }));
+    while (p.length > 1 && p[0].x === p[p.length - 1].x && p[0].y === p[p.length - 1].y) p.pop();
+    return p;
+}
+function _polygonSignedAreaCm2(points) {
+    let a = 0;
+    for (let i = 0; i < points.length; i++) {
+        const j = (i + 1) % points.length;
+        a += points[i].x * points[j].y - points[j].x * points[i].y;
+    }
+    return a / 2;
+}
+// Each vertex speaks for half of each edge it touches, so a densely-sampled arc cannot outvote a sparse one.
+function _arcWeights(points) {
+    const n = points.length;
+    return points.map((_, i) => {
+        const a = points[(i - 1 + n) % n],
+            b = points[i],
+            c = points[(i + 1) % n];
+        return (Math.hypot(b.x - a.x, b.y - a.y) + Math.hypot(c.x - b.x, c.y - b.y)) / 2;
+    });
+}
+// Gaussian elimination with partial pivoting on a 3x3; undefined if singular.
+function _solve3(A, B) {
+    const M = A.map((row, i) => [...row, B[i]]);
+    for (let c = 0; c < 3; c++) {
+        let pivot = c;
+        for (let r = c + 1; r < 3; r++) if (Math.abs(M[r][c]) > Math.abs(M[pivot][c])) pivot = r;
+        if (Math.abs(M[pivot][c]) < 1e-12) return undefined;
+        [M[c], M[pivot]] = [M[pivot], M[c]];
+        for (let r = 0; r < 3; r++) {
+            if (r === c) continue;
+            const f = M[r][c] / M[c][c];
+            for (let k = c; k < 4; k++) M[r][k] -= f * M[c][k];
+        }
+    }
+    return [M[0][3] / M[0][0], M[1][3] / M[1][1], M[2][3] / M[2][2]];
+}
+// Weighted Kasa fit: minimising the ALGEBRAIC residual (x²+y²-2ax-2by-c) is linear in (a,b,c), so this is a
+// direct 3x3 solve — biased on short arcs, but a good starting point for the geometric refinement below.
+function _fitCircleAlgebraic(points, weights) {
+    let Sw = 0,
+        Sx = 0,
+        Sy = 0,
+        Sxx = 0,
+        Syy = 0,
+        Sxy = 0,
+        Sz = 0,
+        Sxz = 0,
+        Syz = 0;
+    for (const [i, q] of points.entries()) {
+        const w = weights[i],
+            z = q.x * q.x + q.y * q.y;
+        Sw += w;
+        Sx += w * q.x;
+        Sy += w * q.y;
+        Sxx += w * q.x * q.x;
+        Syy += w * q.y * q.y;
+        Sxy += w * q.x * q.y;
+        Sz += w * z;
+        Sxz += w * q.x * z;
+        Syz += w * q.y * z;
+    }
+    const s = _solve3(
+        [
+            [Sxx, Sxy, Sx],
+            [Sxy, Syy, Sy],
+            [Sx, Sy, Sw],
+        ],
+        [Sxz, Syz, Sz]
+    );
+    if (!s) return undefined;
+    const cx = s[0] / 2,
+        cy = s[1] / 2;
+    return { cx, cy, r: Math.sqrt(Math.max(0, s[2] + cx * cx + cy * cy)) };
+}
+// Geometric fit: minimise the true radial residual Σw(|p-c| - r)². The stationary point of that objective is
+// c = mean(p) + r·mean(unit vector from c to p), which this iterates to a fixed point (Landau's method) — each
+// pass recomputes r as the weighted mean radius, then re-centres. Converges from the algebraic seed in a few
+// dozen passes; the cap is only a guard against a pathological (near-collinear) input.
+function _refineCircle(points, weights, init) {
+    let { cx, cy } = init;
+    for (let iteration = 0; iteration < 500; iteration++) {
+        let Sw = 0,
+            Sr = 0,
+            Sux = 0,
+            Suy = 0;
+        for (const [i, q] of points.entries()) {
+            const d = Math.hypot(q.x - cx, q.y - cy) || 1e-9;
+            Sw += weights[i];
+            Sr += weights[i] * d;
+            Sux += (weights[i] * (q.x - cx)) / d;
+            Suy += (weights[i] * (q.y - cy)) / d;
+        }
+        const r = Sr / Sw,
+            nx = cx + r * (Sux / Sw),
+            ny = cy + r * (Suy / Sw);
+        const step = Math.hypot(nx - cx, ny - cy);
+        cx = nx;
+        cy = ny;
+        if (step < 1e-9) break;
+    }
+    let Sw = 0,
+        Sr = 0;
+    for (const [i, q] of points.entries()) {
+        Sw += weights[i];
+        Sr += weights[i] * Math.hypot(q.x - cx, q.y - cy);
+    }
+    return { cx, cy, r: Sr / Sw };
+}
+
+// Best-fit circle through a polygon's vertices. points: [{x,y}] cm (closing vertex optional). Returns
+// { cx, cy, r, rms, rMin, rMax, points, ccw } — rms is the radial residual (fit quality: sub-cm means the trace
+// really was a circle; a large rms, or an rMin far below r, means the drive wandered and no fit can rescue it).
+function fitCircle(points) {
+    const p = _ring(points);
+    if (p.length < 3) throw new Error(`need at least 3 distinct points to fit a circle (got ${p.length})`);
+    const w = _arcWeights(p);
+    const seed = _fitCircleAlgebraic(p, w) ?? { cx: p.reduce((s, q) => s + q.x, 0) / p.length, cy: p.reduce((s, q) => s + q.y, 0) / p.length };
+    const { cx, cy, r } = _refineCircle(p, w, seed);
+    const d = p.map((q) => Math.hypot(q.x - cx, q.y - cy));
+    return {
+        cx,
+        cy,
+        r,
+        rms: Math.sqrt(d.reduce((s, x) => s + (x - r) ** 2, 0) / d.length),
+        rMin: Math.min(...d),
+        rMax: Math.max(...d),
+        points: p.length,
+        ccw: _polygonSignedAreaCm2(p) > 0,
+    };
+}
+// Regular n-gon on the fitted circle, closed (first vertex repeated last) to match how the robot stores rings.
+// `startAngle` defaults to the bearing of the original first vertex, so the new ring begins where the old one
+// did (keeping it near the entry anchor); `ccw` follows the original winding.
+function circlePoints({ cx, cy, r }, { count = CIRCLE_DEFAULT_POINTS, startAngle = 0, ccw = true } = {}) {
+    const out = [];
+    for (let i = 0; i < count; i++) {
+        const a = startAngle + ((ccw ? 1 : -1) * (2 * Math.PI * i)) / count;
+        out.push({ x: Math.round(cx + r * Math.cos(a)), y: Math.round(cy + r * Math.sin(a)) });
+    }
+    out.push({ ...out[0] });
+    return out;
+}
+
+// Andrew's monotone chain convex hull, CCW.
+function _cross(o, a, b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+function _hullChain(points) {
+    const chain = [];
+    for (const q of points) {
+        while (chain.length >= 2 && _cross(chain[chain.length - 2], chain[chain.length - 1], q) <= 0) chain.pop();
+        chain.push(q);
+    }
+    chain.pop(); // the last point starts the opposite chain
+    return chain;
+}
+function _hull(points) {
+    const p = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+    if (p.length < 3) return p;
+    return [..._hullChain(p), ..._hullChain([...p].reverse())];
+}
+// Minimum-area enclosing rectangle (rotating calipers): the optimum always has a side flush with a hull edge, so
+// test every hull edge direction. Its ORIENTATION is what we want; its extents are not (see fitRectangle).
+function _minAreaRect(points) {
+    const h = _hull(points);
+    if (h.length < 3) return undefined;
+    let best;
+    for (const [i, a] of h.entries()) {
+        const b = h[(i + 1) % h.length];
+        const theta = Math.atan2(b.y - a.y, b.x - a.x),
+            c = Math.cos(-theta),
+            s = Math.sin(-theta);
+        let minX = Infinity,
+            maxX = -Infinity,
+            minY = Infinity,
+            maxY = -Infinity;
+        for (const q of h) {
+            const X = q.x * c - q.y * s,
+                Y = q.x * s + q.y * c;
+            minX = Math.min(minX, X);
+            maxX = Math.max(maxX, X);
+            minY = Math.min(minY, Y);
+            maxY = Math.max(maxY, Y);
+        }
+        const area = (maxX - minX) * (maxY - minY);
+        if (!best || area < best.area) best = { area, theta, minX, maxX, minY, maxY };
+    }
+    return best;
+}
+// Walk the ring emitting a point every `step` cm, so each side's fit is weighted by how much BOUNDARY faces it
+// rather than by how many vertices happen to sit on it.
+function _resampleRing(points, step = RECT_RESAMPLE_CM) {
+    const out = [];
+    for (const [i, a] of points.entries()) {
+        const b = points[(i + 1) % points.length];
+        const length = Math.hypot(b.x - a.x, b.y - a.y),
+            n = Math.max(1, Math.round(length / step));
+        for (let k = 0; k < n; k++) out.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
+    }
+    return out;
+}
+// A side with no samples of its own keeps whatever the calipers gave it.
+function _meanOr(values, fallback) {
+    return values.length > 0 ? values.reduce((x, y) => x + y, 0) / values.length : fallback;
+}
+// Fit the four side offsets at a fixed orientation: assign every boundary sample to its nearest side, then set
+// each side to the MEAN of its samples, and repeat until the assignment settles. The mean is the unbiased
+// estimate of where the side truly was (drive wobble is roughly symmetric about it) — unlike the calipers, which
+// must reach the worst outward wobble on each side and so inflate.
+function _sideFitExtents(samples, theta, seed) {
+    const c = Math.cos(-theta),
+        s = Math.sin(-theta);
+    const rotated = samples.map((q) => ({ X: q.x * c - q.y * s, Y: q.x * s + q.y * c }));
+    let { minX, maxX, minY, maxY } = seed;
+    for (let iteration = 0; iteration < 50; iteration++) {
+        const bucket = { minX: [], maxX: [], minY: [], maxY: [] };
+        for (const q of rotated) {
+            // nearest side wins the sample; the offset it contributes is its coordinate along that side's normal
+            const sides = [
+                { d: q.X - minX, side: 'minX', at: q.X },
+                { d: maxX - q.X, side: 'maxX', at: q.X },
+                { d: q.Y - minY, side: 'minY', at: q.Y },
+                { d: maxY - q.Y, side: 'maxY', at: q.Y },
+            ];
+            let nearest = sides[0];
+            for (const s of sides) if (s.d < nearest.d) nearest = s;
+            bucket[nearest.side].push(nearest.at);
+        }
+        const next = { minX: _meanOr(bucket.minX, minX), maxX: _meanOr(bucket.maxX, maxX), minY: _meanOr(bucket.minY, minY), maxY: _meanOr(bucket.maxY, maxY) };
+        const moved = Math.abs(next.minX - minX) + Math.abs(next.maxX - maxX) + Math.abs(next.minY - minY) + Math.abs(next.maxY - maxY);
+        ({ minX, maxX, minY, maxY } = next);
+        if (moved < 1e-6) break;
+    }
+    return { minX, maxX, minY, maxY };
+}
+
+// Best-fit rectangle for a polygon. Orientation comes from the minimum-area enclosing rectangle (robust — it is
+// set by the overall shape); the extents are then re-fitted per side, because the calipers' extents are biased
+// outward by every wobble (measured on real traces: 27-36% too much area). Returns
+// { cx, cy, a, b, theta, bearing, rectAreaCm2, polyAreaCm2, fill, points, ccw } — `a` is the LONGER side and
+// `theta` runs along it; `bearing` is a's compass bearing (deg from north, mod 180); `fill` = polygon area /
+// rectangle area, the fit-quality measure (1.0 = the trace really was this rectangle).
+function fitRectangle(points, { resampleCm = RECT_RESAMPLE_CM } = {}) {
+    const p = _ring(points);
+    if (p.length < 3) throw new Error(`need at least 3 distinct points to fit a rectangle (got ${p.length})`);
+    const caliper = _minAreaRect(p);
+    if (!caliper) throw new Error('cannot fit a rectangle: points are collinear');
+    const e = _sideFitExtents(_resampleRing(p, resampleCm), caliper.theta, caliper);
+    const cos = Math.cos(caliper.theta),
+        sin = Math.sin(caliper.theta);
+    const mx = (e.minX + e.maxX) / 2,
+        my = (e.minY + e.maxY) / 2;
+    let w = e.maxX - e.minX,
+        h = e.maxY - e.minY;
+    let { theta } = caliper;
+    if (h > w) {
+        [w, h] = [h, w]; // keep `a` the longer side, with theta running along it
+        theta += Math.PI / 2;
+    }
+    const polyAreaCm2 = Math.abs(_polygonSignedAreaCm2(p));
+    return {
+        cx: mx * cos - my * sin,
+        cy: mx * sin + my * cos,
+        a: w,
+        b: h,
+        theta,
+        bearing: (((90 - (theta * 180) / Math.PI) % 180) + 180) % 180,
+        rectAreaCm2: w * h,
+        polyAreaCm2,
+        fill: w * h > 0 ? polyAreaCm2 / (w * h) : 0,
+        points: p.length,
+        ccw: _polygonSignedAreaCm2(p) > 0,
+    };
+}
+// The rectangle's four corners, closed, in the requested winding. `subdivide` optionally adds intermediate
+// vertices along each side (n segments per side) — 1 (default) emits the exact 4-corner form.
+function rectanglePoints({ cx, cy, a, b, theta }, { ccw = true, subdivide = 1 } = {}) {
+    const cos = Math.cos(theta),
+        sin = Math.sin(theta);
+    const corner = (sa, sb) => ({ x: cx + ((sa * a) / 2) * cos - ((sb * b) / 2) * sin, y: cy + ((sa * a) / 2) * sin + ((sb * b) / 2) * cos });
+    const corners = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)]; // CCW in the rectangle frame
+    if (!ccw) corners.reverse();
+    const out = [];
+    for (const [i, from] of corners.entries()) {
+        const to = corners[(i + 1) % corners.length];
+        for (let k = 0; k < Math.max(1, subdivide); k++) {
+            const t = k / Math.max(1, subdivide);
+            out.push({ x: Math.round(from.x + (to.x - from.x) * t), y: Math.round(from.y + (to.y - from.y) * t) });
+        }
+    }
+    out.push({ ...out[0] });
+    return out;
+}
+
+// ---- wire-surgery: shape + move -----------------------------------------------------------------------------
+
+// Walk the data_points entries, hand each targeted one to `rewrite`, and splice the result back in. `rewrite`
+// returns a replacement entry buffer (or undefined to leave the entry byte-identical). Non-targeted entries are
+// never re-encoded. Returns { data, changes, dataBuf } — the caller decides whether to adopt `data`.
+function _rewriteEntries(perimeters, { type, id }, rewrite) {
+    const raw = perimeters.getRawData();
+    if (!raw?.attributes?.data_points?.data) throw new Error('no perimeter loaded');
+    const wantTypes = new Set(_resolveTypes(type));
+    const dockingIds = new Set((perimeters.getDockingPaths?.() || []).map((p) => p.getId()));
+    const idList = Array.isArray(id) ? id : [id];
+    const wantIds = id === undefined || id === null ? undefined : new Set(idList.map(Number));
+
+    const dataBuf = Buffer.from(raw.attributes.data_points.data);
+    const parts = [];
+    const changes = [];
+    const seen = new Set();
+    for (const f of protobufScan(dataBuf)) {
+        const entryBuf = Buffer.from(dataBuf.subarray(f.valStart, f.valEnd));
+        let decoded;
+        try {
+            decoded = protobufDecode(entryBuf);
+        } catch {
+            decoded = {};
+        }
+        const entryId = decoded[1];
+        const entryType = _entryTypeFor(f.field, dockingIds.has(entryId));
+        if (entryType && wantTypes.has(entryType) && (wantIds === undefined || wantIds.has(entryId))) {
+            seen.add(entryId);
+            const result = rewrite({ entryBuf, decoded, entryType, entryId, points: _entryPoints(entryBuf) });
+            if (result?.entry) {
+                changes.push(result.change);
+                parts.push(protobufField(f.field, 2, result.entry));
+                continue;
+            }
+            if (result?.change) changes.push(result.change);
+        }
+        parts.push(dataBuf.subarray(f.tagStart, f.valEnd));
+    }
+    if (wantIds) for (const wanted of wantIds) if (!seen.has(wanted)) throw new Error(`no ${type || 'element'} with id ${wanted} in the perimeter`);
+    return { data: Buffer.concat(parts), changes, dataBuf, raw };
+}
+
+// Keep the app-facing preview honest after a shape change (the robot recomputes on adoption, but a stale count
+// mis-displays until then). Sets each element's numPoints/m2Area, then re-derives the category area total and
+// the grand point total from the elements. preview.m2Area tracks the ZONES total only, so it moves only when a
+// zone was reshaped.
+function _applyPreviewForShape(preview, changes) {
+    if (!preview) return;
+    for (const c of changes) {
+        const category = preview[_PREVIEW_CATEGORY[c.type]];
+        const element = Array.isArray(category?.elements) ? category.elements.find((e) => e.id === c.id) : undefined;
+        if (!element) continue;
+        if (typeof c.after.points === 'number') element.numPoints = c.after.points;
+        if (typeof c.after.areaM2 === 'number') element.m2Area = Number(c.after.areaM2.toFixed(2));
+    }
+    for (const key of Object.values(_PREVIEW_CATEGORY)) {
+        const category = preview[key];
+        if (Array.isArray(category?.elements) && typeof category.m2Area === 'number') category.m2Area = Number(category.elements.reduce((a, e) => a + (e.m2Area || 0), 0).toFixed(2));
+    }
+    const total = Object.values(_PREVIEW_CATEGORY).reduce((a, key) => a + (preview[key]?.elements || []).reduce((s, e) => s + (e.numPoints || 0), 0), 0);
+    if (typeof preview.numPoints === 'number') preview.numPoints = total;
+    if (typeof preview.m2Area === 'number' && typeof preview.zones?.m2Area === 'number') preview.m2Area = Math.round(preview.zones.m2Area);
+}
+
+// Replace a traced element's geometry with the ideal shape fitted to it. Shared by make-* (delta 0) and tune-*
+// (delta applied to the fitted size): refitting an already-ideal shape recovers it, so tuning composes and
+// repeats without needing to remember the shape anywhere. Points are stored as integer cm, so each make/tune
+// cycle re-fits rounded vertices and the size drifts ~0.1cm per cycle — irrelevant against a drive that wobbles
+// by 10cm, but it is why the delta is applied to a fresh fit rather than accumulated.
+//
+// `shape` is 'circle' or 'rectangle'. `deltaA`/`deltaB` are TOTAL-EXTENT deltas in cm: for a circle, deltaA is
+// the diameter change (so +10 = 5cm more clearance all round); for a rectangle, deltaA/deltaB change the length
+// of side A (the longer) and side B. MUTATES the model's data_points + preview; does NOT write.
+//
+// Returns { operation, totals: { elements, bytesBefore, bytesAfter, numPointsBefore, numPointsAfter,
+// areaDeltaM2 }, changes: [{ type, id, shape, before, after, maxMoveCm }] } — before/after each carry the full
+// shape description so the caller can show the element before and after without recomputing.
+function shapePerimeter(perimeters, { shape, type = 'obstacle', id, deltaA = 0, deltaB = 0, count = CIRCLE_DEFAULT_POINTS, subdivide = 1 } = {}) {
+    if (!['circle', 'rectangle'].includes(shape)) throw new Error(`unknown shape '${shape}' (circle|rectangle)`);
+    const numPointsBefore = perimeters.getRawData()?.attributes?.preview?.numPoints;
+    const { data, changes, dataBuf, raw } = _rewriteEntries(perimeters, { type, id }, ({ entryBuf, entryType, entryId, points }) => {
+        const before = _describeShape(shape, points);
+        const after = _applyDelta(shape, before, deltaA, deltaB);
+        const emitted = shape === 'circle' ? circlePoints(after, { count, startAngle: Math.atan2(points[0].y - after.cy, points[0].x - after.cx), ccw: before.ccw }) : rectanglePoints(after, { ccw: before.ccw, subdivide });
+        const areaCm2 = Math.abs(_polygonSignedAreaCm2(_ring(emitted)));
+        return {
+            entry: _replacePointsInEntry(entryBuf, emitted),
+            change: {
+                type: entryType,
+                id: entryId,
+                shape,
+                before: { ..._publicShape(shape, before), points: points.length, areaM2: Math.abs(_polygonSignedAreaCm2(_ring(points))) / 10_000 },
+                after: { ..._publicShape(shape, after), points: emitted.length, areaM2: areaCm2 / 10_000 },
+                maxMoveCm: _maxBoundaryMove(shape, _ring(points), after),
+            },
+        };
+    });
+    if (changes.length > 0) {
+        raw.attributes.data_points.data = [...data]; // mutate the model; write() restamps checksums
+        _applyPreviewForShape(raw.attributes.preview, changes);
+    }
+    return {
+        operation: deltaA === 0 && deltaB === 0 ? `make-${shape}` : `tune-${shape}`,
+        shape,
+        deltaA,
+        deltaB,
+        totals: {
+            elements: changes.length,
+            bytesBefore: dataBuf.length,
+            bytesAfter: data.length,
+            numPointsBefore,
+            numPointsAfter: raw.attributes.preview?.numPoints,
+            areaDeltaM2: changes.reduce((a, c) => a + (c.after.areaM2 - c.before.areaM2), 0),
+        },
+        changes,
+    };
+}
+function _describeShape(shape, points) {
+    return shape === 'circle' ? fitCircle(points) : fitRectangle(points);
+}
+// Grow/shrink the fitted shape by a TOTAL-EXTENT delta (diameter, or side length).
+function _applyDelta(shape, fit, deltaA, deltaB) {
+    if (shape === 'circle') {
+        const r = fit.r + deltaA / 2;
+        if (r <= 0) throw new Error(`diameter delta ${deltaA >= 0 ? '+' : ''}${deltaA}cm would leave a diameter of ${(2 * r).toFixed(1)}cm`);
+        return { ...fit, r };
+    }
+    const a = fit.a + deltaA,
+        b = fit.b + deltaB;
+    if (a <= 0 || b <= 0) throw new Error(`side deltas (${deltaA}, ${deltaB}) would leave sides of ${a.toFixed(1)}cm x ${b.toFixed(1)}cm`);
+    return { ...fit, a, b };
+}
+// The report's view of a fit: everything a caller needs to print, nothing internal.
+function _publicShape(shape, fit) {
+    if (shape === 'circle') return { centre: { x: fit.cx, y: fit.cy }, diameterCm: 2 * fit.r, radiusCm: fit.r, rmsCm: fit.rms, rMinCm: fit.rMin, rMaxCm: fit.rMax };
+    return { centre: { x: fit.cx, y: fit.cy }, aCm: fit.a, bCm: fit.b, bearingDeg: fit.bearing, fill: fit.fill };
+}
+// How far the boundary actually travels: the furthest any ORIGINAL vertex has to move to reach the new shape.
+// Measured against the trace, not against the fitted shape — a make-* fit leaves the fitted shape unmoved by
+// definition, so comparing fit-to-fit would report 0 while every vertex in the garden shifts.
+function _maxBoundaryMove(shape, points, after) {
+    const distance = shape === 'circle' ? (q) => Math.abs(Math.hypot(q.x - after.cx, q.y - after.cy) - after.r) : (q) => Math.abs(_signedDistanceToBox(q, after));
+    return Math.max(...points.map((q) => distance(q)));
+}
+// Signed distance from a point to an oriented rectangle's outline — negative inside, positive outside.
+function _signedDistanceToBox(q, { cx, cy, a, b, theta }) {
+    const cos = Math.cos(-theta),
+        sin = Math.sin(-theta);
+    const px = q.x - cx,
+        py = q.y - cy;
+    const dx = Math.abs(px * cos - py * sin) - a / 2,
+        dy = Math.abs(px * sin + py * cos) - b / 2;
+    return Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) + Math.min(Math.max(dx, dy), 0);
+}
+
+// Anchor doubles: [16] zone / [8] path / [6] obstacle, { 1: east metres, 2: north metres } from the reference
+// position — matched in the same precedence the geometry decoder uses.
+const _ANCHOR_FIELDS = [16, 8, 6];
+function _anchorFieldOf(decoded) {
+    return _ANCHOR_FIELDS.find((f) => decoded[f]?.[1] !== undefined && decoded[f]?.[2] !== undefined);
+}
+function _readAnchor(decoded, field) {
+    return { east: Buffer.from(decoded[field][1], 'hex').readDoubleLE(0), north: Buffer.from(decoded[field][2], 'hex').readDoubleLE(0) };
+}
+function _anchorBuffer(east, north) {
+    const e = Buffer.alloc(8),
+        n = Buffer.alloc(8);
+    e.writeDoubleLE(east, 0);
+    n.writeDoubleLE(north, 0);
+    return Buffer.concat([protobufField(1, 1, e), protobufField(2, 1, n)]);
+}
+
+// Translate an element by (dNorth, dEast) CENTIMETRES. Every point is stored as an offset from the entry's
+// anchor, so moving the ANCHOR moves the whole element — the point list is left untouched. That is both lossless
+// (the anchor is a metre double, so there is no integer-cm rounding) and minimal (no geometry is re-encoded).
+// MUTATES the model's data_points; does NOT write. preview carries no position, so it needs no update.
+//
+// Returns { operation:'move', dNorthCm, dEastCm, totals: { elements, bytesBefore, bytesAfter },
+// changes: [{ type, id, before: { anchorEastM, anchorNorthM }, after: {...}, movedCm }] }
+function movePerimeter(perimeters, { type = 'obstacle', id, dNorth = 0, dEast = 0 } = {}) {
+    const { data, changes, dataBuf, raw } = _rewriteEntries(perimeters, { type, id }, ({ entryBuf, decoded, entryType, entryId }) => {
+        const field = _anchorFieldOf(decoded);
+        if (!field) throw new Error(`${entryType} ${entryId} has no anchor to move`);
+        const before = _readAnchor(decoded, field);
+        const after = { east: before.east + dEast / 100, north: before.north + dNorth / 100 };
+        return {
+            entry: protobufSetFields(entryBuf, [{ field, wire: 2, value: _anchorBuffer(after.east, after.north) }]),
+            change: {
+                type: entryType,
+                id: entryId,
+                before: { anchorEastM: before.east, anchorNorthM: before.north },
+                after: { anchorEastM: after.east, anchorNorthM: after.north },
+                movedCm: Math.hypot(dNorth, dEast),
+            },
+        };
+    });
+    if (changes.length > 0) raw.attributes.data_points.data = [...data]; // mutate the model; write() restamps checksums
+    return { operation: 'move', dNorthCm: dNorth, dEastCm: dEast, totals: { elements: changes.length, bytesBefore: dataBuf.length, bytesAfter: data.length }, changes };
+}
+
+module.exports = {
+    reduceCollinear,
+    reducePerimeter,
+    smoothLine,
+    smoothPerimeter,
+    fitCircle,
+    circlePoints,
+    fitRectangle,
+    rectanglePoints,
+    shapePerimeter,
+    movePerimeter,
+    REDUCE_DEFAULT_EPSILON_CM,
+    SMOOTH_DEFAULT_ITERATIONS,
+    SMOOTH_DEFAULT_STRENGTH,
+    CIRCLE_DEFAULT_POINTS,
+};

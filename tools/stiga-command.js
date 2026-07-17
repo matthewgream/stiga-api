@@ -1344,12 +1344,7 @@ commandRegister('perimeters', {
         'native is the raw cloud resource verbatim, so no fields are stripped. Restore updates the CLOUD',
         'copy only — the robot owns the master and will re-publish its own unless told to pull via cloudsync.',
     ],
-    examples: [
-        'stiga-command perimeters',
-        'stiga-command perimeters --format json | jq .',
-        'stiga-command perimeters --format native --save perimeters.backup',
-        'stiga-command perimeters --format native --load perimeters.backup',
-    ],
+    examples: ['stiga-command perimeters', 'stiga-command perimeters --format json | jq .', 'stiga-command perimeters --format native --save perimeters.backup', 'stiga-command perimeters --format native --load perimeters.backup'],
     // marks this command as backup-capable: the `backup`/`restore` meta-commands drive its export/import with
     // this format and the standard data/<name>.backup file. native = lossless + restorable.
     backup: { format: 'native' },
@@ -1362,26 +1357,95 @@ commandRegister('perimeters', {
 // StigaAPIOptimisePerimeters (so the API, CLI and a future front-end share it); loading + committing live here.
 // Dry-run by default — mutates only the in-memory model and reports; --commit writes to the cloud.
 
+const OPTIMISE_SHAPE_OPS = new Set(['make-circular', 'make-rectangular', 'tune-circular', 'tune-rectangular']);
+const OPTIMISE_OPS = new Set(['reduce', 'smooth', ...OPTIMISE_SHAPE_OPS, 'move']);
+const OPTIMISE_USAGE =
+    'usage: optimise perimeter <reduce|smooth|make-circular|make-rectangular|tune-circular|tune-rectangular|move> [zone|obstacle|path|docking] [id[,id...]] [±A[,±B]] [eps=<cm> | iters=<n> strength=<0..1> | points=<n> | subdivide=<n>] [--commit]';
+
+// A ±A or ±A,±B positional argument (cm). The sign is mandatory — it is what marks the token as a delta rather
+// than an id, and it keeps '+10' visibly distinct from a bare size.
+function parseOptimiseDelta(spec) {
+    const parts = String(spec).split(',');
+    if (parts.length > 2 || !parts.every((p) => /^[+-]\d+(?:\.\d+)?$/.test(p))) throw throwExit(`invalid delta '${spec}' — expected ±A or ±A,±B in cm (e.g. +10 or +10,-5)`, 1);
+    return { a: Number(parts[0]), b: parts.length > 1 ? Number(parts[1]) : 0 };
+}
+// A traced shape that the fit cannot honestly represent: a vertex well inside the fitted circle means the drive
+// wandered in toward the object, and no circle can be right for it. Surface it rather than quietly averaging.
+function optimiseFitWarning(change) {
+    if (change.shape === 'circle') {
+        const { radiusCm, rMinCm, rmsCm } = change.before;
+        if (rMinCm < 0.5 * radiusCm) return `poor circle fit — a vertex sits ${rMinCm.toFixed(1)}cm from the centre against a fitted radius of ${radiusCm.toFixed(1)}cm; the trace wanders inward, so re-drive it or set the size by hand`;
+        if (rmsCm > 0.25 * radiusCm) return `loose circle fit — radial spread ${rmsCm.toFixed(1)}cm against a fitted radius of ${radiusCm.toFixed(1)}cm`;
+    } else if (change.before.fill < 0.85 || change.before.fill > 1.15) return `poor rectangle fit — the trace fills ${(change.before.fill * 100).toFixed(0)}% of the fitted rectangle, so it may not be rectangular`;
+    return undefined;
+}
+function formatOptimiseShape(shape, s) {
+    if (shape === 'circle') return `circle centre (${s.centre.x.toFixed(0)},${s.centre.y.toFixed(0)}) diameter ${s.diameterCm.toFixed(1)}cm (radius ${s.radiusCm.toFixed(1)}cm)`;
+    return `rect centre (${s.centre.x.toFixed(0)},${s.centre.y.toFixed(0)}) A=${(s.aCm / 100).toFixed(2)}m B=${(s.bCm / 100).toFixed(2)}m bearing ${s.bearingDeg.toFixed(1)}°`;
+}
+function formatOptimiseFitQuality(shape, before) {
+    if (shape === 'circle') return `radial spread ${before.rmsCm.toFixed(1)}cm, vertices ${before.rMinCm.toFixed(1)}..${before.rMaxCm.toFixed(1)}cm from centre`;
+    return `trace fills ${(before.fill * 100).toFixed(0)}% of the fitted rectangle`;
+}
+const signedCm = (n) => `${n >= 0 ? '+' : ''}${n}`;
+const signedM2 = (n) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}`;
+
+// Before/after for one reshaped element — the whole point of the dry-run, so it shows the fitted shape, how
+// good that fit was, and how far the boundary actually travels.
+function displayOptimiseShapeChange(shape, c) {
+    display.text(`  ${c.type} ${c.id}:`);
+    display.text(`    before: ${c.before.points} pts, area ${c.before.areaM2.toFixed(2)}m² — fitted ${formatOptimiseShape(shape, c.before)}`);
+    display.text(`            fit quality: ${formatOptimiseFitQuality(shape, c.before)}`);
+    display.text(`    after : ${c.after.points} pts, area ${c.after.areaM2.toFixed(2)}m² — ${formatOptimiseShape(shape, c.after)}`);
+    display.text(`    boundary moves up to ${c.maxMoveCm.toFixed(1)}cm, area Δ ${signedM2(c.after.areaM2 - c.before.areaM2)}m²`);
+    const warning = optimiseFitWarning(c);
+    if (warning) display.log(`warning: ${c.type} ${c.id}: ${warning}`);
+}
+function displayOptimiseMoveChange(c) {
+    display.text(`  ${c.type} ${c.id}:`);
+    display.text(`    before: anchor E=${c.before.anchorEastM.toFixed(3)}m N=${c.before.anchorNorthM.toFixed(3)}m`);
+    display.text(`    after : anchor E=${c.after.anchorEastM.toFixed(3)}m N=${c.after.anchorNorthM.toFixed(3)}m`);
+    display.text(`    moved ${c.movedCm.toFixed(1)}cm (shape unchanged)`);
+}
+
 async function runOptimise(credentials, options, rawParams) {
-    // pull eps=/iters=/strength= out of the params, leaving positional grammar: perimeter <op> [type] [id]
+    // pull the k=v arguments out, leaving the positional grammar: perimeter <op> [type] [id] [±A[,±B]]
     let epsilon = StigaAPIOptimisePerimeters.REDUCE_DEFAULT_EPSILON_CM;
     let iterations = StigaAPIOptimisePerimeters.SMOOTH_DEFAULT_ITERATIONS;
     let strength = StigaAPIOptimisePerimeters.SMOOTH_DEFAULT_STRENGTH;
+    let count = StigaAPIOptimisePerimeters.CIRCLE_DEFAULT_POINTS;
+    let subdivide = 1;
+    let delta;
     const params = [];
     for (const p of rawParams) {
         const eM = /^eps=(\d+(?:\.\d+)?)$/i.exec(p),
             iM = /^iters=(\d+)$/i.exec(p),
-            sM = /^strength=(\d+(?:\.\d+)?)$/i.exec(p);
+            sM = /^strength=(\d+(?:\.\d+)?)$/i.exec(p),
+            pM = /^points=(\d+)$/i.exec(p),
+            dM = /^subdivide=(\d+)$/i.exec(p);
         if (eM) epsilon = Number(eM[1]);
         else if (iM) iterations = Number(iM[1]);
         else if (sM) strength = Number(sM[1]);
+        else if (pM) count = Number(pM[1]);
+        else if (dM) subdivide = Number(dM[1]);
+        else if (/^[+-]/.test(p)) delta = parseOptimiseDelta(p);
         else params.push(p);
     }
     const subject = (params[0] || '').toLowerCase();
     const operation = (params[1] || '').toLowerCase();
-    if (subject !== 'perimeter' || !['reduce', 'smooth'].includes(operation)) throw throwExit('usage: optimise perimeter <reduce|smooth> [zone|obstacle|path|docking] [id] [eps=<cm> | iters=<n> strength=<0..1>] [--commit]', 1);
-    const type = params[2]; // zone|obstacle|path|docking, or undefined = zones+obstacles+connect-paths
-    const id = params[3]; // optional specific element id
+    if (subject !== 'perimeter' || !OPTIMISE_OPS.has(operation)) throw throwExit(OPTIMISE_USAGE, 1);
+    const isShape = OPTIMISE_SHAPE_OPS.has(operation);
+    // Reshaping/moving every element at once is never what anyone means, so those ops target obstacles and
+    // demand an explicit id (or id list); reduce/smooth keep their broader sweep-everything defaults.
+    const type = params[2] ?? (isShape || operation === 'move' ? 'obstacle' : undefined);
+    const idSpec = params[3];
+    if ((isShape || operation === 'move') && !idSpec) throw throwExit(`${operation} needs an explicit element id (or a comma-separated list) — it will not reshape every element at once`, 1);
+    const id = idSpec?.split(',').map((s) => {
+        if (!/^\d+$/.test(s)) throw throwExit(`invalid element id '${s}'`, 1);
+        return Number(s);
+    });
+    if (operation.startsWith('tune-') && !delta) throw throwExit(`${operation} needs a ±delta in cm (e.g. ${operation === 'tune-circular' ? '+10' : '+10,-5'})`, 1);
+    if (operation === 'move' && !delta) throw throwExit('move needs a ±north,±east delta in cm (e.g. +30,-20)', 1);
 
     const auth = new StigaAPIAuthentication(credentials.username, credentials.password);
     if (!(await auth.isValid())) throw throwExit('authentication failed', 2);
@@ -1394,23 +1458,50 @@ async function runOptimise(credentials, options, rawParams) {
     const perimeters = new StigaAPIPerimeters(server, device);
     if (!(await perimeters.load())) throw throwExit('failed to load perimeters', 2);
 
+    // every op reports, then commits only on --commit; `changed` gates the write and the wording
+    const finish = async (pkg, changed, nothingToCommit) => {
+        if (options.commit && changed) {
+            display.log('EXPERIMENTAL — committing edited perimeter (changed outside the app guard rails) to the cloud...');
+            if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
+            display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect (cloudsync is manual)');
+        } else if (options.commit) display.log(`nothing to commit (${nothingToCommit})`);
+        else display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud)');
+        display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && changed), value: pkg });
+    };
+
+    const dry = options.commit ? '' : '  [dry-run]';
+    if (operation === 'move') {
+        const pkg = StigaAPIOptimisePerimeters.movePerimeter(perimeters, { type, id, dNorth: delta.a, dEast: delta.b });
+        display.text(`Optimise perimeter — move (north ${signedCm(delta.a)}cm, east ${signedCm(delta.b)}cm)${dry}:`);
+        for (const c of pkg.changes) displayOptimiseMoveChange(c);
+        await finish(
+            pkg,
+            pkg.changes.some((c) => c.movedCm > 0),
+            'zero movement'
+        );
+        return;
+    }
+
+    if (isShape) {
+        const shape = operation.endsWith('-circular') ? 'circle' : 'rectangle';
+        const pkg = StigaAPIOptimisePerimeters.shapePerimeter(perimeters, { shape, type, id, deltaA: delta?.a ?? 0, deltaB: delta?.b ?? 0, count, subdivide });
+        const spec = shape === 'rectangle' ? `${signedCm(delta?.a)},${signedCm(delta?.b)}` : signedCm(delta?.a);
+        const suffix = delta ? ` (${spec}cm)` : '';
+        display.text(`Optimise perimeter — ${operation}${suffix}${dry}:`);
+        for (const c of pkg.changes) displayOptimiseShapeChange(shape, c);
+        const t = pkg.totals;
+        display.text(`  total: ${t.elements} element${t.elements === 1 ? '' : 's'}, ${t.numPointsBefore} -> ${t.numPointsAfter} points, ${t.bytesBefore} -> ${t.bytesAfter} bytes, area Δ ${signedM2(t.areaDeltaM2)} m²`);
+        await finish(pkg, t.elements > 0, 'nothing reshaped');
+        return;
+    }
+
     if (operation === 'smooth') {
         // No boundary/guard awareness — it can move points across borders (the future front-end shows the
         // result before commit). Dry-run by default; --commit writes the moved geometry to the cloud.
         const pkg = StigaAPIOptimisePerimeters.smoothPerimeter(perimeters, { type, id, iterations, strength });
         display.text(`Optimise perimeter — smooth (iters=${iterations}, strength=${strength})${options.commit ? '' : '  [dry-run]'}:`);
         for (const c of pkg.changes) display.text(`  ${c.type} ${c.id} (${c.points}pts): avg move ${c.avgMoveCm.toFixed(1)}cm, max ${c.maxMoveCm.toFixed(1)}cm`);
-        const { moved } = pkg.totals;
-        if (options.commit && moved > 0) {
-            display.log('EXPERIMENTAL — committing smoothed perimeter (edited outside the app guard rails) to the cloud...');
-            if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
-            display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect (cloudsync is manual)');
-        } else if (options.commit) {
-            display.log('nothing to commit (no points moved)');
-        } else {
-            display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud)');
-        }
-        display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && moved > 0), value: pkg });
+        await finish(pkg, pkg.totals.moved > 0, 'no points moved');
         return;
     }
 
@@ -1419,23 +1510,13 @@ async function runOptimise(credentials, options, rawParams) {
     for (const c of pkg.changes.filter((c) => c.removed > 0)) display.text(`  ${c.type} ${c.id}: ${c.before} -> ${c.after} pts (-${c.removed})`);
     const t = pkg.totals;
     display.text(`  total: removed ${t.removed} of ${t.numPointsBefore} points, ${t.bytesBefore} -> ${t.bytesAfter} bytes, area Δ ${t.areaDeltaM2.toFixed(4)} m²`);
-
-    if (options.commit && t.removed > 0) {
-        display.log('EXPERIMENTAL — committing optimised perimeter (edited outside the app guard rails) to the cloud...');
-        if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
-        display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect (cloudsync is manual)');
-    } else if (options.commit) {
-        display.log('nothing to commit (no points removed)');
-    } else {
-        display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud)');
-    }
-    display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && t.removed > 0), value: pkg });
+    await finish(pkg, t.removed > 0, 'no points removed');
 }
 
 commandRegister('optimise', {
-    description: '[EXPERIMENTAL] Optimise the cloud perimeter geometry (reduce: collinear vertex removal; smooth: corner-rounding)',
+    description: '[EXPERIMENTAL] Optimise the cloud perimeter geometry (reduce, smooth, regularise to a circle/rectangle, move)',
     targets: ['robot'],
-    usage: 'stiga-command optimise perimeter <reduce|smooth> [zone|obstacle|path|docking] [id] [eps=<cm> | iters=<n> strength=<0..1>] [--commit]',
+    usage: OPTIMISE_USAGE.replace('usage: ', 'stiga-command '),
     summary: 'Run a geometry optimisation over the cloud perimeter. Dry-run by default; --commit writes to the cloud.',
     details: [
         '',
@@ -1448,8 +1529,27 @@ commandRegister('optimise', {
         '                         excluded by default). eps=<cm> = tolerance (default 1cm; 0 = exactly lossless).',
         '  smooth  [type] [id]    Laplacian corner-rounding — iters=<n> (default 2), strength=<0..1> (default 0.5).',
         '                         No boundary guards (can move points across borders); --commit writes it.',
-        '  <type>                 limit to one of zone|obstacle|path|docking; [id] limits to one element.',
-        '  --commit               write the result to the cloud (reduce only; otherwise dry-run + report).',
+        '',
+        '  Regularising a hand-driven trace — you cannot drive a clean circle round a tree, so these replace the',
+        '  wobbly trace with the ideal shape fitted to it. They default to obstacles and REQUIRE an id (or a',
+        '  comma-separated list), because reshaping the whole garden at once is never the intent.',
+        '',
+        '  make-circular    <id>       replace the trace with the best-fit circle. points=<n> sets the vertex',
+        "                             count (default 16, matching the app's own circular obstacles).",
+        '  make-rectangular <id>       replace the trace with the best-fit rectangle (4 corners; subdivide=<n>',
+        '                             adds n-1 intermediate vertices per side).',
+        '  tune-circular    <id> ±A    refit, then change the DIAMETER by A cm (+10 = 5cm more clearance all',
+        '                             round). Repeatable — refitting an ideal circle recovers it exactly.',
+        '  tune-rectangular <id> ±A,±B refit, then change side A (the longer) by A cm and side B by B cm.',
+        '  move             <id> ±A,±B shift the element A cm north and B cm east, shape untouched.',
+        '',
+        '  --commit               write the result to the cloud (otherwise dry-run + report).',
+        '',
+        'The fit solves for centre and size together by least squares on the vertices — the drive wobble averages',
+        'out, and the vertices are where the robot actually was. It does NOT size by area: a traced polygon is',
+        'inscribed in the curve it was sampled from, so its area falls short (a 4-gon holds 64% of its circle),',
+        'which would shrink the obstacle. Each run reports the fit quality (radial spread for a circle, fill',
+        'fraction for a rectangle) and warns when a trace is too ragged to represent honestly.',
         '',
         'A committed change updates the CLOUD copy only — the robot owns the master and must be force-synced',
         '(cloudsync) for it to take effect. Reduce is shape-preserving (area Δ is sub-cm² at eps=1cm).',
@@ -1458,8 +1558,13 @@ commandRegister('optimise', {
         'stiga-command optimise perimeter reduce',
         'stiga-command optimise perimeter reduce zone 1',
         'stiga-command optimise perimeter reduce obstacle 7 --commit',
-        'stiga-command optimise perimeter smooth path',
         'stiga-command optimise perimeter smooth path 10 iters=3 strength=0.5',
+        'stiga-command optimise perimeter make-circular obstacle 3',
+        'stiga-command optimise perimeter make-circular obstacle 2,3,4,5,8,9,10 --commit',
+        'stiga-command optimise perimeter make-rectangular obstacle 6 --commit',
+        'stiga-command optimise perimeter tune-circular obstacle 3 +10 --commit',
+        'stiga-command optimise perimeter tune-rectangular obstacle 6 +20,-5',
+        'stiga-command optimise perimeter move obstacle 6 +30,-20',
     ],
     skipDefaultSetup: true,
     execute: async (options, context) => runOptimise(context.credentials, options, context.params),
