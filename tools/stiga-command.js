@@ -124,6 +124,7 @@ function parseArgs() {
         save: undefined, // --save/--export/--output <file|-> : commands that support it export their blob here
         load: undefined, // --load/--import/--input  <file|-> : ...and import it from here
         commit: false, // --commit : commands that mutate (e.g. optimise) only write when this is set; else dry-run
+        sync: false, // --commit-and-sync : as --commit, then have the robot pull the written copy (implies commit)
         username: undefined,
         password: undefined,
         mqttBroker: undefined,
@@ -159,7 +160,10 @@ function parseArgs() {
         else if (a === '--level') options.level = validateChoice(next('--level').toLowerCase(), LEVELS, '--level');
         else if (a === '--format') options.format = validateChoice(next('--format').toLowerCase(), FORMATS, '--format');
         else if (a === '--commit') options.commit = true;
-        else if (a === '--debug') options.debug = true;
+        else if (a === '--commit-and-sync') {
+            options.commit = true;
+            options.sync = true;
+        } else if (a === '--debug') options.debug = true;
         else if (options.command === undefined) options.command = a;
         else options.params.push(a);
     }
@@ -1360,7 +1364,7 @@ commandRegister('perimeters', {
 const OPTIMISE_SHAPE_OPS = new Set(['make-circular', 'make-rectangular', 'tune-circular', 'tune-rectangular']);
 const OPTIMISE_OPS = new Set(['reduce', 'smooth', ...OPTIMISE_SHAPE_OPS, 'move']);
 const OPTIMISE_USAGE =
-    'usage: optimise perimeter <reduce|smooth|make-circular|make-rectangular|tune-circular|tune-rectangular|move> [zone|obstacle|path|docking] [id[,id...]] [±A[,±B]] [eps=<cm> | iters=<n> strength=<0..1> | points=<n> | subdivide=<n>] [--commit]';
+    'usage: optimise perimeter <reduce|smooth|make-circular|make-rectangular|tune-circular|tune-rectangular|move> [zone|obstacle|path|docking] [id[,id...]] [±A[,±B]] [eps=<cm> | iters=<n> strength=<0..1> | points=<n> | subdivide=<n>] [--commit | --commit-and-sync]';
 
 // A ±A or ±A,±B positional argument (cm). The sign is mandatory — it is what marks the token as a delta rather
 // than an id, and it keeps '+10' visibly distinct from a bare size.
@@ -1406,6 +1410,26 @@ function displayOptimiseMoveChange(c) {
     display.text(`    before: anchor E=${c.before.anchorEastM.toFixed(3)}m N=${c.before.anchorNorthM.toFixed(3)}m`);
     display.text(`    after : anchor E=${c.after.anchorEastM.toFixed(3)}m N=${c.after.anchorNorthM.toFixed(3)}m`);
     display.text(`    moved ${c.movedCm.toFixed(1)}cm (shape unchanged)`);
+}
+
+// Hand the freshly-written cloud copy to the robot (CLOUDSYNC_DOWNLOAD — the same command the app's "sync now"
+// issues): the robot fetches the perimeter over HTTPS and adopts it. This exists as one step with the write
+// because the robot owns the master and re-publishes its own map, so a cloud edit that is not pulled promptly
+// gets clobbered — committing and syncing together closes that window. Builds its own MQTT connection (optimise
+// is otherwise cloud-only, and a dry-run should not open one) and tears it down again.
+async function syncPerimeterToRobot(auth, device, perimeters) {
+    const url = perimeters.getResourceUrl();
+    if (!url) throw throwExit('no perimeter resource url available to sync', 2);
+    const connectors = { auth, device, deviceConnection: undefined, connectedDevice: undefined, connectedBase: undefined };
+    try {
+        await connectToRobot(device, connectors);
+        if ((await device.sendCloudSync(`Bearer ${auth.token}`, url)) !== true) throw throwExit('robot did not acknowledge the cloud-sync command — the cloud copy is written but the robot has NOT adopted it', 2);
+        display.log('robot acknowledged cloud-sync — it is downloading and applying the committed perimeter');
+        return true;
+    } finally {
+        if (connectors.connectedDevice) connectors.connectedDevice.destroy();
+        if (connectors.deviceConnection) connectors.deviceConnection.disconnect();
+    }
 }
 
 async function runOptimise(credentials, options, rawParams) {
@@ -1460,13 +1484,15 @@ async function runOptimise(credentials, options, rawParams) {
 
     // every op reports, then commits only on --commit; `changed` gates the write and the wording
     const finish = async (pkg, changed, nothingToCommit) => {
+        let synced = false;
         if (options.commit && changed) {
             display.log('EXPERIMENTAL — committing edited perimeter (changed outside the app guard rails) to the cloud...');
             if (!(await perimeters.write())) throw throwExit('failed to write perimeter to cloud', 2);
-            display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect (cloudsync is manual)');
+            if (options.sync) synced = await syncPerimeterToRobot(auth, device, perimeters);
+            else display.log('warning: model committed to the cloud but must be force-synced to the robot to take effect — use --commit-and-sync, or the cloud-sync command');
         } else if (options.commit) display.log(`nothing to commit (${nothingToCommit})`);
-        else display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud)');
-        display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && changed), value: pkg });
+        else display.text('  (dry-run — nothing written; re-run with --commit to write to the cloud, or --commit-and-sync to also make the robot adopt it)');
+        display.json({ source: 'robot', kind: 'optimise', committed: Boolean(options.commit && changed), synced, value: pkg });
     };
 
     const dry = options.commit ? '' : '  [dry-run]';
@@ -1544,6 +1570,9 @@ commandRegister('optimise', {
         '  move             <id> ±A,±B shift the element A cm north and B cm east, shape untouched.',
         '',
         '  --commit               write the result to the cloud (otherwise dry-run + report).',
+        '  --commit-and-sync      write it, then tell the robot to pull and adopt it (CLOUDSYNC_DOWNLOAD).',
+        '                         PREFER THIS over --commit: the robot owns the master and re-publishes its own',
+        '                         map, so a cloud copy that is not pulled promptly is simply clobbered.',
         '',
         'The fit solves for centre and size together by least squares on the vertices — the drive wobble averages',
         'out, and the vertices are where the robot actually was. It does NOT size by area: a traced polygon is',
@@ -1551,18 +1580,18 @@ commandRegister('optimise', {
         'which would shrink the obstacle. Each run reports the fit quality (radial spread for a circle, fill',
         'fraction for a rectangle) and warns when a trace is too ragged to represent honestly.',
         '',
-        'A committed change updates the CLOUD copy only — the robot owns the master and must be force-synced',
-        '(cloudsync) for it to take effect. Reduce is shape-preserving (area Δ is sub-cm² at eps=1cm).',
+        'A --commit alone updates the CLOUD copy only, which the robot will overwrite with its own next publish;',
+        '--commit-and-sync makes the robot adopt it. Reduce is shape-preserving (area Δ is sub-cm² at eps=1cm).',
     ],
     examples: [
         'stiga-command optimise perimeter reduce',
         'stiga-command optimise perimeter reduce zone 1',
-        'stiga-command optimise perimeter reduce obstacle 7 --commit',
+        'stiga-command optimise perimeter reduce obstacle 7 --commit-and-sync',
         'stiga-command optimise perimeter smooth path 10 iters=3 strength=0.5',
         'stiga-command optimise perimeter make-circular obstacle 3',
-        'stiga-command optimise perimeter make-circular obstacle 2,3,4,5,8,9,10 --commit',
-        'stiga-command optimise perimeter make-rectangular obstacle 6 --commit',
-        'stiga-command optimise perimeter tune-circular obstacle 3 +10 --commit',
+        'stiga-command optimise perimeter make-circular obstacle 2,3,4,5,8,9,10 --commit-and-sync',
+        'stiga-command optimise perimeter make-rectangular obstacle 6 --commit-and-sync',
+        'stiga-command optimise perimeter tune-circular obstacle 3 +10 --commit-and-sync',
         'stiga-command optimise perimeter tune-rectangular obstacle 6 +20,-5',
         'stiga-command optimise perimeter move obstacle 6 +30,-20',
     ],
