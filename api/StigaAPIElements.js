@@ -341,6 +341,7 @@ const ROBOT_STATUS_TYPES = {
     6: 'BLOCKED',
     8: 'LID_OPEN',
     13: 'GOING_HOME', // ? duplicate
+    17: 'PERIMETER_RETRACE',
     18: 'CALIBRATION',
     20: 'BLADES_CALIBRATION',
     // 24: 'UNKNOWN_24',
