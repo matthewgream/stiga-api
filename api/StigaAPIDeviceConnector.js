@@ -11,6 +11,7 @@ const {
     decodeRobotCommandType,
     decodeRobotCommandAckResult,
     encodeRobotCommand,
+    encodeRobotRawCommand,
     encodeRobotCloudSync,
     encodeRobotForceCut,
     encodeRobotGoAway,
@@ -29,6 +30,8 @@ const {
     decodeLocationStatus,
     decodeNetworkStatus,
     decodeRobotPosition,
+    decodeRobotReferencePosition,
+    decodeRobotUpdateStatus,
     decodeRobotSettings,
     decodeRobotScheduleSettings,
     decodeFirmwareNotification,
@@ -188,6 +191,18 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
             case 'ROBOT_POSITION':
                 this._handlePosition(decoded);
                 break;
+            case 'REFERENCE_POSITION':
+                this._handleReferencePosition(decoded);
+                break;
+            case 'BATTERY':
+                this._handleBattery(decoded);
+                break;
+            case 'LTE_UPDATE_STATUS':
+                this._handleUpdateStatus('lteStatus', decoded);
+                break;
+            case 'UBX_UPDATE_STATUS':
+                this._handleUpdateStatus('ubxStatus', decoded);
+                break;
             default:
                 this.display.error(`connectedDevice ${this.macAddress}: LOG message unknown: ${messageType}`);
         }
@@ -249,6 +264,24 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
         this.emit('position', position);
         this._commandResponseResolve('position', position);
     }
+    _handleReferencePosition(decoded) {
+        const reference = decodeRobotReferencePosition(decoded);
+        this.emit('referencePosition', reference);
+        this._commandResponseResolve('referencePosition', reference);
+    }
+    _handleBattery(decoded) {
+        // LOG/BATTERY carries the same protobuf shape as the battery sub-field of STATUS (capacity, charge),
+        // so we reuse decodeRobotBatteryStatus and also feed the normal 'statusBattery' listeners.
+        const battery = decodeRobotBatteryStatus(decoded);
+        this.emit('statusBattery', battery);
+        this._commandResponseResolve('battery', battery);
+    }
+    _handleUpdateStatus(name, decoded) {
+        // LOG/LTE_UPDATE_STATUS (name='lteStatus') and LOG/UBX_UPDATE_STATUS (name='ubxStatus') share one shape.
+        const update = decodeRobotUpdateStatus(decoded);
+        this.emit(name, update);
+        this._commandResponseResolve(name, update);
+    }
 
     //
 
@@ -292,6 +325,32 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
         this.connection.sendCommand(topic, payload, true, expectResponse);
         return resultName ? this._commandResponsePromise(resultName, DEFAULT_TIMEOUT, commandType) : undefined;
     }
+    // Send an ARBITRARY CMD_ROBOT payload for protocol probing — deliberately bypasses encodeRobotCommand's
+    // whitelist so UNDOCUMENTED command ids can be tried. Two shapes:
+    //   { commandType, fields } -> the standard envelope { 1: type, 2: fields, 3: type } (fields is a Buffer
+    //                              placed verbatim as length-delimited field 2, or omitted); [3] echoes the
+    //                              type to match every observed real command.
+    //   { payload }             -> these exact bytes ARE the CMD_ROBOT payload (no envelope, no echo).
+    // Returns { sent, payload (hex), commandType, acked, ok } — acked=false means no ACK arrived before the
+    // timeout (itself informative: the robot may silently ignore commands it does not implement).
+    async sendRaw({ commandType, fields, payload, waitAck = true, timeout = DEFAULT_TIMEOUT } = {}) {
+        const buffer = encodeRobotRawCommand({ commandType, fields, payload });
+        // For ACK matching we need the id the robot will echo in the ACK's field 1: it is our commandType in
+        // envelope mode, or (for a verbatim payload) the 2nd byte, which is field 1's varint (cf sendCommand).
+        const ackType = commandType ?? (buffer.length >= 2 ? buffer[1] : undefined);
+        const topic = ROBOT_MESSAGE_TOPICS.CMD_ROBOT(this.macAddress);
+        this.ourCommands.add(buffer.toString('hex'));
+        this.connection.sendCommand(topic, buffer, waitAck);
+        const result = { sent: true, payload: buffer.toString('hex'), commandType: ackType, acked: false, ok: false };
+        if (!waitAck) return result;
+        try {
+            result.ok = await this._commandResponsePromise('command', timeout, ackType);
+            result.acked = true;
+        } catch {
+            // timeout -> no ACK; leave acked=false. Not an error for a probe.
+        }
+        return result;
+    }
     _shouldMakeStatusRequest(types) {
         const now = Date.now();
         const requestKey = Object.keys(types).sort().join(',');
@@ -330,6 +389,20 @@ class StigaAPIDeviceConnector extends StigaAPIComponent {
     }
     async getPosition() {
         return this._commandRequest(ROBOT_COMMAND_IDS.POSITION_REQUEST, undefined, ROBOT_COMMAND_TOPICS.ROBOT_POSITION, 'position');
+    }
+    async getReferencePosition() {
+        return this._commandRequest(ROBOT_COMMAND_IDS.REFERENCE_POSITION_REQUEST, undefined, ROBOT_COMMAND_TOPICS.REFERENCE_POSITION, 'referencePosition');
+    }
+    async getBattery() {
+        return this._commandRequest(ROBOT_COMMAND_IDS.BATTERY_REQUEST, undefined, ROBOT_COMMAND_TOPICS.BATTERY, 'battery');
+    }
+    // Optional `params` lets callers probe for a field-2 selector (as STATUS_REQUEST does); undefined = the
+    // confirmed parameterless form. params is a decoded-protobuf object placed as the command's field 2.
+    async getLteStatus(params = undefined) {
+        return this._commandRequest(ROBOT_COMMAND_IDS.LTE_UPDATE_STATUS_REQUEST, params, ROBOT_COMMAND_TOPICS.LTE_UPDATE_STATUS, 'lteStatus');
+    }
+    async getUbxStatus(params = undefined) {
+        return this._commandRequest(ROBOT_COMMAND_IDS.UBX_UPDATE_STATUS_REQUEST, params, ROBOT_COMMAND_TOPICS.UBX_UPDATE_STATUS, 'ubxStatus');
     }
     async getSettings() {
         return this._commandRequest(ROBOT_COMMAND_IDS.SETTINGS_REQUEST, undefined, ROBOT_COMMAND_TOPICS.SETTINGS, 'settings');

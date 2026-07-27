@@ -221,6 +221,10 @@ class StigaAPIDevice extends StigaAPIComponent {
     async sendCalibrateDocking() {
         return this._cmdViaConnector('sendCalibrateDocking');
     }
+    // Arbitrary/undocumented CMD_ROBOT probe — see StigaAPIDeviceConnector.sendRaw for the argument shape.
+    async sendRaw(spec) {
+        return this._cmdViaConnector('sendRaw', spec);
+    }
 
     //
 

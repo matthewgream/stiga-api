@@ -125,6 +125,9 @@ function parseArgs() {
         load: undefined, // --load/--import/--input  <file|-> : ...and import it from here
         commit: false, // --commit : commands that mutate (e.g. optimise) only write when this is set; else dry-run
         sync: false, // --commit-and-sync : as --commit, then have the robot pull the written copy (implies commit)
+        payload: undefined, // --payload <hex> : raw command — send these exact CMD_ROBOT bytes (no envelope)
+        data: undefined, // --data/--field2 <hex> : raw command — bytes for field 2 of the {1,2,3} envelope
+        noAck: false, // --no-ack : raw command — fire and forget, do not wait for the robot ACK
         username: undefined,
         password: undefined,
         mqttBroker: undefined,
@@ -140,6 +143,9 @@ function parseArgs() {
         ['--load', 'load'],
         ['--import', 'load'],
         ['--input', 'load'],
+        ['--payload', 'payload'],
+        ['--data', 'data'],
+        ['--field2', 'data'],
     ]);
     // consume args left-to-right; flags that take a value shift the next token (so '-' and filenames pass through
     // untouched). A while/shift loop avoids mutating a for-counter and keeps each flag a single flat branch.
@@ -163,7 +169,8 @@ function parseArgs() {
         else if (a === '--commit-and-sync') {
             options.commit = true;
             options.sync = true;
-        } else if (a === '--debug') options.debug = true;
+        } else if (a === '--no-ack' || a === '--noack') options.noAck = true;
+        else if (a === '--debug') options.debug = true;
         else if (options.command === undefined) options.command = a;
         else options.params.push(a);
     }
@@ -905,6 +912,79 @@ commandRegister('position', {
         display.text('Robot Position:');
         display.text(`  ${position.value?.toString() || 'unknown'}`);
         display.json({ source: 'robot', kind: 'position', value: position.value ?? null });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+commandRegister(['reference-position', 'referencePosition', 'reference'], {
+    description: 'Get the RTK reference station position (the fixed point the robot measures itself against)',
+    targets: ['robot'],
+    usage: 'stiga-command [--robot] reference-position [help]',
+    summary: 'Request the surveyed RTK reference position (REFERENCE_POSITION_REQUEST, command 23 -> LOG/REFERENCE_POSITION).',
+    details: ['', 'This is the FIXED reference the robot measures its own position against, published as', 'ECEF X/Y/Z metres and converted here to WGS84 lat/lon/alt. Distinct from `position`,', "which is the robot's own live location."],
+    examples: ['stiga-command --robot reference-position'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        const reference = await connectors.connectedDevice.getReferencePosition();
+        display.text('RTK Reference Position:');
+        display.text(`  ${reference?.toString() || 'unknown'}`);
+        display.json({ source: 'robot', kind: 'reference-position', value: reference ?? null });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+commandRegister(['battery-status', 'batteryStatus', 'battery'], {
+    description: "Get the robot's battery status (capacity and charge %)",
+    targets: ['robot'],
+    usage: 'stiga-command [--robot] battery-status [help]',
+    summary: 'Request battery status directly (BATTERY_REQUEST, command 29 -> LOG/BATTERY): a granular alternative to `status battery`, which goes via the bundled STATUS request.',
+    examples: ['stiga-command --robot battery-status'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        const battery = await connectors.connectedDevice.getBattery();
+        display.text('Battery:');
+        display.text(`  ${battery?.toString() || 'unknown'}`);
+        display.json({ source: 'robot', kind: 'battery', value: battery ?? null });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+commandRegister(['lte-status', 'lteStatus', 'lte'], {
+    description: 'Get the LTE modem firmware-update status',
+    targets: ['robot'],
+    usage: 'stiga-command [--robot] lte-status [help]',
+    summary: 'Request the Quectel LTE modem status (LTE_UPDATE_STATUS_REQUEST, command 35 -> LOG/LTE_UPDATE_STATUS). Field meanings are provisional.',
+    examples: ['stiga-command --robot lte-status'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        const lte = await connectors.connectedDevice.getLteStatus();
+        display.text('LTE Modem Status:');
+        display.text(`  ${lte?.toString() || 'unknown'}`);
+        display.json({ source: 'robot', kind: 'lte-status', value: lte ?? null });
+    },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+commandRegister(['ubx-status', 'ubxStatus', 'ubx', 'gnss'], {
+    description: 'Get the u-blox (UBX) GNSS firmware-update status',
+    targets: ['robot'],
+    usage: 'stiga-command [--robot] ubx-status [help]',
+    summary: 'Request the u-blox GNSS module status (UBX_UPDATE_STATUS_REQUEST, command 36 -> LOG/UBX_UPDATE_STATUS). Field meanings are provisional.',
+    examples: ['stiga-command --robot ubx-status'],
+    execute: async (options, context) => {
+        const { device, connectors } = context;
+        await connectToRobot(device, connectors);
+        const ubx = await connectors.connectedDevice.getUbxStatus();
+        display.text('UBX / GNSS Status:');
+        display.text(`  ${ubx?.toString() || 'unknown'}`);
+        display.json({ source: 'robot', kind: 'ubx-status', value: ubx ?? null });
     },
 });
 
@@ -1843,6 +1923,109 @@ commandRegister(['go-away', 'goAway', 'avoid'], {
         };
         return executeRobotCommand('go-away', (d) => d.sendGoAway(`Bearer ${auth.token}`, url, placement), context);
     },
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// Parse a command id given as decimal (9) or hex (0x31 / 0x09). Returns undefined if it is neither.
+function parseCommandId(str) {
+    if (str === undefined) return undefined;
+    const s = String(str).trim();
+    let n = Number.NaN;
+    if (/^0x[\da-f]+$/i.test(s)) n = Number.parseInt(s, 16);
+    else if (/^\d+$/.test(s)) n = Number.parseInt(s, 10);
+    return Number.isInteger(n) && n >= 0 && n <= 0x7fffffff ? n : undefined;
+}
+
+// Normalise a hex byte string (accepts 0x prefix, spaces, colons). Throws on odd length / non-hex.
+function normaliseHex(str, label) {
+    if (str === undefined) return undefined;
+    const s = String(str).replace(/^0x/i, '').replaceAll(/[\s:]/g, '');
+    if (s.length === 0) return undefined;
+    if (s.length % 2 !== 0 || !/^[\da-f]+$/i.test(s)) throw throwExit(`${label} must be an even-length hex string, got '${str}'`, 2);
+    return s.toLowerCase();
+}
+
+function displayRawCommandMap() {
+    const { ROBOT_COMMAND_TYPES } = StigaAPIElements;
+    const known = Object.keys(ROBOT_COMMAND_TYPES)
+        .map(Number)
+        .sort((a, b) => a - b);
+    const max = known.length > 0 ? known[known.length - 1] : 0;
+    const gaps = [];
+    for (let i = 0; i <= max; i++) if (!ROBOT_COMMAND_TYPES[i]) gaps.push(i);
+    display.text('Known CMD_ROBOT command ids:');
+    for (const id of known) display.text(`  ${String(id).padStart(3)} (0x${id.toString(16).padStart(2, '0')})  ${ROBOT_COMMAND_TYPES[id]}`);
+    display.text('');
+    display.text(`Unmapped gaps 0..${max}: ${gaps.join(', ')}`);
+    display.text(`(ids above ${max} are also possible, just never observed)`);
+    display.json({ source: 'robot', kind: 'raw-command-map', known: Object.fromEntries(known.map((id) => [id, ROBOT_COMMAND_TYPES[id]])), gaps });
+}
+
+async function runRaw(options, context) {
+    const { params, device, connectors } = context;
+    const { ROBOT_COMMAND_TYPES, encodeRobotRawCommand } = StigaAPIElements;
+
+    // No command id and no --payload -> just print the command map (offline, no connection needed).
+    if (params[0] === undefined && options.payload === undefined) {
+        displayRawCommandMap();
+        return;
+    }
+
+    const payloadHex = normaliseHex(options.payload, '--payload');
+    let commandType, fieldsHex;
+    if (payloadHex === undefined) {
+        commandType = parseCommandId(params[0]);
+        if (commandType === undefined) throw throwExit('raw needs a command id (decimal like 9 or hex like 0x31), or --payload <hex>', 2);
+        fieldsHex = normaliseHex(params[1] ?? options.data, 'field-2 data');
+    } else if (params[0] !== undefined || options.data !== undefined) throw throwExit('raw --payload is verbatim: do not also pass a command id or --data', 2);
+
+    const spec = payloadHex === undefined ? { commandType, fields: fieldsHex } : { payload: payloadHex };
+    const bytes = encodeRobotRawCommand(spec);
+    const hex = bytes.toString('hex');
+    const name = commandType === undefined ? '(verbatim payload)' : (ROBOT_COMMAND_TYPES[commandType] ?? 'UNKNOWN / undocumented');
+
+    display.text('Raw CMD_ROBOT plan:');
+    if (commandType !== undefined) display.text(`  command : ${commandType} (0x${commandType.toString(16).padStart(2, '0')})  ${name}`);
+    if (fieldsHex) display.text(`  field 2 : ${fieldsHex} (${fieldsHex.length / 2} bytes)`);
+    display.text(`  payload : ${hex} (${bytes.length} bytes)`);
+    display.text(`  ack     : ${options.noAck ? 'not awaited (--no-ack)' : 'awaited'}`);
+
+    if (!options.commit) {
+        display.text('');
+        display.text('DRY RUN — nothing sent. Add --commit to transmit.');
+        display.json({ source: 'robot', kind: 'raw', committed: false, payloadHex: hex, commandType, name });
+        return;
+    }
+
+    await connectToRobot(device, connectors);
+    const result = await device.sendRaw({ ...spec, waitAck: !options.noAck });
+    if (options.noAck) display.text(`sent (ack not awaited): ${result.payload}`);
+    else if (result.acked) display.text(`ACK: ${result.ok ? 'OK' : 'REJECTED'} (command ${result.commandType})`);
+    else display.text('no ACK within timeout — the robot may not implement this command (or is unresponsive)');
+    display.json({ source: 'robot', kind: 'raw', committed: true, payloadHex: result.payload, commandType: result.commandType, name, acked: result.acked, ok: result.ok });
+}
+
+commandRegister('raw', {
+    description: 'Send a raw / undocumented CMD_ROBOT command (protocol probing)',
+    targets: ['robot'],
+    usage: 'stiga-command --robot raw [<cmd> [dataHex] | --payload <hex>] [--data <hex>] [--no-ack] [--commit]',
+    summary: 'Transmit an arbitrary CMD_ROBOT payload to the robot. DRY-RUN by default (shows the exact bytes); add --commit to actually send. With no arguments it prints the known command map and the unmapped id gaps.',
+    details: [
+        '',
+        'DANGER: this bypasses the command whitelist and can send ids the robot may act on in unknown,',
+        'possibly unsafe ways. Prefer parameterless probes; keep the robot docked; be ready to power-cycle.',
+        '',
+        '  raw                    list the known command ids and the unmapped gaps (no send)',
+        '  raw <cmd>              envelope { 1: cmd, 3: cmd } — the safe parameterless form',
+        '  raw <cmd> <dataHex>    envelope { 1: cmd, 2: <bytes>, 3: cmd } — bytes become field 2',
+        '  raw --payload <hex>    send these exact bytes as the whole CMD_ROBOT payload (no envelope)',
+        '',
+        '<cmd> is decimal (9) or hex (0x09 / 0x31). --no-ack fires without waiting for the ACK (a missing',
+        'ACK is itself a signal — the robot silently ignores commands it does not implement).',
+    ],
+    examples: ['stiga-command --robot raw', 'stiga-command --robot raw 3', 'stiga-command --robot raw 0x09 --commit', 'stiga-command --robot raw 23 --commit', 'stiga-command --robot raw --payload 08091803 --commit'],
+    execute: async (options, context) => runRaw(options, context),
 });
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------

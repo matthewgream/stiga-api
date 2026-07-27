@@ -184,6 +184,10 @@ const ROBOT_COMMAND_TOPICS = {
     SETTINGS: '/LOG/SETTINGS',
     SCHEDULING_SETTINGS: '/LOG/SCHEDULING_SETTINGS',
     ROBOT_POSITION: '/LOG/ROBOT_POSITION',
+    REFERENCE_POSITION: '/LOG/REFERENCE_POSITION', // response to REFERENCE_POSITION_REQUEST (23); RTK reference in ECEF metres
+    BATTERY: '/LOG/BATTERY', // response to BATTERY_REQUEST (29); same shape as the battery sub-field of STATUS
+    LTE_UPDATE_STATUS: '/LOG/LTE_UPDATE_STATUS', // response to LTE_UPDATE_STATUS_REQUEST (35); Quectel LTE modem status
+    UBX_UPDATE_STATUS: '/LOG/UBX_UPDATE_STATUS', // response to UBX_UPDATE_STATUS_REQUEST (36); u-blox GNSS status
 };
 const ROBOT_COMMAND_TYPES = {
     0: 'STOP',
@@ -192,15 +196,42 @@ const ROBOT_COMMAND_TYPES = {
     4: 'GO_HOME',
     7: 'ZONE_SETTINGS_UPDATE',
     9: 'BOOT',
+    // 10: POSSIBLE reboot / shutdown / power-off — UNCONFIRMED, TBC (probed live 2026-07-27). A parameterless
+    //     `raw 10` ACKs OK and the robot then DROPPED OFFLINE and did NOT come back on its own; recovery needs a
+    //     physical power-cycle. That leans towards SHUTDOWN/POWER_OFF rather than a clean reboot, but it is not
+    //     conclusive — the robot was already in a wonky state, so a stuck reboot can't be ruled out. Distinct
+    //     from BOOT (9), which only kicks the startup state machine, not the power state. Re-test after a manual
+    //     power-cycle to pin down reboot vs shutdown before wiring a named command. Handle with GREAT care: this
+    //     is the one command in the sweep that visibly took the robot offline and it did not self-recover.
+    // 11..16: real commands, all NAK'd (ACK result != OK) when sent parameterless, so they exist but each wants
+    //     a payload or a precondition we have not identified. (probed 2026-07-27)
     17: 'SETTINGS_REQUEST',
     18: 'SETTINGS_UPDATE',
     19: 'SCHEDULING_SETTINGS_REQUEST',
     20: 'SCHEDULING_SETTINGS_UPDATE',
     21: 'VERSION_REQUEST',
     22: 'POSITION_REQUEST',
+    // 23 = REFERENCE_POSITION_REQUEST (probed live 2026-07-27 via `raw 23`, then wired). Parameterless; the
+    //     robot ACKs OK and PUBLISHES on <MAC>/LOG/REFERENCE_POSITION: three little-endian float64 (proto
+    //     fields 1/2/3, wire-type FIXED64) = the surveyed RTK reference in ECEF metres [1]=X [2]=Y [3]=Z, which
+    //     decodeRobotReferencePosition converts to WGS84 lat/lon/alt. This is the FIXED reference the robot's
+    //     ROBOT_POSITION offsets are measured against (vs 22 = the robot's own live position). Streams ~every
+    //     2-3 s while the base publishes corrections. Worked example:
+    //       09 06 81 95 93 85 02 48 41  11 c4 42 ad 89 78 2a 26 41  19 bb 49 0c e2 36 e9 54 41
+    //       -> X=3147019.153 Y=726332.269 Z=5481691.532 -> lat 59.6619297, lon 12.9962949, alt 165.25 m.
+    23: 'REFERENCE_POSITION_REQUEST',
+    // 24: real command, function UNCLEAR — a parameterless `raw 24` is NAK'd (ACK result != OK), so it exists
+    //     but wants a payload or a precondition we have not identified yet. (probed 2026-07-27)
     25: 'CALIBRATE_DOCKING',
     26: 'CALIBRATE_BLADES',
+    // 27: real command, effect UNCLEAR — a parameterless `raw 27` is ACKed OK ("did something") but no obvious
+    //     status/topic change was captured. (probed 2026-07-27)
     28: 'STATUS_REQUEST',
+    // 29 = BATTERY_REQUEST (probed live 2026-07-27, then wired; CLI verb `battery-status`). Parameterless; the
+    //     robot ACKs OK and PUBLISHES on <MAC>/LOG/BATTERY — same shape as the battery sub-field of STATUS, so
+    //     decodeRobotBatteryStatus reads it: { 1: capacity (e.g. 5000), 2: charge% (e.g. 88) }. A granular
+    //     alternative to STATUS_REQUEST (28), which bundles battery/mowing/location/network in one reply.
+    29: 'BATTERY_REQUEST',
     // 31 and 32 carry an identical payload [2] = { 1: "Bearer <jwt>", 2: cloud resource URL } and both
     // make the robot DOWNLOAD/fetch that resource from the cloud and apply it (NOT an upload — the robot
     // re-publishing its own copy to the cloud afterwards is separate autonomous behaviour). The observed
@@ -209,6 +240,22 @@ const ROBOT_COMMAND_TYPES = {
     // "sync now" from the app. Exact functional difference beyond trigger is still unconfirmed. (2026-06-04)
     31: 'CLOUDSYNC_DOWNLOAD',
     32: 'CLOUDSYNC_REQUEST',
+    // 33/34 = a CONFIRMED ENABLE/DISABLE pair for extended status telemetry (probed + confirmed 2026-07-27).
+    //   33 ENABLEs it: after a parameterless `raw 33` the LOG/STATUS payload gains an additional field [14];
+    //   34 DISABLEs it: field [14] goes away again. Both ACK OK. The CONTENT of [14] is not yet decoded (an
+    //   extended diagnostic/telemetry blob). Left as comments until [14] is decoded, then wire as e.g.
+    //   EXTENDED_STATUS_ENABLE / EXTENDED_STATUS_DISABLE + a decoder for the field.
+    // 35 = LTE_UPDATE_STATUS_REQUEST (probed live 2026-07-27, then wired; CLI verb `lte-status`). Parameterless;
+    //     the robot ACKs OK and PUBLISHES on <MAC>/LOG/LTE_UPDATE_STATUS (the Quectel LTE modem; cf the
+    //     AT-command leak). Observed payload { 1: 255, 2: 903 }, read by decodeRobotLteStatus; the field
+    //     meanings are PROVISIONAL (likely a modem firmware-update state + a code/version). 255 (0xFF) reads
+    //     as an idle/"no update" sentinel. Same request->dedicated-LOG shape as REFERENCE_POSITION (23) / BATTERY (29).
+    35: 'LTE_UPDATE_STATUS_REQUEST',
+    // 36 = UBX_UPDATE_STATUS_REQUEST (probed live 2026-07-27, then wired; CLI verb `ubx-status`). Parameterless;
+    //     ACKs OK and PUBLISHES on <MAC>/LOG/UBX_UPDATE_STATUS (the u-blox / UBX GNSS receiver). Observed
+    //     payload { 1: 1 } (field 2 absent), read by the shared decodeRobotUpdateStatus. Sibling of 35: the two
+    //     radios' firmware-update status.
+    36: 'UBX_UPDATE_STATUS_REQUEST',
     37: 'RESET_ERROR',
     38: 'FORCE_CUT',
     40: 'GO_AWAY',
@@ -233,6 +280,21 @@ function encodeRobotCommand(type, fields = undefined) {
 
 function decodeRobotCommandType(decoded, allowUndefined = false) {
     return decodeIndex(decoded || 0, ROBOT_COMMAND_TYPES, allowUndefined);
+}
+
+// Build a CMD_ROBOT payload for an ARBITRARY (possibly undocumented) command — deliberately NOT gated on
+// ROBOT_COMMAND_TYPES, for protocol probing. `payload` (Buffer or hex string) is sent verbatim as the whole
+// payload; otherwise the standard envelope { 1: type, 2: fields, 3: type } is built, where `fields` (Buffer
+// or hex string) becomes the raw length-delimited field 2 and [3] echoes the type as every real command does.
+function rawFieldBuffer(v) {
+    return Buffer.isBuffer(v) ? v : Buffer.from(v, 'hex');
+}
+function encodeRobotRawCommand({ commandType, fields, payload } = {}) {
+    if (payload !== undefined && payload !== null) return rawFieldBuffer(payload);
+    if (commandType === undefined) throw new Error('encodeRobotRawCommand requires a commandType or a payload');
+    const envelope = { 1: commandType, 3: commandType };
+    if (fields !== undefined && fields !== null) envelope[2] = rawFieldBuffer(fields);
+    return protobufEncode(envelope);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -694,6 +756,68 @@ function formatRobotPosition(position) {
 function upgradeRobotPosition(position) {
     position.toString = () => formatRobotPosition(position);
     return position;
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// LOG/REFERENCE_POSITION — the surveyed RTK reference station position, published by the robot in response to
+// REFERENCE_POSITION_REQUEST (command 23). Three FIXED64/float64 fields = ECEF metres ([1]=X [2]=Y [3]=Z),
+// converted to WGS84 geodetic (lat/lon/alt) by the closed-form Bowring method. This is the FIXED point the
+// robot's own ROBOT_POSITION offsets are measured against — distinct from the robot's live position.
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function ecefToGeodetic(X, Y, Z) {
+    const a = 6378137, // WGS84 semi-major axis (m)
+        f = 1 / 298.257223563, // flattening
+        b = a * (1 - f);
+    const e2 = (a * a - b * b) / (a * a),
+        ep2 = (a * a - b * b) / (b * b);
+    const p = Math.hypot(X, Y),
+        th = Math.atan2(Z * a, p * b);
+    const longitude = Math.atan2(Y, X);
+    const latitude = Math.atan2(Z + ep2 * b * Math.sin(th) ** 3, p - e2 * a * Math.cos(th) ** 3);
+    const N = a / Math.sqrt(1 - e2 * Math.sin(latitude) ** 2);
+    const altitude = p / Math.cos(latitude) - N;
+    return { latitude: (latitude * 180) / Math.PI, longitude: (longitude * 180) / Math.PI, altitude };
+}
+function decodeRobotReferencePosition(decoded) {
+    const ecefX = hexToDouble(decoded?.[1]),
+        ecefY = hexToDouble(decoded?.[2]),
+        ecefZ = hexToDouble(decoded?.[3]);
+    if (ecefX === undefined || ecefY === undefined || ecefZ === undefined) return undefined;
+    return upgradeRobotReferencePosition({ ecefX, ecefY, ecefZ, ...ecefToGeodetic(ecefX, ecefY, ecefZ) });
+}
+function formatRobotReferencePosition(reference) {
+    return formatStruct(reference, 'reference');
+}
+function upgradeRobotReferencePosition(reference) {
+    reference.toString = () => formatRobotReferencePosition(reference);
+    return reference;
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+// LOG/LTE_UPDATE_STATUS (cmd 35) and LOG/UBX_UPDATE_STATUS (cmd 36) — firmware-update status for the two radio
+// modules: the Quectel LTE modem and the u-blox (UBX) GNSS receiver. Same varint shape, so one decoder serves
+// both. Meanings are PROVISIONAL: [1] = update/progress state, [2] = an accompanying code/version. Observed
+// LTE { 1: 255, 2: 903 } (255/0xFF reads as an idle/"no update" sentinel) and UBX { 1: 1 } (field 2 absent).
+// Kept honestly generic (state/code) until the fields are seen changing across an actual module update.
+//
+// UNEXPLORED / FUTURE WORK — the status *_REQUEST family (this pair, plus BATTERY(29) and REFERENCE(23), and even the
+// core STATUS_REQUEST) may return MORE fields if the request carries a field-2 SELECTOR, exactly as
+// STATUS_REQUEST(28) does with { battery/mowing/location/network }. A first `raw 35/36 --data <selector>` sweep
+// on 2026-07-27 produced no richer payload, but it was NOT exhaustive and the extra data may only populate
+// during an actual module update. Worth retrying with a wider selector space (and on the other requests too).
+// ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function decodeRobotUpdateStatus(decoded) {
+    if (!decoded) return undefined;
+    return upgradeRobotUpdateStatus({ state: decoded[1] ?? 0, code: decoded[2] ?? 0 });
+}
+function formatRobotUpdateStatus(update) {
+    return formatStruct(update, 'update');
+}
+function upgradeRobotUpdateStatus(update) {
+    update.toString = () => formatRobotUpdateStatus(update);
+    return update;
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1513,6 +1637,7 @@ module.exports = {
     ROBOT_COMMAND_IDS,
     buildRobotMessageTopics,
     encodeRobotCommand,
+    encodeRobotRawCommand,
     decodeRobotCommandType,
     decodeRobotCommandAckResult,
     FIRMWARE_UPDATE_PHASES,
@@ -1541,6 +1666,10 @@ module.exports = {
     formatRobotBatteryStatus,
     decodeRobotPosition,
     formatRobotPosition,
+    decodeRobotReferencePosition,
+    formatRobotReferencePosition,
+    decodeRobotUpdateStatus,
+    formatRobotUpdateStatus,
     encodeRobotSettings,
     decodeRobotSettings,
     formatRobotSettings,
