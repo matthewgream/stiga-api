@@ -17,7 +17,8 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
         return {
             command: 'battery-consumption',
             description: 'Analyze battery consumption during mowing',
-            detailedDescription: 'Tracks battery usage during mowing sessions (>15 min) and estimates mowing time — including a real-world estimate over the actual usable band (the typical auto-leave ~96% down to auto-return ~13%), alongside the fixed-band estimates.',
+            detailedDescription:
+                'Tracks battery usage during mowing sessions (>15 min) and estimates mowing time — including a real-world estimate over the actual usable band (the typical auto-leave ~96% down to auto-return ~13%), alongside the fixed-band estimates.',
             options: {
                 '--detailed': 'Show additional statistics (status distribution, consumption by battery level)',
                 '--days': 'Limit analysis to the last N days (default: all data)',
@@ -147,7 +148,8 @@ class BatteryConsumptionAnalyser extends AnalyserBase {
         for (let i = 1; i < this.statusEvents.length; i++) {
             const prev = this.statusEvents[i - 1],
                 cur = this.statusEvents[i];
-            if (!prev.isDocked && cur.isDocked) returns.push(cur.batteryCharge); // arrived: charge at return
+            if (!prev.isDocked && cur.isDocked)
+                returns.push(cur.batteryCharge); // arrived: charge at return
             else if (prev.isDocked && !cur.isDocked) leaves.push(prev.batteryCharge); // departing: charge it left at
         }
         const lowReturns = returns.filter((c) => c < 20),

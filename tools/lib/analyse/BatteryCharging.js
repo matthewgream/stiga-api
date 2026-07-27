@@ -17,7 +17,8 @@ class BatteryChargingAnalyser extends AnalyserBase {
         return {
             command: 'battery-charge',
             description: 'Analyze battery charging patterns',
-            detailedDescription: 'Tracks charging sessions from <30% to >80%, charging rates, and estimated charging times — plus real-world docking behaviour: the average charge at auto-return (<20%) and auto-leave (>90%), and the resulting real-world return→leave charge time.',
+            detailedDescription:
+                'Tracks charging sessions from <30% to >80%, charging rates, and estimated charging times — plus real-world docking behaviour: the average charge at auto-return (<20%) and auto-leave (>90%), and the resulting real-world return→leave charge time.',
             options: {
                 '--detailed': 'Show additional statistics (charging events by hour, battery level distribution)',
                 '--days': 'Limit analysis to the last N days (default: all data)',

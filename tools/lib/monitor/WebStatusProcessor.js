@@ -783,7 +783,9 @@ class WebStatusProcessor {
             settled = true;
             this._diagnosticRunning = false;
             const ms = Date.now() - started;
-            this.logger(`WebStatus: diagnostic '${name}' finished — ${payload.ok ? 'ok' : 'FAILED'} (exit ${payload.code ?? '-'}${payload.signal ? '/' + payload.signal : ''}, ${ms}ms, ${output.length}b${payload.error ? ', error: ' + payload.error : ''})`);
+            this.logger(
+                `WebStatus: diagnostic '${name}' finished — ${payload.ok ? 'ok' : 'FAILED'} (exit ${payload.code ?? '-'}${payload.signal ? '/' + payload.signal : ''}, ${ms}ms, ${output.length}b${payload.error ? ', error: ' + payload.error : ''})`
+            );
             res.json({ name, label: diag.label, ms, ...payload });
         };
         try {
