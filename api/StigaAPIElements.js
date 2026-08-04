@@ -192,17 +192,22 @@ const ROBOT_COMMAND_TOPICS = {
 const ROBOT_COMMAND_TYPES = {
     0: 'STOP',
     1: 'START',
-    //  2:
+    // 2: real command, ACKs OK. Observed (Aug-2026 capture) inside the official app's per-zone edit handshake
+    //    STOP -> 34 -> ZONE_SETTINGS_UPDATE -> 2 -> 8, sent parameterless. Exact role in that sequence TBD.
     4: 'GO_HOME',
     7: 'ZONE_SETTINGS_UPDATE',
+    // 8: real command carrying the CLOUDSYNC-style payload [2] = { 1: "Bearer <jwt>", 2: perimeter URL } — the
+    //    SAME shape as 31/32. Observed (Aug-2026 capture) in the app's per-zone edit handshake right after
+    //    ZONE_SETTINGS_UPDATE + cmd 2, so likely a per-zone perimeter fetch/apply (a granular CLOUDSYNC). A real
+    //    cloud-auth'd command the official app uses; decode/wire TBD. (NB: distinct namespace from BASE cmd 8.)
     9: 'BOOT',
-    // 10: POSSIBLE reboot / shutdown / power-off — UNCONFIRMED, TBC (probed live 2026-07-27). A parameterless
-    //     `raw 10` ACKs OK and the robot then DROPPED OFFLINE and did NOT come back on its own; recovery needs a
-    //     physical power-cycle. That leans towards SHUTDOWN/POWER_OFF rather than a clean reboot, but it is not
-    //     conclusive — the robot was already in a wonky state, so a stuck reboot can't be ruled out. Distinct
-    //     from BOOT (9), which only kicks the startup state machine, not the power state. Re-test after a manual
-    //     power-cycle to pin down reboot vs shutdown before wiring a named command. Handle with GREAT care: this
-    //     is the one command in the sweep that visibly took the robot offline and it did not self-recover.
+    // 10: *** DANGER — DO NOT SEND. CONFIRMED CATASTROPHIC (2026-07-27). *** A parameterless `raw 10` is ACKed
+    //     OK ({1:10,2:1}) and that ACK is the robot's FINAL transmission: verified in capture.db it then went
+    //     permanently silent for 7.93 days (0 robot-published messages while the cloud kept polling into the
+    //     void). It bricked the robot into a state a USER factory-reset could not recover — it had to go to a
+    //     SERVICE CENTRE to be revived, and the garden perimeters were lost. NOT a reboot (a reboot returns).
+    //     The `raw` CLI refuses id 10 unless --force-dangerous. Nearby BOOT (9) only kicks the startup state
+    //     machine and is safe. (Likely a low-level bootloader/erase or firmware-recovery entry, not a normal op.)
     // 11..16: real commands, all NAK'd (ACK result != OK) when sent parameterless, so they exist but each wants
     //     a payload or a precondition we have not identified. (probed 2026-07-27)
     17: 'SETTINGS_REQUEST',
@@ -240,11 +245,12 @@ const ROBOT_COMMAND_TYPES = {
     // "sync now" from the app. Exact functional difference beyond trigger is still unconfirmed. (2026-06-04)
     31: 'CLOUDSYNC_DOWNLOAD',
     32: 'CLOUDSYNC_REQUEST',
-    // 33/34 = a CONFIRMED ENABLE/DISABLE pair for extended status telemetry (probed + confirmed 2026-07-27).
-    //   33 ENABLEs it: after a parameterless `raw 33` the LOG/STATUS payload gains an additional field [14];
-    //   34 DISABLEs it: field [14] goes away again. Both ACK OK. The CONTENT of [14] is not yet decoded (an
-    //   extended diagnostic/telemetry blob). Left as comments until [14] is decoded, then wire as e.g.
-    //   EXTENDED_STATUS_ENABLE / EXTENDED_STATUS_DISABLE + a decoder for the field.
+    // 33/34: originally read (2026-07-27 isolated probing) as an ENABLE/DISABLE pair for extended status
+    //   telemetry — `raw 33` made LOG/STATUS gain a field [14], `raw 34` made it go away; both ACK OK; [14]
+    //   content never decoded. ** WALKBACK (Aug-2026 capture): that reading is now DOUBTFUL. ** cmd 34 shows up
+    //   ~14x in the official app's normal per-zone edit handshake (STOP -> 34 -> ZONE_SETTINGS_UPDATE -> 2 -> 8),
+    //   so 34 is part of routine editing, not merely a telemetry-off toggle — more likely an edit-mode
+    //   begin/lock or refresh. Treat both as UNCONFIRMED; the [14] correlation may have been coincidental.
     // 35 = LTE_UPDATE_STATUS_REQUEST (probed live 2026-07-27, then wired; CLI verb `lte-status`). Parameterless;
     //     the robot ACKs OK and PUBLISHES on <MAC>/LOG/LTE_UPDATE_STATUS (the Quectel LTE modem; cf the
     //     AT-command leak). Observed payload { 1: 255, 2: 903 }, read by decodeRobotLteStatus; the field
@@ -406,6 +412,9 @@ const ROBOT_STATUS_TYPES = {
     17: 'PERIMETER_RETRACE',
     18: 'CALIBRATION',
     20: 'BLADES_CALIBRATION',
+    // Observed-but-unmapped LOG/STATUS types (Aug-2026 capture scan, counts over the sample): 9 (x43), 21 (x24),
+    // 24 (x6), 253 (x8). 253 sits near 252 STARTUP_REQUIRED / 255 ERROR so is plausibly another terminal/boot
+    // state. Meanings TBD — left uncommented so they still read as unknown rather than being guessed.
     // 24: 'UNKNOWN_24',
     25: 'DOCKING_CALIBRATION',
     27: 'STORING_DATA',

@@ -128,6 +128,7 @@ function parseArgs() {
         payload: undefined, // --payload <hex> : raw command — send these exact CMD_ROBOT bytes (no envelope)
         data: undefined, // --data/--field2 <hex> : raw command — bytes for field 2 of the {1,2,3} envelope
         noAck: false, // --no-ack : raw command — fire and forget, do not wait for the robot ACK
+        forceDangerous: false, // --force-dangerous : raw command — override the refusal to send known-bricking ids (e.g. 10)
         username: undefined,
         password: undefined,
         mqttBroker: undefined,
@@ -170,6 +171,7 @@ function parseArgs() {
             options.commit = true;
             options.sync = true;
         } else if (a === '--no-ack' || a === '--noack') options.noAck = true;
+        else if (a === '--force-dangerous') options.forceDangerous = true;
         else if (a === '--debug') options.debug = true;
         else if (options.command === undefined) options.command = a;
         else options.params.push(a);
@@ -1927,6 +1929,11 @@ commandRegister(['go-away', 'goAway', 'avoid'], {
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+// Command ids known to be DESTRUCTIVE. 10 was confirmed 2026-07-27 to brick the robot: it ACKs OK, goes
+// permanently silent, and needed a SERVICE-CENTRE factory reset to recover (a user reset would not take), which
+// also lost the garden perimeters. `raw` refuses these unless --force-dangerous is given. See ROBOT_COMMAND_TYPES.
+const DANGEROUS_RAW = new Set([10]);
+
 // Parse a command id given as decimal (9) or hex (0x31 / 0x09). Returns undefined if it is neither.
 function parseCommandId(str) {
     if (str === undefined) return undefined;
@@ -1984,19 +1991,28 @@ async function runRaw(options, context) {
     const bytes = encodeRobotRawCommand(spec);
     const hex = bytes.toString('hex');
     const name = commandType === undefined ? '(verbatim payload)' : (ROBOT_COMMAND_TYPES[commandType] ?? 'UNKNOWN / undocumented');
+    const dangerous = commandType !== undefined && DANGEROUS_RAW.has(commandType);
 
     display.text('Raw CMD_ROBOT plan:');
     if (commandType !== undefined) display.text(`  command : ${commandType} (0x${commandType.toString(16).padStart(2, '0')})  ${name}`);
     if (fieldsHex) display.text(`  field 2 : ${fieldsHex} (${fieldsHex.length / 2} bytes)`);
     display.text(`  payload : ${hex} (${bytes.length} bytes)`);
     display.text(`  ack     : ${options.noAck ? 'not awaited (--no-ack)' : 'awaited'}`);
+    if (dangerous) {
+        display.text('');
+        display.text(`  *** DANGER: command ${commandType} is KNOWN TO BRICK THE ROBOT ***`);
+        display.text('      It ACKs OK, goes permanently silent, and needs a SERVICE-CENTRE factory reset to');
+        display.text('      recover (loses the garden perimeters). This is NOT a reboot. --force-dangerous to override.');
+    }
 
     if (!options.commit) {
         display.text('');
         display.text('DRY RUN — nothing sent. Add --commit to transmit.');
-        display.json({ source: 'robot', kind: 'raw', committed: false, payloadHex: hex, commandType, name });
+        display.json({ source: 'robot', kind: 'raw', committed: false, payloadHex: hex, commandType, name, dangerous });
         return;
     }
+
+    if (dangerous && !options.forceDangerous) throw throwExit(`refusing to send command ${commandType} (${name}) — it bricks the robot (service-centre recovery). Add --force-dangerous if you truly intend this.`, 2);
 
     await connectToRobot(device, connectors);
     const result = await device.sendRaw({ ...spec, waitAck: !options.noAck });
@@ -2015,6 +2031,8 @@ commandRegister('raw', {
         '',
         'DANGER: this bypasses the command whitelist and can send ids the robot may act on in unknown,',
         'possibly unsafe ways. Prefer parameterless probes; keep the robot docked; be ready to power-cycle.',
+        'Command 10 is KNOWN to BRICK the robot (service-centre recovery, garden lost) and is refused unless',
+        'you pass --force-dangerous. There may be other destructive ids not yet discovered.',
         '',
         '  raw                    list the known command ids and the unmapped gaps (no send)',
         '  raw <cmd>              envelope { 1: cmd, 3: cmd } — the safe parameterless form',
