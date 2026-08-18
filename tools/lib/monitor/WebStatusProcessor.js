@@ -16,6 +16,8 @@
 //   boxNotify               st | lt | rt | lb | rb | no       Notifications-box position (default st).
 //                                                             'st' = stacked under status box, same width as it (also
 //                                                             reads as "status" — pun intended). 'no' hides it.
+//   notifCount              <n>                               How many notification entries to list (default 5);
+//                                                             older ones still count in the "N of M" header.
 //
 // Map
 //   mapPosition             <lat>,<lon>[,<zoom>]         Absolute view. Disables auto-fit.
@@ -85,10 +87,10 @@
 //                                                        settings panel to clear it. Appears on the first change
 //                                                        (or immediately if the server already cached recent
 //                                                        ones) as a fixed <rows>-tall box that fills up over
-//                                                        time, newest at the top: "hh:mm:ss  Setting  old → new".
-//                                                        'on' uses the default height; <rows> sets it (e.g.
-//                                                        settingsLog=6). Turning it on suppresses the red ⚙
-//                                                        flash. Global settings only; pre-populated from the
+//                                                        time, newest at the top: "5m ago  Setting: new (old)".
+//                                                        'on' uses the default height (5 rows); <rows> sets it
+//                                                        (e.g. settingsLog=8). Turning it on suppresses the red
+//                                                        ⚙ flash. Global settings only; pre-populated from the
 //                                                        server's rolling cache.
 //
 // Unattended display
@@ -1635,8 +1637,7 @@ body.kiosk .boxclose, body.kiosk .ndismiss{display:none}
   font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:560px;color:#202124}
 #notifbox.empty{display:none}
 #notifbox h2{font-size:10px;margin:0 0 6px;color:#80868b;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
-#notifbox .nrow{display:flex;gap:10px;align-items:flex-start;padding:4px 0}
-#notifbox .nrow + .nrow{border-top:1px solid #eee}
+#notifbox .nrow{display:flex;gap:10px;align-items:flex-start;padding:1px 0} /* tight, to match the settings-log rows */
 #notifbox .nago{color:#80868b;flex:0 0 auto;font-size:11px;white-space:nowrap;padding-top:1px}
 #notifbox .ncol{flex:1 1 auto;min-width:0}
 #notifbox .nline{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1789,7 +1790,7 @@ var settingsPrev = null, settingsChanged = {}, settingsChangeTimer = null;
 // ?settingsLog : off (default) / on / <rows>. A scrolling log of settings changes for read-only kiosks, in
 // place of the red ⚙ alert. 'on' uses the default height; a bare number reserves that many rows (the panel
 // opens at that fixed height and fills over time). Entries come straight from state.settingsLog (server cache).
-var SETTINGS_LOG_ROWS_DEFAULT = 6, SETTINGS_LOG_ROW_PX = 18;
+var SETTINGS_LOG_ROWS_DEFAULT = 5, SETTINGS_LOG_ROW_PX = 18;
 function parseSettingsLog(v){
   if(v === undefined || v === null || v === '') return { on: false, rows: SETTINGS_LOG_ROWS_DEFAULT };
   var s = String(v).toLowerCase();
@@ -1915,7 +1916,8 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
 //   diagnostics            on|off           (🔧 row: run whitelisted stiga-analyse.js reports server-side into a console overlay; auth-gated like commands, single-slot; default off)
-//   settingsLog            off|on|<rows>    (scrolling settings-change log panel in place of the red ⚙ alert; <rows> sets its height; default off)
+//   notifCount             <n>              (how many notification entries to list; default 5)
+//   settingsLog            off|on|<rows>    (scrolling settings-change log panel in place of the red ⚙ alert; <rows> sets its height, default 5; default off)
 //   kiosk                  on|off           (unattended wall-display: hide panel/notification × marks + the Maps "Keyboard shortcuts" button; default off)
 var URL_CONFIG = (function(){
   var p = new URLSearchParams(window.location.search);
@@ -1935,9 +1937,14 @@ var URL_CONFIG = (function(){
     experimental: p.get('experimental'),
     settingsAlert: p.get('settingsAlert'),
     settingsLog: p.get('settingsLog'),
+    notifCount: p.get('notifCount'),
     kiosk: p.get('kiosk')
   };
 })();
+// ?notifCount=<n> : how many notification entries the box shows (default 5). Older ones stay in the "N of M"
+// header count but aren't listed.
+var NOTIF_ROWS_DEFAULT = 5;
+var NOTIF_COUNT = (function(){ var n = parseInt(URL_CONFIG.notifCount, 10); return (URL_CONFIG.notifCount != null && !isNaN(n) && n > 0) ? n : NOTIF_ROWS_DEFAULT; })();
 settingsAlertCfg = parseSettingsAlert(URL_CONFIG.settingsAlert); // now URL_CONFIG is defined; re-parse from it
 settingsLogCfg = parseSettingsLog(URL_CONFIG.settingsLog);
 if(settingsLogCfg.on) settingsAlertCfg.on = false; // the log panel replaces the red ⚙ alert — never flash it too
@@ -3601,12 +3608,6 @@ function renderSettingsBox(){
 // least one change to show (or immediately if the server already had recent ones cached), sized to
 // settingsLogCfg.rows so it opens at full height and fills over time. × hides it; the next fresh change
 // (the cache grew) brings it back, so a wall display isn't left permanently blank.
-function slClock(iso){
-  var d = new Date(iso);
-  if(isNaN(d.getTime())) return '';
-  function p(n){ return (n < 10 ? '0' : '') + n; }
-  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
-}
 // Is the settings-log panel currently showing? Drives the ⚙ button's green cue (renderStatusBox).
 function settingsLogVisible(){
   if(!settingsLogCfg.on || settingsLogClosed) return false;
@@ -3628,7 +3629,7 @@ function renderSettingsLogBox(){
   for(var i = 0; i < recent.length; i++){
     var e = recent[i];
     lines += '<div class="slrow">' +
-      '<span class="slt">' + esc(slClock(e.t)) + '</span>' +
+      '<span class="slt">' + esc(ago(e.t)) + '</span>' +
       '<span class="slk">' + esc(humanizeKey(e.key)) + '</span>' +
       '<span class="slfrom">' + esc(fmtSettingValue(e.key, e.from)) + '</span>' +
       '<span class="slarr">&rarr;</span>' +
@@ -3818,7 +3819,7 @@ function renderNotifBox(){
     if(hasNew) notifBoxClosed = false;
     else { box.classList.add('empty'); box.innerHTML = ''; applyStackedNotifyPosition(); return; }
   }
-  var visible = sorted.filter(function(n){ return !dismissed[n.uuid]; }).slice(0, 3);
+  var visible = sorted.filter(function(n){ return !dismissed[n.uuid]; }).slice(0, NOTIF_COUNT);
   if(visible.length === 0){ box.classList.add('empty'); box.innerHTML = ''; return; }
   box.classList.remove('empty');
   var ranks = visible.map(function(n){ return rankByUuid[n.uuid]; });
