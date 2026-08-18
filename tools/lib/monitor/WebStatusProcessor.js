@@ -80,6 +80,16 @@
 //                                                        <n>[smhd] sets how long accumulated changes persist
 //                                                        unseen before auto-clearing (default 24h, bare n=h) —
 //                                                        so an unattended kiosk doesn't stay red forever.
+//   settingsLog             off | on | <rows>           Scrolling settings-change LOG panel instead of the red
+//                                                        ⚙ alert — for read-only kiosks where you can't open the
+//                                                        settings panel to clear it. Appears on the first change
+//                                                        (or immediately if the server already cached recent
+//                                                        ones) as a fixed <rows>-tall box that fills up over
+//                                                        time, newest at the top: "hh:mm:ss  Setting  old → new".
+//                                                        'on' uses the default height; <rows> sets it (e.g.
+//                                                        settingsLog=6). Turning it on suppresses the red ⚙
+//                                                        flash. Global settings only; pre-populated from the
+//                                                        server's rolling cache.
 //
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&follow=on
@@ -128,6 +138,7 @@ const POLL_MS = 2500; // browser -> server poll interval (local, cheap)
 const SUMMARY_STALE_MS = 120 * 1000; // /api/summary 'online' flag flips false once the freshest update is older than this
 const NOTIF_POLL_MS_UNDOCKED = 60 * 1000; // notifications poll interval when robot is active
 const NOTIF_POLL_MS_DOCKED = 5 * 60 * 1000; // notifications poll interval when robot is parked
+const SETTINGS_LOG_CACHE_MAX = 50; // rolling server cache of recent global-settings changes surfaced by the ?settingsLog kiosk panel
 const SCHEDULE_TIMEZONE_DEFAULT = 'Europe/Stockholm'; // garden tz fallback if not configured
 const PERSIST_DEFAULT_DIR = '/dev/shm';
 const PERSIST_INTERVAL_MS = 60 * 1000; // flush cached crumbs to disk every minute when persistence is enabled
@@ -552,6 +563,10 @@ class WebStatusProcessor {
                 updatedPosition: undefined,
                 updatedSchedule: undefined,
             },
+            // Rolling cache of recent global-settings changes: [{ t: ISO, key, from, to }], oldest first,
+            // capped at SETTINGS_LOG_CACHE_MAX. Rides /api/state and INITIAL_STATE like the rest of the model,
+            // so the client's ?settingsLog panel gets pre-populated history for free (see _recordSettingsChanges).
+            settingsLog: [],
         };
     }
 
@@ -863,9 +878,32 @@ class WebStatusProcessor {
     _handleRobotSettings(decoded) {
         const settings = elements.decodeRobotSettings(decoded);
         if (settings) {
+            this._recordSettingsChanges(this.state.robot.settings, settings);
             this.state.robot.settings = settings;
             this.state.robot.updatedSettings = new Date().toISOString();
         }
+    }
+
+    // Diff a fresh LOG/SETTINGS snapshot against the previous one and append each changed scalar to the
+    // settingsLog cache (raw values — the client humanizes/formats them exactly as the settings panel does).
+    // Only scalar keys are compared (decodeRobotSettings' helper methods are functions; id/name/unknown are
+    // plumbing), matching what the settings panel actually shows. The first snapshot seeds the baseline and
+    // logs nothing. Not self-healing — a value that flips back still records, so every change is surfaced.
+    _recordSettingsChanges(prev, next) {
+        if (!prev || !next) return;
+        const skip = { id: true, name: true, unknown: true };
+        const t = new Date().toISOString();
+        for (const key of Object.keys(next)) {
+            if (skip[key]) continue;
+            const to = next[key];
+            if (to !== null && (typeof to === 'object' || typeof to === 'function')) continue;
+            const from = prev[key];
+            if (JSON.stringify(from) === JSON.stringify(to)) continue;
+            // from is omitted from the JSON when the key is newly present (undefined); the client renders that as '-'
+            this.state.settingsLog.push({ t, key, from, to });
+        }
+        const overflow = this.state.settingsLog.length - SETTINGS_LOG_CACHE_MAX;
+        if (overflow > 0) this.state.settingsLog.splice(0, overflow); // drop oldest, keep the newest window
     }
 
     _handleBaseMessage(topic, decoded) {
@@ -1491,6 +1529,7 @@ class WebStatusProcessor {
 <div id="cmdbox" class="pos-st pos-no"></div>
 <div id="notifbox" class="pos-st empty"></div>
 <div id="settingsbox" class="pos-st empty"></div>
+<div id="settingslogbox" class="pos-st empty"></div>
 <div id="zonepanel"></div>
 <div id="schedpanel"></div>
 <div id="diagoverlay"><div class="diagwin"><div class="diaghdr"><span class="diagtitle"></span><span class="diagtools"><span class="diagcopy" title="copy" onclick="copyDiagnosticOutput()">⧉ copy</span><span class="diagclose" title="close" onclick="closeDiagnosticOverlay()">×</span></span></div><pre class="diagpre"></pre></div></div>
@@ -1615,6 +1654,21 @@ html,body{margin:0;height:100%}
 #settingsbox td.sv{text-align:right;font-weight:600}
 #settingsbox .cloudtag{color:#1a73e8;font-size:11px;margin-left:4px}
 #settingsbox .schg{color:#ea4335;font-size:18px;line-height:0;margin-right:3px;vertical-align:middle}
+/* Scrolling settings-change log panel (?settingsLog; stacked below the others). Fixed <rows>-tall so it
+   opens at full height and fills over time; newest at the top, oldest drops off the bottom. */
+#settingslogbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
+  border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
+  font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:340px;color:#202124}
+#settingslogbox.empty{display:none}
+#settingslogbox h2{font-size:10px;margin:0 0 6px;color:#80868b;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+#settingslogbox .slog{overflow:hidden}
+/* Order: time · "Label:" · NEW (bold) · (OLD). The old value is last and shrinkable, so an over-wide row
+   clips it first — the label + new value we care about stay legible. */
+#settingslogbox .slrow{display:flex;gap:6px;align-items:baseline;line-height:18px;white-space:nowrap;overflow:hidden}
+#settingslogbox .slt{color:#9aa0a6;font-variant-numeric:tabular-nums;flex:none}
+#settingslogbox .slk{color:#5f6368;flex:none}
+#settingslogbox .slto{font-weight:600;color:#202124;flex:none}
+#settingslogbox .slfrom{color:#9aa0a6;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 #statusbox h1 .linktag{margin-left:auto;font-size:9px;padding:2px 8px;border-radius:10px;
   font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:#fff;background:#9aa0a6}
 #statusbox h1 .linktag.online{background:#34a853}
@@ -1722,6 +1776,21 @@ function parseSettingsAlert(v){
 }
 var settingsAlertCfg = { on: true, expiryMs: SETTINGS_CHANGE_EXPIRY_DEFAULT_MS }; // re-parsed from URL_CONFIG once that's defined
 var settingsPrev = null, settingsChanged = {}, settingsChangeTimer = null;
+// ?settingsLog : off (default) / on / <rows>. A scrolling log of settings changes for read-only kiosks, in
+// place of the red ⚙ alert. 'on' uses the default height; a bare number reserves that many rows (the panel
+// opens at that fixed height and fills over time). Entries come straight from state.settingsLog (server cache).
+var SETTINGS_LOG_ROWS_DEFAULT = 6, SETTINGS_LOG_ROW_PX = 18;
+function parseSettingsLog(v){
+  if(v === undefined || v === null || v === '') return { on: false, rows: SETTINGS_LOG_ROWS_DEFAULT };
+  var s = String(v).toLowerCase();
+  if(s === 'off' || s === '0') return { on: false, rows: SETTINGS_LOG_ROWS_DEFAULT };
+  if(s === 'on') return { on: true, rows: SETTINGS_LOG_ROWS_DEFAULT };
+  var m = /^(\\d+)$/.exec(s);
+  if(m){ var n = parseInt(m[1], 10); return { on: n > 0, rows: n > 0 ? n : SETTINGS_LOG_ROWS_DEFAULT }; }
+  return { on: false, rows: SETTINGS_LOG_ROWS_DEFAULT };
+}
+var settingsLogCfg = { on: false, rows: SETTINGS_LOG_ROWS_DEFAULT }; // re-parsed from URL_CONFIG once it's defined
+var settingsLogClosed = false, settingsLogLastT = ''; // × hides the panel; a newer cached change (newest timestamp moves) reopens it
 function notifByUuid(uuid){ for(var i = 0; i < notifications.length; i++) if(notifications[i].uuid === uuid) return notifications[i]; return null; }
 function clearProposalCircles(){
   if(proposalFlash){ clearInterval(proposalFlash); proposalFlash = null; }
@@ -1852,10 +1921,13 @@ var URL_CONFIG = (function(){
     commands: p.get('commands'),
     diagnostics: p.get('diagnostics'),
     experimental: p.get('experimental'),
-    settingsAlert: p.get('settingsAlert')
+    settingsAlert: p.get('settingsAlert'),
+    settingsLog: p.get('settingsLog')
   };
 })();
 settingsAlertCfg = parseSettingsAlert(URL_CONFIG.settingsAlert); // now URL_CONFIG is defined; re-parse from it
+settingsLogCfg = parseSettingsLog(URL_CONFIG.settingsLog);
+if(settingsLogCfg.on) settingsAlertCfg.on = false; // the log panel replaces the red ⚙ alert — never flash it too
 
 // followOffset=x:y -> a manual nudge added to the follow centring. Each term is a percentage of the
 // map dimension (default) or pixels (suffix 'px'); stored split so it can be resolved against the live
@@ -1913,7 +1985,7 @@ function applyOffsetFromCenter(center, latM, lonM){
 
 // The floating overlay panels that occlude the map. Each is anchored to a corner (or stacked under
 // the status box), so the truly visible area is the map rectangle minus whatever these cover.
-var OVERLAY_BOX_IDS = ['statusbox', 'cmdbox', 'notifbox', 'settingsbox', 'zonepanel', 'schedpanel'];
+var OVERLAY_BOX_IDS = ['statusbox', 'cmdbox', 'notifbox', 'settingsbox', 'settingslogbox', 'zonepanel', 'schedpanel'];
 function visibleOverlayRects(){
   var rects = [];
   for(var i = 0; i < OVERLAY_BOX_IDS.length; i++){
@@ -2294,7 +2366,7 @@ function applyStackedNotifyPosition(){
   var topRef = sb;
   var leftPx = sbRect.left;
   var widthPx = sbRect.width;
-  ['cmdbox', 'notifbox', 'settingsbox'].forEach(function(id){
+  ['cmdbox', 'notifbox', 'settingsbox', 'settingslogbox'].forEach(function(id){
     var el = document.getElementById(id);
     if(!el || !el.classList.contains('pos-st')) return;
     // hidden boxes (display:none) report 0-size rect and don't push the chain forward
@@ -2308,7 +2380,7 @@ function applyStackedNotifyPosition(){
   });
 }
 if(window.ResizeObserver){
-  ['statusbox', 'cmdbox', 'notifbox', 'settingsbox'].forEach(function(id){
+  ['statusbox', 'cmdbox', 'notifbox', 'settingsbox', 'settingslogbox'].forEach(function(id){
     var el = document.getElementById(id);
     if(el) new window.ResizeObserver(applyStackedNotifyPosition).observe(el);
   });
@@ -2321,6 +2393,7 @@ window.addEventListener('resize', applyStackedNotifyPosition);
 // already had state to share.
 if(state) { renderStatusBox(); renderCommandBox(); }
 if(notifications.length > 0) renderNotifBox();
+renderSettingsLogBox();
 
 var COVERAGE = ['GOOD','POOR','BAD','WORSE'];
 var ZONE_COLORS = ['#fbbc04','#34a853','#4285f4','#a142f4','#ff6d01'];
@@ -2679,6 +2752,7 @@ function refresh(){
       renderStatusBox();
       renderCommandBox();
       renderSettingsBox();
+      renderSettingsLogBox();
       highlightActiveZone();
       if(hovered) infoWindow.setContent(hovered === 'base' ? baseInfo() : robotInfo());
     })
@@ -3498,6 +3572,48 @@ function renderSettingsBox(){
       el.addEventListener('click', function(){ var z = el.getAttribute('data-z'); settingsZone = (z === '*' ? '*' : parseInt(z, 10)); renderSettingsBox(); });
     })(chipsEls[k]);
   }
+  applyStackedNotifyPosition();
+}
+
+// ---- Scrolling settings-change log panel (?settingsLog) ----
+// Renders state.settingsLog (the server's rolling cache of global-settings changes) as a fixed-height,
+// newest-first feed — the read-only-kiosk alternative to the red ⚙ alert. The box appears once there's at
+// least one change to show (or immediately if the server already had recent ones cached), sized to
+// settingsLogCfg.rows so it opens at full height and fills over time. × hides it; the next fresh change
+// (the cache grew) brings it back, so a wall display isn't left permanently blank.
+function slClock(iso){
+  var d = new Date(iso);
+  if(isNaN(d.getTime())) return '';
+  function p(n){ return (n < 10 ? '0' : '') + n; }
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function renderSettingsLogBox(){
+  var box = document.getElementById('settingslogbox');
+  if(!box) return;
+  var log = (state && state.settingsLog) || [];
+  var newestT = log.length ? log[log.length - 1].t : ''; // robust to the server ring buffer capping length
+  if(newestT !== settingsLogLastT){ settingsLogClosed = false; settingsLogLastT = newestT; } // a fresh change reopens a hidden panel
+  if(!settingsLogCfg.on || settingsLogClosed || log.length === 0){
+    box.classList.add('empty'); box.innerHTML = ''; applyStackedNotifyPosition(); return;
+  }
+  box.classList.remove('empty');
+  var rows = settingsLogCfg.rows;
+  var recent = log.slice(Math.max(0, log.length - rows)).reverse(); // newest first, capped to the reserved rows
+  var lines = '';
+  for(var i = 0; i < recent.length; i++){
+    var e = recent[i];
+    lines += '<div class="slrow">' +
+      '<span class="slt">' + esc(slClock(e.t)) + '</span>' +
+      '<span class="slk">' + esc(humanizeKey(e.key)) + '</span>' +
+      '<span class="slfrom">' + esc(fmtSettingValue(e.key, e.from)) + '</span>' +
+      '<span class="slarr">&rarr;</span>' +
+      '<span class="slto">' + esc(fmtSettingValue(e.key, e.to)) + '</span>' +
+    '</div>';
+  }
+  box.innerHTML = '<h2><span class="boxclose" title="hide (returns when a setting next changes)">&times;</span>Settings changes</h2>' +
+    '<div class="slog" style="height:' + (rows * SETTINGS_LOG_ROW_PX) + 'px">' + lines + '</div>';
+  var close = box.querySelector('.boxclose');
+  if(close) close.addEventListener('click', function(){ settingsLogClosed = true; renderSettingsLogBox(); });
   applyStackedNotifyPosition();
 }
 
