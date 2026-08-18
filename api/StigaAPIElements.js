@@ -846,9 +846,10 @@ function getCuttingModeLabels() {
 }
 function getLongExitDistancesMap() {
     // index -> cm. The ladder is value = 50*(idx-1); idx 1 is the factory default 200 (out of sequence),
-    // and 200 reappears in-sequence at idx 5. CONFIRMED 2026-08-18 by app sweep: 50=2, 100=3, 150=4,
-    // 200=1(default), 250=6 (the old map had 5=250/6=300/7=350 — one notch high from 250 up, and missing
-    // idx 8). 300=7 / 350=8 follow the same linear ladder (pending a final positive app-set confirmation).
+    // and 200 reappears in-sequence at idx 5 (idx 5 is decode-only — the app sends 200 as idx 1, never 5).
+    // Every app value CONFIRMED 2026-08-18 by sweeping each option and reading the robot's [8][1]:
+    // 50=2, 100=3, 150=4, 200=1, 250=6, 300=7, 350=8. (The old map had 5:250/6:300/7:350 and no idx 8 —
+    // one notch high from 250 up, so the app's 250 decoded as 300.)
     return { 1: 200, 2: 50, 3: 100, 4: 150, 5: 200, 6: 250, 7: 300, 8: 350 };
 }
 
