@@ -845,7 +845,11 @@ function getCuttingModeLabels() {
     return { denseGrid: 'dense-grid', chessBoard: 'chessboard', northSouth: 'north-south', eastWest: 'east-west' };
 }
 function getLongExitDistancesMap() {
-    return { 1: 200, 2: 50, 3: 100, 4: 150, 5: 250, 6: 300, 7: 350 };
+    // index -> cm. The ladder is value = 50*(idx-1); idx 1 is the factory default 200 (out of sequence),
+    // and 200 reappears in-sequence at idx 5. CONFIRMED 2026-08-18 by app sweep: 50=2, 100=3, 150=4,
+    // 200=1(default), 250=6 (the old map had 5=250/6=300/7=350 — one notch high from 250 up, and missing
+    // idx 8). 300=7 / 350=8 follow the same linear ladder (pending a final positive app-set confirmation).
+    return { 1: 200, 2: 50, 3: 100, 4: 150, 5: 200, 6: 250, 7: 300, 8: 350 };
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -958,7 +962,7 @@ function formatRobotSettings(settings) {
 function upgradeRobotSettings(settings) {
     settings.getRainSensorDelays = () => Object.keys(getRainDelaysMap());
     settings.getCuttingHeights = () => Object.keys(getCuttingHeightsMap());
-    settings.getLongExitDistances = () => Object.values(getLongExitDistancesMap()).sort((a, b) => a - b);
+    settings.getLongExitDistances = () => [...new Set(Object.values(getLongExitDistancesMap()))].sort((a, b) => a - b); // dedupe: 200 is both idx 1 and idx 5
     settings.toString = () => formatRobotSettings(settings);
     return settings;
 }
