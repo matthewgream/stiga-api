@@ -91,6 +91,13 @@
 //                                                        flash. Global settings only; pre-populated from the
 //                                                        server's rolling cache.
 //
+// Unattended display
+//   kiosk                   on | off                     Wall-display mode: strips the interaction affordances a
+//                                                        viewer can't action — the panel × closes, the per-
+//                                                        notification × dismiss, and the Google Maps "Keyboard
+//                                                        shortcuts" footer button. Refresh/toggle buttons stay,
+//                                                        for layout parity with the interactive view.
+//
 // Example kiosk URL:
 //   /?boxNotify=no&mapPosition=59.6624,12.9952,19&mapControls=off&tracks=on&tracksClr=3,p20k&follow=on
 //
@@ -1620,6 +1627,9 @@ html,body{margin:0;height:100%}
 /* box-level close × shared by the notif + settings boxes (hides the whole box) */
 .boxclose{cursor:pointer;color:#9aa0a6;font-weight:700;margin-right:7px;user-select:none;font-size:13px;line-height:1}
 .boxclose:hover{color:#ea4335}
+/* ?kiosk=on: drop the interaction marks a wall-display viewer can't action — panel × closes and the
+   per-notification × dismiss. Refresh/toggle controls are left in place for layout parity. */
+body.kiosk .boxclose, body.kiosk .ndismiss{display:none}
 #notifbox{position:absolute;z-index:5;background:rgba(255,255,255,.96);
   border-radius:8px;padding:8px 12px;box-shadow:0 2px 10px rgba(0,0,0,.35);
   font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;max-width:560px;color:#202124}
@@ -1905,6 +1915,8 @@ if(typeof INITIAL_NOTIFICATIONS !== 'undefined' && Array.isArray(INITIAL_NOTIFIC
 //   statusTracksControls   on|off           (default on)
 //   commands               on|off           (active control panel: Start/Stop/Home; default off)
 //   diagnostics            on|off           (🔧 row: run whitelisted stiga-analyse.js reports server-side into a console overlay; auth-gated like commands, single-slot; default off)
+//   settingsLog            off|on|<rows>    (scrolling settings-change log panel in place of the red ⚙ alert; <rows> sets its height; default off)
+//   kiosk                  on|off           (unattended wall-display: hide panel/notification × marks + the Maps "Keyboard shortcuts" button; default off)
 var URL_CONFIG = (function(){
   var p = new URLSearchParams(window.location.search);
   return {
@@ -1922,12 +1934,19 @@ var URL_CONFIG = (function(){
     diagnostics: p.get('diagnostics'),
     experimental: p.get('experimental'),
     settingsAlert: p.get('settingsAlert'),
-    settingsLog: p.get('settingsLog')
+    settingsLog: p.get('settingsLog'),
+    kiosk: p.get('kiosk')
   };
 })();
 settingsAlertCfg = parseSettingsAlert(URL_CONFIG.settingsAlert); // now URL_CONFIG is defined; re-parse from it
 settingsLogCfg = parseSettingsLog(URL_CONFIG.settingsLog);
 if(settingsLogCfg.on) settingsAlertCfg.on = false; // the log panel replaces the red ⚙ alert — never flash it too
+// ?kiosk=on : unattended wall-display mode. Strips the interaction affordances a viewer can't use — the panel
+// × closes and the per-notification × dismiss (via a body class + CSS), and the Google Maps "Keyboard
+// shortcuts" button (mapOpts.keyboardShortcuts=false). Refresh/toggle buttons stay, for layout parity with
+// the interactive view.
+var KIOSK_MODE = URL_CONFIG.kiosk === 'on' || URL_CONFIG.kiosk === '1';
+if(KIOSK_MODE && document.body) document.body.classList.add('kiosk');
 
 // followOffset=x:y -> a manual nudge added to the follow centring. Each term is a percentage of the
 // map dimension (default) or pixels (suffix 'px'); stored split so it can be resolved against the live
@@ -2456,6 +2475,7 @@ function initMap(){
     mapId: 'robot_position_map', gestureHandling: 'greedy', streetViewControl: false
   };
   if(URL_CONFIG.mapControls === 'off') mapOpts.disableDefaultUI = true;
+  if(KIOSK_MODE) mapOpts.keyboardShortcuts = false; // removes the Maps "Keyboard shortcuts" footer button (irrelevant on an unattended display)
   map = new google.maps.Map(document.getElementById('map'), mapOpts);
   if(locked){ userMoved = true; didFit = true; } // suppress auto-fit when caller fixed the view
   infoWindow = new google.maps.InfoWindow();
@@ -3587,6 +3607,11 @@ function slClock(iso){
   function p(n){ return (n < 10 ? '0' : '') + n; }
   return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
+// Is the settings-log panel currently showing? Drives the ⚙ button's green cue (renderStatusBox).
+function settingsLogVisible(){
+  if(!settingsLogCfg.on || settingsLogClosed) return false;
+  return ((state && state.settingsLog) || []).length > 0;
+}
 function renderSettingsLogBox(){
   var box = document.getElementById('settingslogbox');
   if(!box) return;
@@ -3613,7 +3638,7 @@ function renderSettingsLogBox(){
   box.innerHTML = '<h2><span class="boxclose" title="hide (returns when a setting next changes)">&times;</span>Settings changes</h2>' +
     '<div class="slog" style="height:' + (rows * SETTINGS_LOG_ROW_PX) + 'px">' + lines + '</div>';
   var close = box.querySelector('.boxclose');
-  if(close) close.addEventListener('click', function(){ settingsLogClosed = true; renderSettingsLogBox(); });
+  if(close) close.addEventListener('click', function(){ settingsLogClosed = true; renderSettingsLogBox(); renderStatusBox(); });
   applyStackedNotifyPosition();
 }
 
@@ -3670,7 +3695,7 @@ function renderStatusBox(){
     var alarmTitle = alarmAlert ? 'error or geofence violation detected — click to highlight tracks and reveal the alarm log on hover' : 'highlight error tracks and reveal deduped alarm log on hover';
     var alarmBtn = '<span class="btn' + (alarmsHighlighted ? ' on' : '') + (alarmAlert ? ' alert' : '') + '" onclick="toggleAlarmsHighlight()" title="' + alarmTitle + '">!</span>';
     var notifBtn = '<span class="btn' + (notifBoxClosed ? '' : ' on') + '" onclick="toggleNotifBox()" title="show/hide the notifications box">#</span>';
-    var settingsBtn = '<span class="btn' + (settingsOpen ? ' on' : (settingsHasChanges() ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
+    var settingsBtn = '<span class="btn' + ((settingsOpen || settingsLogVisible()) ? ' on' : (settingsHasChanges() ? ' dirty' : '')) + '" onclick="toggleSettings()" title="zone &amp; global settings (read-only)">⚙</span>';
     // tracks cluster — bundled tight in one segmented box (power=record, eye=show/hide, ✕=clear, #N=run filter)
     var powerBtn = '<span class="btn' + (tracksOn ? ' on' : '') + '" onclick="toggleTracks()" title="trail recording on/off">⏻</span>';
     var visBtn = '<span class="btn' + (tracksVisible ? ' on' : '') + '" onclick="toggleTracksVisible()" title="show/hide the trail (recording continues)">◉</span>';
